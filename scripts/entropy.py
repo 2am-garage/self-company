@@ -27,6 +27,13 @@ from pathlib import Path
 from collections import defaultdict
 from difflib import SequenceMatcher
 
+# Shared policy loader — single source of truth for tunable constants
+# (reads org/policy.md §7). Best-effort import; falls back to built-in defaults.
+try:
+    from policy_config import load_policy_constants as _shared_load_policy
+except Exception:  # pragma: no cover - defensive
+    _shared_load_policy = None
+
 # ============================================================================
 # Constants (tunable, defaults == manifest §1)
 # ============================================================================
@@ -439,46 +446,20 @@ def compute_unverified_rate(memories):
 
 def load_policy_constants(policy_path):
     """
-    Attempt to extract tunable constants from policy.md.
-    Returns dict with extracted values; missing → None (use defaults).
+    Extract tunable constants from policy.md via the shared policy_config loader,
+    remapped to entropy's internal weight keys (w1->W1_DUP, ...).
+
+    Returns a dict with only the constants found; missing file / constant ->
+    omitted (caller keeps its default). Never raises.
     """
-    if not Path(policy_path).exists():
+    if _shared_load_policy is None:
         return {}
-
-    try:
-        with open(policy_path, 'r', encoding='utf-8') as f:
-            text = f.read()
-
-        config = {}
-
-        # Extract numbers with various patterns
-        patterns = {
-            'HL_BASE': r'HL_BASE\s*=\s*([0-9.]+)',
-            'HL_GROWTH': r'HL_GROWTH\s*=\s*([0-9.]+)',
-            'L0_DROP_THRESHOLD': r'L0_DROP_THRESHOLD\s*=\s*([0-9.]+)',
-            'L1_ARCHIVE_THRESHOLD': r'L1_ARCHIVE_THRESHOLD\s*=\s*([0-9.]+)',
-            'L1_DEMOTE_RC': r'L1_DEMOTE_RC\s*=\s*(\d+)',
-            'L0_TO_L1_RC': r'L0_TO_L1_RC\s*=\s*(\d+)',
-            'L1_TO_L2_RC': r'L1_TO_L2_RC\s*=\s*(\d+)',
-            'W1_DUP': r'w1\s*[=:].*?([0-9.]+)',
-            'W2_CONTRA': r'w2\s*[=:].*?([0-9.]+)',
-            'W3_STALE': r'w3\s*[=:].*?([0-9.]+)',
-            'W4_UNVERIFIED': r'w4\s*[=:].*?([0-9.]+)',
-            'DUP_JACCARD': r'DUP_JACCARD\s*[=:]?\s*([0-9.]+)',
-        }
-
-        for key, pattern in patterns.items():
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                try:
-                    config[key] = float(match.group(1))
-                except ValueError:
-                    pass
-
-        return config
-    except Exception as e:
-        print(f"Warning: Failed to load policy {policy_path}: {e}", file=sys.stderr)
-        return {}
+    raw = _shared_load_policy(policy_path)
+    keymap = {
+        'w1': 'W1_DUP', 'w2': 'W2_CONTRA',
+        'w3': 'W3_STALE', 'w4': 'W4_UNVERIFIED',
+    }
+    return {keymap.get(k, k): v for k, v in raw.items()}
 
 # ============================================================================
 # Main
@@ -553,6 +534,17 @@ def main():
     if 'DUP_JACCARD' in policy_config:
         DUP_JACCARD = policy_config['DUP_JACCARD']
 
+    # P3: provenance — which constants came from policy vs built-in defaults.
+    consumed = ['HL_BASE', 'HL_GROWTH', 'L0_DROP_THRESHOLD', 'L1_ARCHIVE_THRESHOLD',
+                'L1_DEMOTE_RC', 'L0_TO_L1_RC', 'L1_TO_L2_RC',
+                'W1_DUP', 'W2_CONTRA', 'W3_STALE', 'W4_UNVERIFIED', 'DUP_JACCARD']
+    config_sources = {k: ('policy' if k in policy_config else 'default') for k in consumed}
+    config_exists = Path(args.config).exists() if args.config else False
+    fell_back = sorted(k for k, s in config_sources.items() if s == 'default')
+    if config_exists and fell_back:
+        print(f"[WARN] {args.config}: using built-in defaults for "
+              f"{', '.join(fell_back)} (not declared in policy)", file=sys.stderr)
+
     # Load memories
     memories = load_memories(args.memory_dir, include_archived=args.include_archived)
 
@@ -594,6 +586,10 @@ def main():
             'contradiction_pairs': contra_pairs,
             'stale_ids': stale_ids,
             'unverified_ids': unverified_ids,
+        },
+        'config': {
+            'source_file': args.config if config_exists else None,
+            'sources': config_sources,
         }
     }
 

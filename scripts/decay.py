@@ -15,10 +15,18 @@ Output: JSON summary with scanned count, actions taken, and warnings.
 import argparse
 import json
 import os
-import re
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
+
+# Shared policy loader — single source of truth for tunable constants
+# (reads org/policy.md §7). Best-effort import: if the module is somehow
+# missing, fall back to built-in defaults rather than crashing the batch.
+try:
+    from policy_config import resolve as _resolve_config
+except Exception:  # pragma: no cover - defensive
+    _resolve_config = None
 
 
 # ============================================================================
@@ -485,8 +493,10 @@ def main():
     )
     parser.add_argument(
         "--config",
-        help="Path to policy.md to read tunable constants. "
-             "If not found or not specified, use built-in defaults."
+        default=".company/org/policy.md",
+        help="Path to policy.md to read tunable constants (default: "
+             ".company/org/policy.md). If the file is absent or a constant is "
+             "not declared, built-in defaults are used."
     )
 
     args = parser.parse_args()
@@ -500,74 +510,38 @@ def main():
     else:
         now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Load config (optional; use defaults if not found)
-    hl_base = DEFAULT_HL_BASE
-    hl_growth = DEFAULT_HL_GROWTH
-    l0_drop_threshold = DEFAULT_L0_DROP_THRESHOLD
-    l1_archive_threshold = DEFAULT_L1_ARCHIVE_THRESHOLD
-    l1_demote_rc = DEFAULT_L1_DEMOTE_RC
-    l0_to_l1_rc = DEFAULT_L0_TO_L1_RC
-    l1_to_l2_rc = DEFAULT_L1_TO_L2_RC
+    # Resolve tunable constants: policy.md §7 overrides built-in defaults.
+    defaults = {
+        "HL_BASE": DEFAULT_HL_BASE,
+        "HL_GROWTH": DEFAULT_HL_GROWTH,
+        "L0_DROP_THRESHOLD": DEFAULT_L0_DROP_THRESHOLD,
+        "L1_ARCHIVE_THRESHOLD": DEFAULT_L1_ARCHIVE_THRESHOLD,
+        "L1_DEMOTE_RC": DEFAULT_L1_DEMOTE_RC,
+        "L0_TO_L1_RC": DEFAULT_L0_TO_L1_RC,
+        "L1_TO_L2_RC": DEFAULT_L1_TO_L2_RC,
+    }
+    if _resolve_config is not None:
+        values, sources = _resolve_config(defaults, args.config)
+    else:
+        values = dict(defaults)
+        sources = {k: "default" for k in defaults}
 
-    if args.config:
-        config_path = Path(args.config)
-        if config_path.exists():
-            try:
-                config_text = config_path.read_text(encoding='utf-8')
-                # Simple parsing: look for lines like "HL_BASE = 7.0" or "HL_BASE: 7.0"
-                for line in config_text.split('\n'):
-                    if 'HL_BASE' in line and ('=' in line or ':' in line):
-                        try:
-                            val = re.search(r'[\d.]+', line)
-                            if val:
-                                hl_base = float(val.group())
-                        except:
-                            pass
-                    elif 'HL_GROWTH' in line and ('=' in line or ':' in line):
-                        try:
-                            val = re.search(r'[\d.]+', line)
-                            if val:
-                                hl_growth = float(val.group())
-                        except:
-                            pass
-                    elif 'L0_DROP_THRESHOLD' in line and ('=' in line or ':' in line):
-                        try:
-                            val = re.search(r'[\d.]+', line)
-                            if val:
-                                l0_drop_threshold = float(val.group())
-                        except:
-                            pass
-                    elif 'L1_ARCHIVE_THRESHOLD' in line and ('=' in line or ':' in line):
-                        try:
-                            val = re.search(r'[\d.]+', line)
-                            if val:
-                                l1_archive_threshold = float(val.group())
-                        except:
-                            pass
-                    elif 'L1_DEMOTE_RC' in line and ('=' in line or ':' in line):
-                        try:
-                            val = re.search(r'\d+', line)
-                            if val:
-                                l1_demote_rc = int(val.group())
-                        except:
-                            pass
-                    elif 'L0_TO_L1_RC' in line and ('=' in line or ':' in line):
-                        try:
-                            val = re.search(r'\d+', line)
-                            if val:
-                                l0_to_l1_rc = int(val.group())
-                        except:
-                            pass
-                    elif 'L1_TO_L2_RC' in line and ('=' in line or ':' in line):
-                        try:
-                            val = re.search(r'\d+', line)
-                            if val:
-                                l1_to_l2_rc = int(val.group())
-                        except:
-                            pass
-            except Exception as e:
-                print(f"[WARN] Failed to parse config {args.config}: {e}",
-                      file=__import__('sys').stderr)
+    hl_base = values["HL_BASE"]
+    hl_growth = values["HL_GROWTH"]
+    l0_drop_threshold = values["L0_DROP_THRESHOLD"]
+    l1_archive_threshold = values["L1_ARCHIVE_THRESHOLD"]
+    l1_demote_rc = values["L1_DEMOTE_RC"]
+    l0_to_l1_rc = values["L0_TO_L1_RC"]
+    l1_to_l2_rc = values["L1_TO_L2_RC"]
+
+    # P3: if a policy file was given and exists but some constant fell back to a
+    # default, say so on stderr so tuning is observable instead of silent.
+    config_exists = bool(args.config) and Path(args.config).exists()
+    fell_back = sorted(k for k, s in sources.items() if s == "default")
+    if config_exists and fell_back:
+        print(f"[WARN] {args.config}: using built-in defaults for "
+              f"{', '.join(fell_back)} (not declared in policy)",
+              file=sys.stderr)
 
     # Scan and report
     memory_dir = Path(args.memory_dir)
@@ -581,6 +555,13 @@ def main():
         l1_to_l2_rc,
         apply=args.apply
     )
+
+    # P3: surface effective constants and their provenance (policy vs default).
+    report["config"] = {
+        "source_file": args.config if config_exists else None,
+        "values": values,
+        "sources": sources,
+    }
 
     # Output JSON
     print(json.dumps(report, indent=2, ensure_ascii=False))
