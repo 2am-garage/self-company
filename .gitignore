@@ -1,0 +1,11 @@
+
+# self-company private memory — never commit (Chairman privacy)
+.company/
+
+# Python
+__pycache__/
+*.pyc
+
+# Build scratch
+.*-manifest*.md
+.translation-glossary.md
