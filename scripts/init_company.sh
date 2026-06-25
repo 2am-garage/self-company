@@ -89,12 +89,18 @@ main() {
     exit 1
   fi
 
-  # Check if company directory already exists
+  # Check if company directory already exists AND holds anything. A non-empty
+  # .company/ is a real install — never clobber it. An empty .company/ (e.g. a
+  # stale placeholder directory) is safe to initialize in place.
   if [[ -d "${TARGET_DIR}" ]]; then
-    log_warn "Directory '${TARGET_DIR}' already exists."
-    log_warn "Skipping initialization to avoid overwriting existing configuration."
-    log_warn "Remove '${TARGET_DIR}' manually if you want to reinitialize."
-    exit 0
+    if [[ -n "$(ls -A "${TARGET_DIR}" 2>/dev/null)" ]]; then
+      log_warn "Directory '${TARGET_DIR}' already exists and is not empty."
+      log_warn "Skipping initialization to avoid overwriting existing configuration."
+      log_warn "Remove '${TARGET_DIR}' manually if you want to reinitialize."
+      exit 0
+    fi
+    log_info "Found an empty '${TARGET_DIR}' — initializing in place."
+    rmdir "${TARGET_DIR}"
   fi
 
   log_info "Initializing self-company in: $(pwd)"
@@ -114,12 +120,13 @@ main() {
   # and `.company/scripts/rag_query.py` — they must actually exist there after install.
   mkdir -p "${TARGET_DIR}/scripts"
 
-  # Copy core maintenance scripts (decay, entropy); fail if missing.
-  if cp "${SCRIPT_DIR}/decay.py" "${SCRIPT_DIR}/entropy.py" "${TARGET_DIR}/scripts/"; then
+  # Copy core maintenance scripts (decay, entropy) plus the shared policy_config
+  # module they import for reading tunable constants from policy.md; fail if missing.
+  if cp "${SCRIPT_DIR}/decay.py" "${SCRIPT_DIR}/entropy.py" "${SCRIPT_DIR}/policy_config.py" "${TARGET_DIR}/scripts/"; then
     chmod +x "${TARGET_DIR}/scripts/decay.py" "${TARGET_DIR}/scripts/entropy.py" 2>/dev/null || true
-    log_success "Copied decay.py / entropy.py into ${TARGET_DIR}/scripts/"
+    log_success "Copied decay.py / entropy.py / policy_config.py into ${TARGET_DIR}/scripts/"
   else
-    log_error "Failed to copy decay.py / entropy.py into ${TARGET_DIR}/scripts/"
+    log_error "Failed to copy decay.py / entropy.py / policy_config.py into ${TARGET_DIR}/scripts/"
     exit 1
   fi
 
