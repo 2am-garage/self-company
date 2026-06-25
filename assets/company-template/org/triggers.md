@@ -59,6 +59,8 @@ Real-time CAPTURE (Haiku) tokens **count toward the daily ceiling** (no separate
    ```
 2. `capture-trigger.py` invokes Haiku's CAPTURE process (read current session transcript → convert to L0 draft).
 
+> **Status: not yet authored.** `capture-trigger.py` does not ship in `scripts/`; Tom writes it as part of enabling real-time CAPTURE (requires Chairman approval). Until then this command is a template, not runnable.
+
 **When to Enable**: Chairman must explicitly approve before Tom writes to `.claude/settings.json`. Automation is **not pre-installed by default**.
 
 **Note**: If the Chairman does not enable real-time CAPTURE yet, it can still be triggered manually (using conversation prefix `(cross-dept)` to name or Phoebe manually initiating).
@@ -105,6 +107,7 @@ Update `ops/logs/daily-<date>.md` record of this round's changes:
 1. **Option A (Recommended): Use `/schedule` skill**
    - Syntax: `/schedule "0 2 * * *" --name "daily-consolidate-decay" --command "cd /home/uwe/2am-garage && python3 .company/scripts/decay.py --apply && python3 .company/scripts/daily-organize.py"`
    - Cron expression `0 2 * * *` = every day at 02:00 (local time).
+   - **Note:** `decay.py` ships and runs today; `daily-organize.py` is **not yet authored** (Tom writes it on activation). Until then the first half of the command (`decay.py --apply`) is runnable on its own.
 
 2. **Option B: Use `CronCreate` tool**
    - Directly call CronCreate to set up cron job; command same as above.
@@ -236,6 +239,7 @@ Tom report: expected token usage, scheduled runs, risks to watch
 1. **Scheduling trigger** (same as daily proposal)
    - Cron expression `0 2 * * 1` = every Monday at 02:00 (local time).
    - Command: `cd /home/uwe/2am-garage && python3 scripts/weekly-consolidate.py --verify --entropy`.
+   - **Note:** `weekly-consolidate.py` is **not yet authored** (Tom writes it on activation). The pieces it orchestrates — `entropy.py` and `rag_index.py` — ship and run today and can be invoked directly in the meantime.
 
 2. **Parallel coordination mechanism**
    - Five tasks (FULL-VERIFY / ENTROPY-REPORT / PERFORMANCE-REVIEW / INFRA-CHECK / LOG-COMPILE) are largely independent, can run in parallel.
