@@ -71,7 +71,7 @@ Real-time CAPTURE (Haiku) tokens **count toward the daily ceiling** (no separate
 
 ### Timing
 
-Scheduled batch runs at a fixed time each day (default **02:00 local time, off-peak**); time can be adjusted by Chairman.
+Scheduled batch runs **`DAILY_RUNS_PER_DAY` times a day** (default **4×**, every 6 hours: 00:00 / 06:00 / 12:00 / 18:00 local time); count and times adjustable by Chairman via `policy.md §7.7`. The batch is idempotent, so the extra runs simply consolidate newly-captured L0 sooner and re-running on already-disposed memory is a no-op. The §7.6 daily token ceiling is a per-day total shared across these runs (Tom's token breaker enforces the day total, not each run).
 
 ### Who Works
 
@@ -105,8 +105,8 @@ Update `ops/logs/daily-<date>.md` record of this round's changes:
 
 **Implementation**:
 1. **Option A (Recommended): Use `/schedule` skill**
-   - Syntax: `/schedule "0 2 * * *" --name "daily-consolidate-decay" --command "cd /home/uwe/2am-garage && python3 .company/scripts/decay.py --apply && python3 .company/scripts/daily-organize.py"`
-   - Cron expression `0 2 * * *` = every day at 02:00 (local time).
+   - Syntax: `/schedule "0 */6 * * *" --name "daily-consolidate-decay" --command "cd /home/uwe/2am-garage && python3 .company/scripts/decay.py --apply && python3 .company/scripts/daily-organize.py"`
+   - Cron expression `0 */6 * * *` = 4× a day, every 6 hours (00:00 / 06:00 / 12:00 / 18:00 local time), matching `DAILY_RUNS_PER_DAY=4` in `policy.md §7.7`. For a single nightly run instead, use `0 2 * * *`.
    - **Note:** `decay.py` ships and runs today; `daily-organize.py` is **not yet authored** (Tom writes it on activation). Until then the first half of the command (`decay.py --apply`) is runnable on its own.
 
 2. **Option B: Use `CronCreate` tool**
@@ -422,7 +422,7 @@ Manual triggers are not limited by daily / weekly ceiling (Chairman is highest p
 | Trigger Level | Detection | Tool | Chairman Approval Status |
 |---|---|---|---|
 | **Real-Time** | Stop hook (session end) | Claude Code `.claude/settings.json` | **Pending approval**; not pre-installed |
-| **Daily 02:00** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
+| **Daily (4×/6h)** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
 | **Weekly Mon 02:00** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
 | **Manual** | Natural language / prefix | Elon judgment + Phoebe dispatch | On-the-fly decision (Chairman says ok) |
 

@@ -44,6 +44,7 @@ CONSTANT_SPECS = {
     "DUP_JACCARD": float,
     "VERIFY_MAX_RETRY": int,
     "RAG_ENABLE_THRESHOLD": int,
+    "DAILY_RUNS_PER_DAY": int,
 }
 
 # Candidate numeric token. We deliberately capture an optional sign and any

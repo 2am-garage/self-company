@@ -27,6 +27,7 @@ class TestRealPolicy(unittest.TestCase):
         "L1_DEMOTE_RC": 2, "L0_TO_L1_RC": 2, "L1_TO_L2_RC": 4,
         "w1": 0.25, "w2": 0.35, "w3": 0.20, "w4": 0.20,
         "DUP_JACCARD": 0.8, "VERIFY_MAX_RETRY": 2, "RAG_ENABLE_THRESHOLD": 50,
+        "DAILY_RUNS_PER_DAY": 4,
     }
 
     def test_all_constants_parsed_from_shipped_policy(self):
@@ -38,7 +39,7 @@ class TestRealPolicy(unittest.TestCase):
     def test_int_constants_are_ints(self):
         parsed = policy_config.load_policy_constants(REAL_POLICY)
         for k in ("L1_DEMOTE_RC", "L0_TO_L1_RC", "L1_TO_L2_RC",
-                  "VERIFY_MAX_RETRY", "RAG_ENABLE_THRESHOLD"):
+                  "VERIFY_MAX_RETRY", "RAG_ENABLE_THRESHOLD", "DAILY_RUNS_PER_DAY"):
             self.assertIsInstance(parsed[k], int)
 
 
