@@ -46,20 +46,24 @@ Real-time CAPTURE (Haiku) tokens **count toward the daily ceiling** (no separate
 **[Proposal]** Use **Claude Code Stop hook** to automatically trigger CAPTURE and real-time verification when a conversation ends.
 
 **Implementation**:
-1. Tom prepares config template: add to `/home/uwe/2am-garage/.claude/settings.json` or `settings.local.json`:
+1. Tom adds a Stop hook to the repo's `.claude/settings.json` (shared) or `settings.local.json` (private), in the current Claude Code hook format:
    ```json
    {
      "hooks": {
-       "stop": {
-         "command": "cd /home/uwe/2am-garage && python3 .company/scripts/capture-trigger.py",
-         "description": "Trigger memory pipeline CAPTURE stage on session end"
-       }
+       "Stop": [
+         { "hooks": [ { "type": "command",
+           "command": "python3 \"$CLAUDE_PROJECT_DIR/.company/scripts/capture-trigger.py\" --company \"$CLAUDE_PROJECT_DIR/.company\"" } ] }
+       ]
      }
    }
    ```
-2. `capture-trigger.py` invokes Haiku's CAPTURE process (read current session transcript → convert to L0 draft).
+2. `capture-trigger.py` reads the transcript path from the hook's stdin JSON and runs Haiku CAPTURE → L0 drafts. `$CLAUDE_PROJECT_DIR` is provided by Claude Code so the path resolves regardless of cwd.
 
-**When to Enable**: Chairman must explicitly approve before Tom writes to `.claude/settings.json`. Automation is **not pre-installed by default**.
+> **Status: ships and installable.** `capture-trigger.py` is in `scripts/` (copied to `.company/scripts/` by init). It is wired as a Claude Code **Stop hook** to run CAPTURE (Haiku) at session end — it reads the transcript, extracts Chairman observations, and writes L0 drafts with sources. Recursion-guarded (`stop_hook_active` + guard env) and degrades to a clean no-op if anything is missing.
+
+**Install mechanism (ships in the skill):** `bash .company/scripts/install-hook.sh install` merges the Stop hook into the project's `.claude/settings.json` (idempotent, preserves existing settings). `uninstall` / `status` manage it. It writes `settings.json` — NOT `settings.local.json` — because Claude Code's permission auto-writer rewrites `settings.local.json` and would clobber an externally-added hook.
+
+**When to Enable**: Chairman must explicitly approve before Tom installs the hook. Automation is **not pre-installed by default** (opt-in via the command above).
 
 **Note**: If the Chairman does not enable real-time CAPTURE yet, it can still be triggered manually (using conversation prefix `(cross-dept)` to name or Phoebe manually initiating).
 
@@ -69,7 +73,7 @@ Real-time CAPTURE (Haiku) tokens **count toward the daily ceiling** (no separate
 
 ### Timing
 
-Scheduled batch runs at a fixed time each day (default **02:00 local time, off-peak**); time can be adjusted by Chairman.
+Scheduled batch runs **`DAILY_RUNS_PER_DAY` times a day** (default **4×**, every 6 hours: 00:00 / 06:00 / 12:00 / 18:00 local time); count and times adjustable by Chairman via `policy.md §7.7`. The batch is idempotent, so the extra runs simply consolidate newly-captured L0 sooner and re-running on already-disposed memory is a no-op. The §7.6 daily token ceiling is a per-day total shared across these runs (Tom's token breaker enforces the day total, not each run).
 
 ### Who Works
 
@@ -103,20 +107,21 @@ Update `ops/logs/daily-<date>.md` record of this round's changes:
 
 **Implementation**:
 1. **Option A (Recommended): Use `/schedule` skill**
-   - Syntax: `/schedule "0 2 * * *" --name "daily-consolidate-decay" --command "cd /home/uwe/2am-garage && python3 .company/scripts/decay.py --apply && python3 .company/scripts/daily-organize.py"`
-   - Cron expression `0 2 * * *` = every day at 02:00 (local time).
+   - **Ships in the skill (recommended):** `bash .company/scripts/schedule.sh install` installs an OS crontab entry `7 */6 * * *` (4× a day, off-minute) that runs `daily-run.sh`. `schedule.sh uninstall` / `status` manage it; idempotent. Local + unattended — runs whenever the machine is on, memory never leaves the box.
+   - `daily-run.sh` does the deterministic core every run (`decay.py --apply` + `entropy.py`, logged, no tokens) plus an optional bounded headless `claude -p` consolidate/verify pass (hard timeout + recursion-guarded; `--no-agent` skips it).
+   - Cron `7 */6 * * *` ≈ 00:07 / 06:07 / 12:07 / 18:07, matching `DAILY_RUNS_PER_DAY=4` (`policy.md §7.7`). NOTE: `/schedule` and `CronCreate` are **session-bound** (only fire while a Claude REPL is running idle), so they are NOT used for unattended 2am runs — the OS cron above is.
 
 2. **Option B: Use `CronCreate` tool**
    - Directly call CronCreate to set up cron job; command same as above.
 
 3. **Token Breaker (Tom watches)**
-   - `daily-organize.py` check at start: read token ceiling from `policy.md §3.1` (default 20,000), compare against usage accumulation in `.company/ops/logs/daily-<date>.md`.
+   - `daily-run.sh`'s deterministic core (decay + entropy) spends no tokens; only the optional agent step does. A future token-ceiling gate (read `policy.md §3.1`, default 20,000) would skip the agent step when usage is high — for now the agent has a hard timeout and `--no-agent` is available.
    - If already used ≥ 80% ceiling → only run DECAY script, skip Tony's CONSOLIDATE/WRITE.
    - If already used ≥ 100% ceiling → stop, write alert to log.
 
 **When to Enable**: Chairman must explicitly approve before Tom runs `/schedule` or `CronCreate`. Automation is **not pre-installed by default**.
 
-**Note**: Scheduling time (`0 2 * * *`) can be adjusted by Chairman; Tom maintains `scripts/daily-organize.py` and token accounting logic.
+**Note**: Cron minute/cadence is tunable (`SELF_COMPANY_CRON_MIN` env; `DAILY_RUNS_PER_DAY` in `policy.md §7.7`); Tom maintains `scripts/daily-run.sh` + `scripts/schedule.sh` and the token accounting logic.
 
 ---
 
@@ -236,6 +241,7 @@ Tom report: expected token usage, scheduled runs, risks to watch
 1. **Scheduling trigger** (same as daily proposal)
    - Cron expression `0 2 * * 1` = every Monday at 02:00 (local time).
    - Command: `cd /home/uwe/2am-garage && python3 scripts/weekly-consolidate.py --verify --entropy`.
+   - **Note:** `weekly-consolidate.py` is **not yet authored** (Tom writes it on activation). The pieces it orchestrates — `entropy.py` and `rag_index.py` — ship and run today and can be invoked directly in the meantime.
 
 2. **Parallel coordination mechanism**
    - Five tasks (FULL-VERIFY / ENTROPY-REPORT / PERFORMANCE-REVIEW / INFRA-CHECK / LOG-COMPILE) are largely independent, can run in parallel.
@@ -418,7 +424,7 @@ Manual triggers are not limited by daily / weekly ceiling (Chairman is highest p
 | Trigger Level | Detection | Tool | Chairman Approval Status |
 |---|---|---|---|
 | **Real-Time** | Stop hook (session end) | Claude Code `.claude/settings.json` | **Pending approval**; not pre-installed |
-| **Daily 02:00** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
+| **Daily (4×/6h)** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
 | **Weekly Mon 02:00** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
 | **Manual** | Natural language / prefix | Elon judgment + Phoebe dispatch | On-the-fly decision (Chairman says ok) |
 

@@ -31,6 +31,16 @@ handoff_format: |
   - if there are known edge cases or deferred TODOs, explain
 ---
 
+## Execution: Isolated Sub-Agent
+
+Per `references/execution-model.md`, Bob runs as an **isolated sub-agent**: the
+only context loaded is this persona, the `reads` slice above (resolved for the
+current task), and Phoebe's brief — **not** `SKILL.md`, the design, other
+employees' desks, or anything outside this slice. This keeps full attention on
+the build and holds entropy out of the main thread. Independent tasks run in
+parallel with other workers; Bob returns a concise handoff brief (to
+Gibby/Phoebe), never the full working context.
+
 ## Context Engineering Notes
 
 **Bob's context strategy (fight entropy):**

@@ -62,6 +62,14 @@ handoff_format: |
 
 ### Context Engineering Explanation
 
+**Execution: isolated sub-agent.** Per `references/execution-model.md`, Gibby runs
+as an isolated sub-agent — only this persona, the `reads` slice above (the files
+Phoebe named for this task, plus memory IDs only on a VERIFY task), and Phoebe's
+brief are loaded; never `SKILL.md`, the design, other desks, or anything outside
+the slice. Verification stays focused; Gibby returns a concise pass/fail report to
+Phoebe (and defects to Bob), not the full context. Verification runs serially
+after Bob's build; independent verifications across tasks can run in parallel.
+
 This context is Gibby's load specification for each work session. Gibby is the **gatekeeper of the verify loop**, reading only what's relevant to verification tasks:
 
 1. **Own desk** (`org/employees/gibby/`): persona, scratchpad, activity log.

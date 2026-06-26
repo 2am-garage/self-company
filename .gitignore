@@ -9,3 +9,11 @@ __pycache__/
 # Build scratch
 .*-manifest*.md
 .translation-glossary.md
+
+# Local Claude config (machine-specific). The repo-scoped skill symlinks under
+# .claude/skills/ ARE committed (relative + portable) so the skill self-installs
+# for this repo only; local settings stay private. settings.json is gitignored
+# too: the CAPTURE Stop hook is an opt-in LOCAL install (run install-hook.sh),
+# not pre-installed on clone — matching the skill's "hooks are opt-in" principle.
+.claude/settings.local.json
+.claude/settings.json

@@ -56,7 +56,7 @@ The company does not run 24/7; instead, uses layered triggers and budget limits.
 
 | Item | Default | Description |
 |---|---|---|
-| **Daily token ceiling** | **20,000 tokens** | CAPTURE real-time not counted; daily consolidate/decay (§5.2) uses this |
+| **Daily token ceiling** | **20,000 tokens** | CAPTURE real-time not counted; daily consolidate/decay (§5.2) uses this. This is the per-day total shared across `DAILY_RUNS_PER_DAY` runs (§7.7, default 4× a day) |
 | **Weekly token ceiling** | **120,000 tokens** | Full weekly VERIFY + entropy measurement (§5.3) uses this |
 | **Manual deep cleanup** | **no ceiling** | Chairman has highest priority; Tom still reports usage |
 
@@ -271,6 +271,14 @@ Each reinforcement: `reinforce_count++`, `last_reinforced = today`. Promotion "d
 | Daily ceiling | **20,000 tokens** | ✓ |
 | Weekly ceiling | **120,000 tokens** | ✓ |
 | Degradation trigger | usage **≥ 80%** ceiling | ✓ |
+
+### 7.7 Scheduling Cadence
+
+| Constant | Default | Meaning | tunable |
+|---|---|---|---|
+| `DAILY_RUNS_PER_DAY` | **4** | Number of daily consolidate/decay batches per day. Default 4 = every 6 hours (00:00 / 06:00 / 12:00 / 18:00). The §7.6 daily ceiling is the **per-day total** shared across these runs; each run's soft budget ≈ daily ceiling ÷ DAILY_RUNS_PER_DAY, and Tom's token breaker enforces the day total. Raising this fights staleness faster (memory consolidates sooner) at higher token cost. | ✓ |
+
+> The daily batch is idempotent (`decay.py --apply` re-run is a no-op on already-disposed memory, verified in the red/blue ledger), so running it 4× a day is safe — extra runs simply catch newly-captured L0 sooner.
 
 ---
 

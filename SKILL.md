@@ -111,6 +111,26 @@ Details:
 
 ---
 
+## Execution Model (orchestration vs isolated worker sub-agents)
+
+The company runs in two tiers:
+
+- **Orchestration tier** — Elon (CEO), Phoebe (PM), July (HR lead) operate in the
+  main context. They hold the broad picture (this skill, design, policy,
+  summaries, plans) needed to set direction, plan/dispatch, and tune people.
+- **Execution tier** — the four workers Bob (RD), Gibby (QA), Tony (Improvement),
+  Tom (IT/Ops) run as **isolated sub-agents**. Each gets only its own `persona.md`,
+  the `reads` slice in its own `context.md`, and Phoebe's task brief — **not**
+  `SKILL.md`, the design, other employees' desks, or anything outside its slice.
+  This keeps each worker's full attention on its task, holds entropy out of the
+  main thread, and lets independent workers run **in parallel** (Phoebe dispatches
+  parallel sub-agents for independent tasks, serial handoff for dependency chains
+  like Bob→Gibby).
+
+Full spec: **[references/execution-model.md](references/execution-model.md)**.
+
+---
+
 ## How to Install
 
 Run:
@@ -153,6 +173,7 @@ For company design details, see:
 - **v2 Memory Pipeline Implementation Guide**
   - **[references/pipeline.md](references/pipeline.md)** — playbook for four stages CAPTURE → ORGANIZE → WRITE → VERIFY (who, when, inputs/outputs, exact steps, handoff format)
   - **[references/memory-tiers.md](references/memory-tiers.md)** — L0/L1/L2 definitions, consolidation promotion rules, decay formula and thresholds, half-life tables, alignment with scripts
+  - **[references/execution-model.md](references/execution-model.md)** — orchestration vs execution tiers, worker sub-agent isolation (least-privilege context), parallel vs serial dispatch
 
 - **Executable Python scripts** (standard library only; skill source in `scripts/`, installed by `init_company.sh` to `.company/scripts/` and travels with project)
   - **[scripts/decay.py](scripts/decay.py)** — scan markdown frontmatter, compute decay_score, produce disposal candidates (drop/archive/demote/upgrade_candidates) per threshold, JSON output; `--apply` flag modifies files. After installation, run `python3 .company/scripts/decay.py`
