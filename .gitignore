@@ -9,3 +9,8 @@ __pycache__/
 # Build scratch
 .*-manifest*.md
 .translation-glossary.md
+
+# Local Claude config (machine-specific). The repo-scoped skill symlinks under
+# .claude/skills/ ARE committed (relative + portable) so the skill self-installs
+# for this repo only; local settings stay private.
+.claude/settings.local.json
