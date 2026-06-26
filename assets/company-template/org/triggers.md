@@ -61,7 +61,9 @@ Real-time CAPTURE (Haiku) tokens **count toward the daily ceiling** (no separate
 
 > **Status: ships and installable.** `capture-trigger.py` is in `scripts/` (copied to `.company/scripts/` by init). It is wired as a Claude Code **Stop hook** to run CAPTURE (Haiku) at session end — it reads the transcript, extracts Chairman observations, and writes L0 drafts with sources. Recursion-guarded (`stop_hook_active` + guard env) and degrades to a clean no-op if anything is missing.
 
-**When to Enable**: Chairman must explicitly approve before Tom writes to `.claude/settings.json`. Automation is **not pre-installed by default**.
+**Install mechanism (ships in the skill):** `bash .company/scripts/install-hook.sh install` merges the Stop hook into the project's `.claude/settings.json` (idempotent, preserves existing settings). `uninstall` / `status` manage it. It writes `settings.json` — NOT `settings.local.json` — because Claude Code's permission auto-writer rewrites `settings.local.json` and would clobber an externally-added hook.
+
+**When to Enable**: Chairman must explicitly approve before Tom installs the hook. Automation is **not pre-installed by default** (opt-in via the command above).
 
 **Note**: If the Chairman does not enable real-time CAPTURE yet, it can still be triggered manually (using conversation prefix `(cross-dept)` to name or Phoebe manually initiating).
 

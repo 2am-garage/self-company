@@ -80,6 +80,48 @@ class TestDailyRun(unittest.TestCase):
             subprocess.run(["rm", "-rf", d])
 
 
+class TestInstallHook(unittest.TestCase):
+    SH = os.path.join(REPO, "scripts", "install-hook.sh")
+
+    def _settings(self, d):
+        return os.path.join(d, ".claude", "settings.json")
+
+    def test_install_idempotent_and_preserves_existing(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".claude"))
+            with open(self._settings(d), "w") as f:
+                json.dump({"permissions": {"allow": ["Bash(ls)"]}}, f)
+            _bash([self.SH, "install", d])
+            _bash([self.SH, "install", d])  # twice -> still one
+            cfg = json.load(open(self._settings(d)))
+            self.assertEqual(len(cfg["hooks"]["Stop"]), 1)
+            self.assertEqual(cfg["permissions"]["allow"], ["Bash(ls)"])  # preserved
+            cmd = cfg["hooks"]["Stop"][0]["hooks"][0]["command"]
+            self.assertIn("capture-trigger.py", cmd)
+            self.assertIn("self-company-capture", cmd)
+
+    def test_status_reports_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            r0 = _bash([self.SH, "status", d])
+            self.assertIn("not installed", r0.stdout)
+            _bash([self.SH, "install", d])
+            r1 = _bash([self.SH, "status", d])
+            self.assertIn("INSTALLED", r1.stdout)
+
+    def test_uninstall_removes_and_keeps_other_settings(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".claude"))
+            with open(self._settings(d), "w") as f:
+                json.dump({"permissions": {"allow": ["Bash(ls)"]}}, f)
+            _bash([self.SH, "install", d])
+            _bash([self.SH, "uninstall", d])
+            cfg = json.load(open(self._settings(d)))
+            self.assertNotIn("hooks", cfg)
+            self.assertEqual(cfg["permissions"]["allow"], ["Bash(ls)"])
+
+
 class TestScheduleGuards(unittest.TestCase):
     def test_bad_command_exits_2(self):
         r = _bash([os.path.join(REPO, "scripts", "schedule.sh"), "bogus", "/tmp"])
