@@ -93,6 +93,13 @@ copy_scripts() {
     exit 1
   fi
 
+  # CAPTURE hook entrypoint if present (used by the Stop-hook memory capture).
+  if [[ -f "${SCRIPT_DIR}/capture-trigger.py" ]]; then
+    cp "${SCRIPT_DIR}/capture-trigger.py" "${TARGET_DIR}/scripts/" \
+      && chmod +x "${TARGET_DIR}/scripts/capture-trigger.py" 2>/dev/null || true
+    log_success "Copied capture-trigger.py into ${TARGET_DIR}/scripts/"
+  fi
+
   # RAG scripts if available; skip if not yet built.
   if [[ -f "${SCRIPT_DIR}/rag_index.py" ]] && [[ -f "${SCRIPT_DIR}/rag_query.py" ]]; then
     if cp "${SCRIPT_DIR}/rag_index.py" "${SCRIPT_DIR}/rag_query.py" "${TARGET_DIR}/scripts/"; then
