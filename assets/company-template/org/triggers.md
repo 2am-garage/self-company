@@ -46,20 +46,20 @@ Real-time CAPTURE (Haiku) tokens **count toward the daily ceiling** (no separate
 **[Proposal]** Use **Claude Code Stop hook** to automatically trigger CAPTURE and real-time verification when a conversation ends.
 
 **Implementation**:
-1. Tom prepares config template: add to `/home/uwe/2am-garage/.claude/settings.json` or `settings.local.json`:
+1. Tom adds a Stop hook to the repo's `.claude/settings.json` (shared) or `settings.local.json` (private), in the current Claude Code hook format:
    ```json
    {
      "hooks": {
-       "stop": {
-         "command": "cd /home/uwe/2am-garage && python3 .company/scripts/capture-trigger.py",
-         "description": "Trigger memory pipeline CAPTURE stage on session end"
-       }
+       "Stop": [
+         { "hooks": [ { "type": "command",
+           "command": "python3 \"$CLAUDE_PROJECT_DIR/.company/scripts/capture-trigger.py\" --company \"$CLAUDE_PROJECT_DIR/.company\"" } ] }
+       ]
      }
    }
    ```
-2. `capture-trigger.py` invokes Haiku's CAPTURE process (read current session transcript → convert to L0 draft).
+2. `capture-trigger.py` reads the transcript path from the hook's stdin JSON and runs Haiku CAPTURE → L0 drafts. `$CLAUDE_PROJECT_DIR` is provided by Claude Code so the path resolves regardless of cwd.
 
-> **Status: not yet authored.** `capture-trigger.py` does not ship in `scripts/`; Tom writes it as part of enabling real-time CAPTURE (requires Chairman approval). Until then this command is a template, not runnable.
+> **Status: ships and installable.** `capture-trigger.py` is in `scripts/` (copied to `.company/scripts/` by init). It is wired as a Claude Code **Stop hook** to run CAPTURE (Haiku) at session end — it reads the transcript, extracts Chairman observations, and writes L0 drafts with sources. Recursion-guarded (`stop_hook_active` + guard env) and degrades to a clean no-op if anything is missing.
 
 **When to Enable**: Chairman must explicitly approve before Tom writes to `.claude/settings.json`. Automation is **not pre-installed by default**.
 
@@ -105,21 +105,21 @@ Update `ops/logs/daily-<date>.md` record of this round's changes:
 
 **Implementation**:
 1. **Option A (Recommended): Use `/schedule` skill**
-   - Syntax: `/schedule "0 */6 * * *" --name "daily-consolidate-decay" --command "cd /home/uwe/2am-garage && python3 .company/scripts/decay.py --apply && python3 .company/scripts/daily-organize.py"`
-   - Cron expression `0 */6 * * *` = 4× a day, every 6 hours (00:00 / 06:00 / 12:00 / 18:00 local time), matching `DAILY_RUNS_PER_DAY=4` in `policy.md §7.7`. For a single nightly run instead, use `0 2 * * *`.
-   - **Note:** `decay.py` ships and runs today; `daily-organize.py` is **not yet authored** (Tom writes it on activation). Until then the first half of the command (`decay.py --apply`) is runnable on its own.
+   - **Ships in the skill (recommended):** `bash .company/scripts/schedule.sh install` installs an OS crontab entry `7 */6 * * *` (4× a day, off-minute) that runs `daily-run.sh`. `schedule.sh uninstall` / `status` manage it; idempotent. Local + unattended — runs whenever the machine is on, memory never leaves the box.
+   - `daily-run.sh` does the deterministic core every run (`decay.py --apply` + `entropy.py`, logged, no tokens) plus an optional bounded headless `claude -p` consolidate/verify pass (hard timeout + recursion-guarded; `--no-agent` skips it).
+   - Cron `7 */6 * * *` ≈ 00:07 / 06:07 / 12:07 / 18:07, matching `DAILY_RUNS_PER_DAY=4` (`policy.md §7.7`). NOTE: `/schedule` and `CronCreate` are **session-bound** (only fire while a Claude REPL is running idle), so they are NOT used for unattended 2am runs — the OS cron above is.
 
 2. **Option B: Use `CronCreate` tool**
    - Directly call CronCreate to set up cron job; command same as above.
 
 3. **Token Breaker (Tom watches)**
-   - `daily-organize.py` check at start: read token ceiling from `policy.md §3.1` (default 20,000), compare against usage accumulation in `.company/ops/logs/daily-<date>.md`.
+   - `daily-run.sh`'s deterministic core (decay + entropy) spends no tokens; only the optional agent step does. A future token-ceiling gate (read `policy.md §3.1`, default 20,000) would skip the agent step when usage is high — for now the agent has a hard timeout and `--no-agent` is available.
    - If already used ≥ 80% ceiling → only run DECAY script, skip Tony's CONSOLIDATE/WRITE.
    - If already used ≥ 100% ceiling → stop, write alert to log.
 
 **When to Enable**: Chairman must explicitly approve before Tom runs `/schedule` or `CronCreate`. Automation is **not pre-installed by default**.
 
-**Note**: Scheduling time (`0 2 * * *`) can be adjusted by Chairman; Tom maintains `scripts/daily-organize.py` and token accounting logic.
+**Note**: Cron minute/cadence is tunable (`SELF_COMPANY_CRON_MIN` env; `DAILY_RUNS_PER_DAY` in `policy.md §7.7`); Tom maintains `scripts/daily-run.sh` + `scripts/schedule.sh` and the token accounting logic.
 
 ---
 

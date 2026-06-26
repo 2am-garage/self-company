@@ -100,6 +100,15 @@ copy_scripts() {
     log_success "Copied capture-trigger.py into ${TARGET_DIR}/scripts/"
   fi
 
+  # Daily-run + scheduler (Tom's cron mechanism) if present.
+  for s in daily-run.sh schedule.sh; do
+    if [[ -f "${SCRIPT_DIR}/${s}" ]]; then
+      cp "${SCRIPT_DIR}/${s}" "${TARGET_DIR}/scripts/" \
+        && chmod +x "${TARGET_DIR}/scripts/${s}" 2>/dev/null || true
+      log_success "Copied ${s} into ${TARGET_DIR}/scripts/"
+    fi
+  done
+
   # RAG scripts if available; skip if not yet built.
   if [[ -f "${SCRIPT_DIR}/rag_index.py" ]] && [[ -f "${SCRIPT_DIR}/rag_query.py" ]]; then
     if cp "${SCRIPT_DIR}/rag_index.py" "${SCRIPT_DIR}/rag_query.py" "${TARGET_DIR}/scripts/"; then
