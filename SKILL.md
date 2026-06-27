@@ -131,6 +131,26 @@ Full spec: **[references/execution-model.md](references/execution-model.md)**.
 
 ---
 
+## Session Catch-Up Notification (Chairman opt-in: "Option B")
+
+The unattended daily cron (`schedule.sh`) runs silently and only writes logs. So
+the Chairman doesn't have to dig through logs, do this **once when self-company is
+first engaged in a session**:
+
+1. Run `python3 .company/scripts/notify-status.py`.
+2. If the JSON shows `new_runs > 0`, send the Chairman **one** `PushNotification`
+   with the `summary` string, AND state the same one-line summary in your reply —
+   PushNotification suppresses while the Chairman is actively typing (~60s), so the
+   in-chat line guarantees he sees it even when the push is held back.
+3. Then run `python3 .company/scripts/notify-status.py --ack` to mark "notified up
+   to here" so the same runs aren't reported again.
+4. If `new_runs == 0`, stay silent — no notification.
+
+This is how the silent local cron reaches the Chairman's phone without Discord or
+a cloud agent: the cron does the work; the next agent session relays the summary.
+
+---
+
 ## How to Install
 
 Run:
