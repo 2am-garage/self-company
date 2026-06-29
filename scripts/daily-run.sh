@@ -121,6 +121,18 @@ with open(log, "a") as f:
     f.write("\n".join(lines) + "\n")
 PY
 
+# Elon's daily survey: a prioritized TODO from current metrics (read-only,
+# deterministic — keeps the CEO load-bearing every day). Writes ops/plans/todo-<date>.md.
+if [[ -f "$SCRIPTS/elon_survey.py" ]]; then
+  python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" 2>>"$SERR" \
+    | python3 -c "import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(f\"- elon survey: {d.get('todos','?')} todo(s) -> ops/plans/todo-${DATE}.md\")
+except Exception:
+    print('- elon survey: no output')" >> "$LOG" || true
+fi
+
 # C2: surface any script warnings/errors instead of swallowing them (e.g. the
 # policy-provenance [WARN] that P3 added, or a real crash).
 if [[ -s "$SERR" ]]; then
