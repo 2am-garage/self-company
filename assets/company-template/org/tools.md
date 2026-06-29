@@ -32,6 +32,7 @@ surface; it gets its slice, the same way it gets its memory slice.
 | Playwright | MCP | Tom | Gibby | Browser drive / screenshot / UI verification | available (per environment) |
 | RAG (rag_query) | local script | Tony | Tony, Gibby | Semantic memory search (fastembed + LanceDB) | active when `rag_setup.sh install` has run |
 | deep-research | skill | Tom | Tony (research), Bob (spec research) | Multi-source web research with verification | available per environment |
+| GitHub (`gh`) | CLI | Tom | Tom (PRs/merges/issues on Chairman approval) | Create/manage pull requests, releases, issues for the skill repo | installed; needs `gh auth login` (no token by default) |
 | *(add as needed)* | | Tom | | | |
 
 > Keep this table honest: an entry here means the tool is actually reachable in
