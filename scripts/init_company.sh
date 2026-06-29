@@ -100,6 +100,13 @@ copy_scripts() {
     log_success "Copied notify-status.py into ${TARGET_DIR}/scripts/"
   fi
 
+  # VERIFY provenance gate if present (stamps verified_date in the daily run).
+  if [[ -f "${SCRIPT_DIR}/verify_memory.py" ]]; then
+    cp "${SCRIPT_DIR}/verify_memory.py" "${TARGET_DIR}/scripts/" \
+      && chmod +x "${TARGET_DIR}/scripts/verify_memory.py" 2>/dev/null || true
+    log_success "Copied verify_memory.py into ${TARGET_DIR}/scripts/"
+  fi
+
   # CAPTURE hook entrypoint if present (used by the Stop-hook memory capture).
   if [[ -f "${SCRIPT_DIR}/capture-trigger.py" ]]; then
     cp "${SCRIPT_DIR}/capture-trigger.py" "${TARGET_DIR}/scripts/" \

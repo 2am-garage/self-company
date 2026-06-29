@@ -50,21 +50,29 @@ printf '\n## Daily run %s%s\n' "$ts" "$($DRY_RUN && echo ' (dry-run)')" >> "$LOG
 # Capture each script's JSON to a temp file, then parse via a heredoc that reads
 # the FILES by path. (Piping data INTO a `python3 <<'PY'` heredoc does not work —
 # the heredoc itself becomes stdin, so the pipe is ignored.)
-DOUT="$(mktemp)"; EOUT="$(mktemp)"
-trap 'rm -f "$DOUT" "$EOUT"' EXIT
+DOUT="$(mktemp)"; EOUT="$(mktemp)"; VOUT="$(mktemp)"
+trap 'rm -f "$DOUT" "$EOUT" "$VOUT"' EXIT
 
 if [[ -f "$SCRIPTS/decay.py" ]]; then
   decay_args=(--memory-dir "$MEM" --config "$POLICY")
   $DRY_RUN || decay_args+=(--apply)
   python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>/dev/null || true
 fi
+# VERIFY: stamp verified_date on memories whose [session#line] sources trace to a
+# real transcript line (deterministic provenance gate). Before entropy so the KPI
+# reflects the new stamps this round.
+if [[ -f "$SCRIPTS/verify_memory.py" ]]; then
+  verify_args=(--memory-dir "$MEM" --transcripts-dir "$HOME/.claude/projects")
+  $DRY_RUN || verify_args+=(--apply)
+  python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>/dev/null || true
+fi
 [[ -f "$SCRIPTS/entropy.py" ]] && \
   python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>/dev/null || true
 
 DRY_FLAG="$($DRY_RUN && echo 1 || echo 0)"
-python3 - "$DOUT" "$EOUT" "$LOG" "$DRY_FLAG" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
+python3 - "$DOUT" "$EOUT" "$VOUT" "$LOG" "$DRY_FLAG" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
 import sys, json
-dpath, epath, log, dry = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+dpath, epath, vpath, log, dry = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"
 
 def load(p):
     try:
@@ -87,6 +95,15 @@ if d:
             lines.append(f"- {c['id']}: {c['from']} -> {c['to']} (rc {c['reinforce_count']})")
 else:
     lines.append("- decay: no output (script missing or errored)")
+
+v = load(vpath)
+if v:
+    lines.append(
+        f"- verify{'' if dry else ' --apply'}: newly-verified {len(v['verified'])} | "
+        f"already {v['already_verified']} | unverifiable {len(v['unverifiable'])}"
+    )
+    if v["unverifiable"]:
+        lines.append(f"  - unverifiable (sources don't trace): {v['unverifiable'][:8]}")
 
 e = load(epath)
 if e:
