@@ -108,6 +108,21 @@ class TestWriteL0(unittest.TestCase):
             self.assertIn("first", txt)
             self.assertNotIn("SECOND", txt)
 
+    def test_system_noise_is_quarantined(self):
+        # A2: a bug/system-failure "observation" must not be written as memory,
+        # but a genuine standing preference must be.
+        with tempfile.TemporaryDirectory() as d:
+            self._company(d)
+            obs = [
+                {"id": "bug", "body": "The skill failed at 2am and the cron didn't fire.",
+                 "source_lines": [1]},
+                {"id": "pref", "body": "Chairman wants push notifications, not Discord.",
+                 "source_lines": [2]},
+            ]
+            written = ct.write_l0(obs, "s", d)
+            self.assertIn("pref", written)
+            self.assertNotIn("bug", written)
+
     def test_respects_max_observations(self):
         with tempfile.TemporaryDirectory() as d:
             self._company(d)

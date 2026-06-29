@@ -40,6 +40,17 @@ DEFAULT_MODEL = os.environ.get("SELF_COMPANY_CAPTURE_MODEL", "claude-haiku-4-5-2
 MAX_CHAIRMAN_CHARS = 24000   # cap transcript size fed to the model
 MAX_OBSERVATIONS = 12        # cap L0 drafts written per session
 
+# A2 backstop: quarantine observations that are clearly operational noise (the
+# company's own malfunctions) rather than durable facts about the Chairman.
+# Conservative — requires a system noun NEAR a failure verb, so it won't catch a
+# standing preference like "I want push notifications, not Discord".
+SYSTEM_NOISE_RE = re.compile(
+    r"\b(skill|script|cron|scheduler|agent|hook|index|rag|pipeline|daemon|job)\b"
+    r"[^.]{0,40}\b(fail|failed|failing|error|errored|broke|broken|crash|"
+    r"didn'?t\s+(?:run|fire|work)|not\s+(?:run|install|work)|misbehav|bug)\b",
+    re.IGNORECASE,
+)
+
 
 # ----------------------------------------------------------------------------
 # Transcript reading (deterministic, unit-tested)
@@ -89,10 +100,16 @@ def build_capture_prompt(chairman_lines, existing_ids):
     existing = ", ".join(sorted(existing_ids)) if existing_ids else "(none)"
     return (
         "You are the CAPTURE stage of a personal-memory pipeline. From the "
-        "Chairman's messages below, extract durable observations about the "
-        "Chairman: preferences, habits, identity/background, ongoing projects, "
-        "decisions, working style. Capture cheaply but each observation MUST cite "
-        "the message index it came from.\n\n"
+        "Chairman's messages below, extract durable facts about the *person* (the "
+        "Chairman): preferences, habits, identity/background, ongoing goals, "
+        "decisions, working style. Each observation MUST cite the message index.\n\n"
+        "DO NOT capture transient system/tool state or operational noise — this is "
+        "a person's memory, not a bug tracker. Specifically EXCLUDE: reports that "
+        "the skill/script/cron/agent failed or misbehaved, error messages, status "
+        "of a run, or the company's own behavior. Examples to REJECT: 'the skill "
+        "failed at 2am', 'the cron didn't fire', 'RAG isn't installed'. A standing "
+        "*preference* the Chairman states (e.g. 'I want push notifications, not "
+        "Discord') IS valid; a one-off system glitch is NOT.\n\n"
         f"Existing memory ids (do not duplicate): {existing}\n\n"
         "Return ONLY a JSON array (no prose), each item:\n"
         '  {"id": "kebab-slug", "body": "1-2 sentence observation", '
@@ -199,6 +216,9 @@ def write_l0(observations, session_id, company_dir, today=None):
         if sources == "[]":
             continue
         body = str(obs["body"]).strip().replace("\n", " ")
+        if SYSTEM_NOISE_RE.search(body):
+            continue  # A2: operational noise, not a Chairman memory — don't write
+
         path.write_text(
             "---\n"
             f"id: {oid}\n"
