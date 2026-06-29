@@ -1,6 +1,6 @@
 # RAG Playbook — Retrieval-Augmented Memory Search
 
-> **This is Tony's domain.** RAG (Retrieval-Augmented Generation) is an optional vector index over the markdown memory store, speeding up semantic search when memory volume grows large. Shipped **dormant** and **degrades gracefully**; activation requires Ollama and LanceDB.
+> **This is Tony's domain.** RAG (Retrieval-Augmented Generation) is an optional vector index over the markdown memory store, speeding up semantic search when memory volume grows large. Shipped **dormant** and **degrades gracefully**; activate with `rag_setup.sh install` (LanceDB + fastembed, local & offline — no Ollama daemon).
 
 ---
 
@@ -47,9 +47,23 @@ Shipped **DORMANT**. No Ollama, no LanceDB, no pip in the environment initially.
 
 ## 3. One-Time Setup (When Activating)
 
+> **CURRENT BACKEND — fastembed (no Ollama).** Activation is now one command:
+> ```bash
+> bash .company/scripts/rag_setup.sh install
+> ```
+> This creates a private venv at `.company/.rag-venv` and installs **LanceDB +
+> fastembed** (`BAAI/bge-small-en-v1.5`, 384-dim, local CPU, no daemon, fully
+> offline). `rag_index.py` / `rag_query.py` auto re-exec into that venv, so
+> `python3 .company/scripts/rag_index.py --rebuild --include-l0` and
+> `rag_query.py` just work afterwards. Then build: `rag_index.py --rebuild`
+> (add `--include-l0` to index working memory too, e.g. for the reinforce path).
+>
+> The Ollama steps below are **superseded/legacy** — kept only for reference if
+> someone prefers an Ollama backend. You can skip them.
+
 When the threshold is crossed or Chairman orders activation, follow these steps in order. This is a one-time task; Tom does it (or a human can during manual activation).
 
-### Step 1: Install Ollama
+### Step 1: Install Ollama (legacy — superseded by rag_setup.sh)
 
 Ollama runs embedding models locally, offline, without any API calls.
 

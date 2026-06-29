@@ -23,6 +23,33 @@ import hashlib
 import os
 from pathlib import Path
 
+
+def _reexec_into_rag_venv():
+    """Re-launch under .company/.rag-venv python if RAG deps aren't here."""
+    if os.environ.get("SC_RAG_REEXEC"):
+        return
+    try:
+        import lancedb  # noqa: F401
+        import fastembed  # noqa: F401
+        return
+    except Exception:
+        pass
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / ".rag-venv" / "bin" / "python",
+                 Path.cwd() / ".company" / ".rag-venv" / "bin" / "python"):
+        if cand.exists():
+            os.environ["SC_RAG_REEXEC"] = "1"
+            os.execv(str(cand), [str(cand)] + sys.argv)
+
+
+_reexec_into_rag_venv()
+
+try:
+    import rag_embed
+    _HAS_EMBED = True
+except Exception:
+    _HAS_EMBED = False
+
 # Guard optional imports
 try:
     import lancedb
@@ -32,35 +59,18 @@ except ImportError:
 
 
 class OllamaUnavailable(Exception):
-    """Raised when Ollama is not reachable."""
+    """Raised when the embedding backend is unavailable (name kept for compat)."""
     pass
 
 
-def embed(text, model, host="http://localhost:11434"):
-    """
-    Embed text via Ollama.
-
-    Args:
-        text (str): Text to embed
-        model (str): Model name (e.g., 'nomic-embed-text')
-        host (str): Ollama HTTP host
-
-    Returns:
-        list[float]: Embedding vector
-
-    Raises:
-        OllamaUnavailable: If Ollama is unreachable
-    """
-    url = f"{host}/api/embeddings"
-    payload = json.dumps({"model": model, "prompt": text}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-
+def embed(text, model=None, host=None):
+    """Embed text via the local fastembed backend (rag_embed). model/host ignored."""
+    if not _HAS_EMBED:
+        raise OllamaUnavailable("rag_embed/fastembed not importable")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data["embedding"]
-    except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, socket.timeout) as e:
-        raise OllamaUnavailable(f"Ollama unreachable at {host}: {e}") from e
+        return rag_embed.embed(text)
+    except Exception as e:
+        raise OllamaUnavailable(f"local embedding failed: {e}") from e
 
 
 def query_rag(query_text, top_k=5, index_dir=".company/memory/index", model="nomic-embed-text"):
@@ -139,11 +149,11 @@ Examples:
 
     try:
         # Check deps
-        if not _HAS_LANCEDB:
+        if not _HAS_LANCEDB or not _HAS_EMBED:
             msg = (
-                "[rag_query] LanceDB not installed — falling back is manual. "
-                "To install: python3 -m ensurepip --upgrade && pip install lancedb  "
-                "(see references/rag.md)\n"
+                "[rag_query] RAG backend not installed. Run:\n"
+                "  bash .company/scripts/rag_setup.sh install\n"
+                "(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)\n"
                 "Fallback: grep -ri '<keywords>' .company/memory"
             )
             print(msg, file=sys.stderr)
@@ -172,10 +182,8 @@ Examples:
 
     except OllamaUnavailable as e:
         msg = (
-            f"[rag_query] {e}\n"
-            "[rag_query] Ollama not reachable. Start Ollama and pull the model:\n"
-            "  ollama serve\n"
-            "  ollama pull nomic-embed-text\n"
+            f"[rag_query] embedding backend unavailable: {e}\n"
+            "[rag_query] Run: bash .company/scripts/rag_setup.sh install\n"
             "(see references/rag.md)\n"
             "Fallback: grep -ri '<keywords>' .company/memory"
         )

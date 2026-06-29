@@ -24,6 +24,38 @@ import urllib.request
 import urllib.error
 
 # ============================================================================
+# RE-EXEC INTO THE RAG VENV (created by rag_setup.sh) if deps aren't here
+# ============================================================================
+
+def _reexec_into_rag_venv():
+    """If lancedb/fastembed aren't importable but the project's .rag-venv exists,
+    re-launch this script under that venv's python so RAG 'just works'."""
+    if os.environ.get("SC_RAG_REEXEC"):
+        return
+    try:
+        import lancedb  # noqa: F401
+        import fastembed  # noqa: F401
+        return
+    except Exception:
+        pass
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / ".rag-venv" / "bin" / "python",
+                 Path.cwd() / ".company" / ".rag-venv" / "bin" / "python"):
+        if cand.exists():
+            os.environ["SC_RAG_REEXEC"] = "1"
+            os.execv(str(cand), [str(cand)] + sys.argv)
+
+
+_reexec_into_rag_venv()
+
+# Shared local embedding backend (fastembed). Lazy fastembed import inside.
+try:
+    import rag_embed
+    _HAS_EMBED = True
+except Exception:
+    _HAS_EMBED = False
+
+# ============================================================================
 # OPTIONAL IMPORT (graceful degradation)
 # ============================================================================
 
@@ -39,9 +71,9 @@ except ImportError:
 # ============================================================================
 
 RAG_ENABLE_THRESHOLD = 50
-RAG_MODEL = "nomic-embed-text"
-RAG_OLLAMA_HOST = "http://localhost:11434"
-EMBEDDING_DIM = 768
+RAG_MODEL = "BAAI/bge-small-en-v1.5"   # fastembed (local CPU, offline); see rag_embed.py
+RAG_OLLAMA_HOST = "http://localhost:11434"  # legacy; unused with fastembed backend
+EMBEDDING_DIM = 384
 
 
 # ============================================================================
@@ -180,34 +212,19 @@ def compute_content_hash(body: str) -> str:
 # EMBEDDING VIA OLLAMA
 # ============================================================================
 
-def embed(text: str, model: str, host: str) -> List[float]:
+def embed(text: str, model: str = None, host: str = None) -> List[float]:
     """
-    Call Ollama embeddings API and return embedding vector.
-
-    POST to {host}/api/embeddings with {"model": model, "prompt": text}
-    Returns: list[float] of dimension matching the model.
-
-    Raises OllamaUnavailable on connection error / timeout.
+    Embed text via the local fastembed backend (rag_embed). The `model`/`host`
+    params are kept for signature compatibility with the old Ollama callers and
+    are ignored. Raises OllamaUnavailable (reused as a generic "embedding
+    backend unavailable" signal) if fastembed/the venv isn't installed.
     """
-    url = f"{host}/api/embeddings"
-    payload = {
-        "model": model,
-        "prompt": text
-    }
-
+    if not _HAS_EMBED:
+        raise OllamaUnavailable("rag_embed/fastembed not importable")
     try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode('utf-8'),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            return data.get("embedding", [])
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-        raise OllamaUnavailable(f"Failed to reach Ollama at {host}: {e}")
+        return rag_embed.embed(text)
     except Exception as e:
-        raise OllamaUnavailable(f"Ollama embedding failed: {e}")
+        raise OllamaUnavailable(f"local embedding failed: {e}")
 
 
 # ============================================================================
@@ -324,7 +341,7 @@ def check_threshold(memory_dir: Path, threshold: int) -> bool:
 # ============================================================================
 
 def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = False,
-                 now: Optional[datetime] = None) -> Dict[str, Any]:
+                 now: Optional[datetime] = None, include_l0: bool = False) -> Dict[str, Any]:
     """
     Scan memory_dir for L1/L2 active files, embed via Ollama, upsert to LanceDB.
 
@@ -370,8 +387,10 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
             content = path.read_text(encoding='utf-8')
             mem = parse_frontmatter(content)
 
-            # Filter: L1/L2 only, active status
-            if mem["tier"] not in ("L1", "L2"):
+            # Filter by tier (L1/L2 by default; include L0 when asked, e.g. for
+            # the reinforce path that must match new captures against all memory).
+            allowed = ("L0", "L1", "L2") if include_l0 else ("L1", "L2")
+            if mem["tier"] not in allowed:
                 continue
             if mem["status"] == "archived":
                 continue
@@ -405,9 +424,10 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         # Test connection with a tiny embedding
         _ = embed("test", model, RAG_OLLAMA_HOST)
     except OllamaUnavailable as e:
-        print(f"[rag_index] Ollama not reachable at {RAG_OLLAMA_HOST}. "
-              f"Start Ollama and run: ollama pull {model}  "
-              f"(see references/rag.md)", file=sys.stderr)
+        print("[rag_index] RAG backend not installed. Run:\n"
+              "  bash .company/scripts/rag_setup.sh install\n"
+              "(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)",
+              file=sys.stderr)
         sys.exit(2)
 
     # Prepare rows to upsert
@@ -525,6 +545,12 @@ def main():
         help="Path to policy.md to read RAG_ENABLE_THRESHOLD / RAG_MODEL"
     )
     parser.add_argument(
+        "--include-l0",
+        action="store_true",
+        help="Also index L0-working memories (default: L1/L2 only). Needed for the "
+             "reinforce path that matches new captures against all existing memory."
+    )
+    parser.add_argument(
         "--now",
         help="Reference date (YYYY-MM-DD). Default: today."
     )
@@ -592,7 +618,8 @@ def main():
     index_dir = Path(args.index_dir)
 
     try:
-        report = index_memory(memory_dir, index_dir, model, rebuild=args.rebuild, now=now)
+        report = index_memory(memory_dir, index_dir, model, rebuild=args.rebuild, now=now,
+                              include_l0=args.include_l0)
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
     except Exception as e:

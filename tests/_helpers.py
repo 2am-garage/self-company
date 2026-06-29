@@ -12,10 +12,14 @@ if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
 
-def run_script(name, *args):
-    """Run scripts/<name> with args. Returns (returncode, stdout, stderr)."""
+def run_script(name, *args, env=None):
+    """Run scripts/<name> with args. Returns (returncode, stdout, stderr).
+
+    `env` (dict) is merged over os.environ for the child.
+    """
     cmd = [sys.executable, os.path.join(SCRIPTS_DIR, name), *args]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    child_env = {**os.environ, **(env or {})}
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env)
     return proc.returncode, proc.stdout, proc.stderr
 
 

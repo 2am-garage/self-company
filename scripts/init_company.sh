@@ -107,8 +107,8 @@ copy_scripts() {
     log_success "Copied capture-trigger.py into ${TARGET_DIR}/scripts/"
   fi
 
-  # Daily-run + scheduler + hook installer (Tom's automation mechanism) if present.
-  for s in daily-run.sh schedule.sh install-hook.sh; do
+  # Daily-run + scheduler + hook installer + RAG setup (Tom's automation) if present.
+  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh; do
     if [[ -f "${SCRIPT_DIR}/${s}" ]]; then
       cp "${SCRIPT_DIR}/${s}" "${TARGET_DIR}/scripts/" \
         && chmod +x "${TARGET_DIR}/scripts/${s}" 2>/dev/null || true
@@ -116,11 +116,11 @@ copy_scripts() {
     fi
   done
 
-  # RAG scripts if available; skip if not yet built.
+  # RAG scripts (index/query + shared fastembed backend) if available.
   if [[ -f "${SCRIPT_DIR}/rag_index.py" ]] && [[ -f "${SCRIPT_DIR}/rag_query.py" ]]; then
-    if cp "${SCRIPT_DIR}/rag_index.py" "${SCRIPT_DIR}/rag_query.py" "${TARGET_DIR}/scripts/"; then
+    if cp "${SCRIPT_DIR}/rag_index.py" "${SCRIPT_DIR}/rag_query.py" "${SCRIPT_DIR}/rag_embed.py" "${TARGET_DIR}/scripts/"; then
       chmod +x "${TARGET_DIR}/scripts/rag_index.py" "${TARGET_DIR}/scripts/rag_query.py" 2>/dev/null || true
-      log_success "Copied rag_index.py / rag_query.py into ${TARGET_DIR}/scripts/"
+      log_success "Copied rag_index.py / rag_query.py / rag_embed.py into ${TARGET_DIR}/scripts/"
     else
       log_error "Failed to copy rag_index.py / rag_query.py into ${TARGET_DIR}/scripts/"
       exit 1
