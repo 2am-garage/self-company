@@ -107,6 +107,20 @@ copy_scripts() {
     log_success "Copied verify_memory.py into ${TARGET_DIR}/scripts/"
   fi
 
+  # Elon's daily survey (prioritized TODO from metrics) if present.
+  if [[ -f "${SCRIPT_DIR}/elon_survey.py" ]]; then
+    cp "${SCRIPT_DIR}/elon_survey.py" "${TARGET_DIR}/scripts/" \
+      && chmod +x "${TARGET_DIR}/scripts/elon_survey.py" 2>/dev/null || true
+    log_success "Copied elon_survey.py into ${TARGET_DIR}/scripts/"
+  fi
+
+  # RAG-powered reinforce (C1) if present.
+  if [[ -f "${SCRIPT_DIR}/reinforce_memory.py" ]]; then
+    cp "${SCRIPT_DIR}/reinforce_memory.py" "${TARGET_DIR}/scripts/" \
+      && chmod +x "${TARGET_DIR}/scripts/reinforce_memory.py" 2>/dev/null || true
+    log_success "Copied reinforce_memory.py into ${TARGET_DIR}/scripts/"
+  fi
+
   # CAPTURE hook entrypoint if present (used by the Stop-hook memory capture).
   if [[ -f "${SCRIPT_DIR}/capture-trigger.py" ]]; then
     cp "${SCRIPT_DIR}/capture-trigger.py" "${TARGET_DIR}/scripts/" \
@@ -114,8 +128,8 @@ copy_scripts() {
     log_success "Copied capture-trigger.py into ${TARGET_DIR}/scripts/"
   fi
 
-  # Daily-run + scheduler + hook installer + RAG setup (Tom's automation) if present.
-  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh; do
+  # Daily-run + scheduler + hook installer + RAG setup + skeleton guard (Tom's automation).
+  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh skeleton_guard.sh; do
     if [[ -f "${SCRIPT_DIR}/${s}" ]]; then
       cp "${SCRIPT_DIR}/${s}" "${TARGET_DIR}/scripts/" \
         && chmod +x "${TARGET_DIR}/scripts/${s}" 2>/dev/null || true

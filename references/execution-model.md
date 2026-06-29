@@ -108,5 +108,23 @@ isolation structural instead of advisory.
 
 ---
 
-Version: v1 (2026-06-25) — orchestration/execution split, sub-agent isolation, parallel dispatch.
-Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), each `org/employees/<name>/context.md` (per-worker slice).
+## 6. Tools: MCP servers and skills (least privilege)
+
+Workers do their jobs with tools beyond the built-ins (Read/Edit/Bash/…). When
+Phoebe dispatches a task, the worker sub-agent is granted **only the MCP tools and
+skills its role needs** — the same least-privilege slice as its memory and file
+access, never the full tool surface:
+
+- The granting agent passes the worker the relevant MCP tools by name (some load
+  on demand via tool-search) and permits the skills listed for its role.
+- Unreachable tools degrade gracefully — the worker falls back to built-ins and
+  notes it.
+
+The authoritative inventory and per-role grants live in **`org/tools.md`** (Tom
+owns it; July keeps each worker's `context.md` grants matched to it). Examples:
+Gibby → Playwright MCP; Tony/Gibby → RAG (`rag_query`); Tony/Bob → `deep-research`.
+
+---
+
+Version: v1.1 (2026-06-29) — orchestration/execution split, sub-agent isolation, parallel dispatch, tools registry.
+Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice).

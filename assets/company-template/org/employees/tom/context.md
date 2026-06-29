@@ -8,6 +8,7 @@ reads:
   - org/                              # Company org state (not memory)
   - org/employees/tom/                # Own desk
   - org/policy.md                     # Company charter (including token budget rules)
+  - org/tools.md                      # Tools registry (MCP servers + skills) — Tom owns this
   - ops/logs/                         # Infra change history
   - ops/schedule/                     # Schedule task state
   - <Phoebe's dispatch list>          # Current tasks to do
@@ -19,6 +20,7 @@ writes:
   - org/employees/tom/scratchpad.md   # Private scratchpad
   - org/employees/tom/log.md          # Performance log (what upgrades did)
   - org/                              # Update company skeleton / config
+  - org/tools.md                      # Maintain the tools registry (inventory + status)
   - ops/logs/                         # Record change history
   - ops/schedule/                     # Update schedule state
 tools:
