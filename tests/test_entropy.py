@@ -62,11 +62,22 @@ class TestDimensions(unittest.TestCase):
 
     def test_unverified_detected(self):
         with tempfile.TemporaryDirectory() as d:
-            _helpers.write_memory(os.path.join(d, "L0-working", "u.md"),
-                                  id="nosrc-1", sources="[]")
+            # sourced but NOT verified -> unverified (the honest, new definition)
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"), id="needs-verify")
+            # no sources -> unverified (can never be verified)
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"), id="nosrc-1", sources="[]")
+            # has verified_date -> NOT unverified
+            with open(os.path.join(d, "L0-working", "c.md"), "w") as f:
+                f.write("---\nid: verified-1\ntier: L0\nowner: Tony\n"
+                        'sources: ["[s#1]"]\ncreated: 2026-06-01\nlast_reinforced: 2026-06-01\n'
+                        "reinforce_count: 1\ndecay_score: 1.0\nstatus: active\n"
+                        "verified_date: 2026-06-02\nverified_by: Gibby\n---\nbody\n")
             data = self._entropy(d)
-            self.assertGreater(data["dimensions"]["unverified_rate"], 0.0)
-            self.assertIn("nosrc-1", data["details"]["unverified_ids"])
+            ids = data["details"]["unverified_ids"]
+            self.assertIn("needs-verify", ids)
+            self.assertIn("nosrc-1", ids)
+            self.assertNotIn("verified-1", ids)
+            self.assertAlmostEqual(data["dimensions"]["unverified_rate"], 2 / 3, places=2)
 
 
 class TestWeightProvenance(unittest.TestCase):

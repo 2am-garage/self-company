@@ -69,6 +69,8 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
         "reinforce_count": None,
         "decay_score": None,
         "status": None,
+        "verified_date": None,
+        "verified_by": None,
         "_body": "",
         "_parse_errors": []
     }
@@ -142,6 +144,10 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                     result["decay_score"] = float(val_str)
                 except ValueError:
                     result["_parse_errors"].append(f"Non-float decay_score: {val_str}")
+            elif key == "verified_date":
+                result["verified_date"] = val_str if val_str else None
+            elif key == "verified_by":
+                result["verified_by"] = val_str if val_str else None
         except Exception as e:
             result["_parse_errors"].append(f"Error parsing {key}: {e}")
 
@@ -165,7 +171,7 @@ def serialize_frontmatter(meta: Dict[str, Any]) -> str:
         return str(v) if v is not None else ""
 
     for key in ["id", "tier", "owner", "sources", "created", "last_reinforced",
-                "reinforce_count", "decay_score", "status"]:
+                "reinforce_count", "decay_score", "status", "verified_date", "verified_by"]:
         if key in meta and meta[key] is not None:
             lines.append(f"{key}: {format_value(meta[key])}")
 
@@ -316,7 +322,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                 mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "owner", "sources",
                                          "created", "last_reinforced", "reinforce_count",
-                                         "decay_score", "status"]}
+                                         "decay_score", "status", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
 
             new_path = path.parent.parent / "L0-working" / path.name
@@ -333,7 +339,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "owner", "sources",
                                          "created", "last_reinforced", "reinforce_count",
-                                         "decay_score", "status"]}
+                                         "decay_score", "status", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
             path.write_text(new_content)
             return True
@@ -347,7 +353,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                 mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "owner", "sources",
                                          "created", "last_reinforced", "reinforce_count",
-                                         "decay_score", "status"]}
+                                         "decay_score", "status", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
             path.write_text(new_content)
             return True

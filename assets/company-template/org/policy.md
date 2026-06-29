@@ -284,18 +284,18 @@ Each reinforcement: `reinforce_count++`, `last_reinforced = today`. Promotion "d
 
 ## 8. RAG Tunables (Tony's Domain)
 
-Retrieval-Augmented Generation (RAG) enables semantic search over memory when memory volume crosses a threshold. The index is a derivative of markdown truth; always rebuildable. Ships dormant, requires Ollama + LanceDB to activate. Tony owns building/maintaining the index; Tony and Gibby query it. See `references/rag.md` for setup and operational details.
+Retrieval-Augmented Generation (RAG) enables semantic search over memory. The index is a derivative of markdown truth; always rebuildable. Ships dormant; activate with `bash .company/scripts/rag_setup.sh install`, which creates a private venv (`.company/.rag-venv`) and installs **LanceDB + fastembed** (local CPU embeddings, no daemon, fully offline). Tony owns building/maintaining the index; Tony and Gibby query it. See `references/rag.md`.
 
 | Constant | Default | Meaning | tunable |
 |---|---|---|---|
 | `RAG_ENABLE_THRESHOLD` | **50** | L1+L2 active memory count at or above which RAG is worth enabling; below 50, full-text grep over `.company/memory` is faster and cheaper. L0 excluded (volatile). 50 is the inflection point where semantic recall beats keyword search and volume exceeds human eyeballing. | ✓ |
-| `RAG_MODEL` | **`nomic-embed-text`** | Ollama embedding model, runs offline; 768-dim, good quality/size trade-off. No API embeddings — privacy is a hard rule; memory content must never leave the machine. | ✓ |
+| `RAG_MODEL` | **`BAAI/bge-small-en-v1.5`** | fastembed embedding model, local CPU, runs fully offline; 384-dim, good quality/size trade-off. No API embeddings, no daemon — privacy is a hard rule; memory content never leaves the machine. (Legacy Ollama `nomic-embed-text`/768-dim is superseded.) | ✓ |
 | `RAG_INDEX_PATH` | **`.company/memory/index`** | LanceDB vector store location; matches reserved folder in design §2. Gitignored and private; index is rebuildable from markdown, not a source of truth. | ✓ |
 
 ### 8.1 Graceful Degradation
 
 RAG ships dormant:
-- No Ollama running, no LanceDB installed → scripts exit code 2 with actionable setup message (install link, command, reference to `references/rag.md`).
+- RAG backend not installed (no `.company/.rag-venv`) → scripts exit code 2 with an actionable message pointing to `rag_setup.sh install`.
 - Never crash the company; never raise uncaught tracebacks.
 - `rag_query.py` unavailable → stderr hint fallback: `grep -ri '<keywords>' .company/memory`.
 

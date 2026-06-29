@@ -110,6 +110,26 @@ class TestApplyDrop(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertFalse(os.path.exists(path), "stale L0 memory should be deleted")
 
+    def test_apply_preserves_verified_date(self):
+        # Regression: decay --apply rewrites frontmatter and must NOT drop the
+        # VERIFY stamp (verified_date/verified_by), or it fights the verify loop.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L1-warm", "v.md")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w") as f:
+                f.write("---\nid: ver\ntier: L1\nowner: Tony\n"
+                        'sources: ["[s#1]"]\ncreated: 2026-06-01\nlast_reinforced: 2026-06-20\n'
+                        "reinforce_count: 2\ndecay_score: 1.0\nstatus: active\n"
+                        "verified_date: 2026-06-21\nverified_by: Gibby\n---\nbody\n")
+            rc, out, err = _helpers.run_script(
+                "decay.py", "--memory-dir", d, "--now", "2026-06-25",
+                "--config", "/nonexistent.md", "--apply")
+            self.assertEqual(rc, 0, err)
+            with open(path) as f:
+                txt = f.read()
+            self.assertIn("verified_date: 2026-06-21", txt)
+            self.assertIn("verified_by: Gibby", txt)
+
 
 class TestCLIProvenance(unittest.TestCase):
     def test_config_block_reports_policy_source(self):

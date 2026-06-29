@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""
+verify_memory — deterministic VERIFY stage (Gibby's provenance gate).
+
+The verify loop is the company's "lifeblood" but had never run: 0 memories ever
+carried a `verified_date`, and the entropy KPI was blind to it. This gives VERIFY
+a real, deterministic heartbeat.
+
+For each active memory lacking `verified_date`, it traces every source of the form
+`[<session>#<line>]` to an actual transcript: a `<session>.jsonl` under the
+transcripts dir (default ~/.claude/projects/*/) whose line index really exists.
+If at least one source traces, the memory is stamped `verified_date`/`verified_by:
+Gibby`. Sources that are empty, vague, or point to a missing session/line do NOT
+verify — that memory stays unverified (and entropy keeps counting it).
+
+This is *existence-level* provenance (the cited line is real); semantic "does the
+line say what the memory claims" remains a judgment task for the agent/Gibby.
+
+Dry-run by default; --apply stamps the files. Pure stdlib.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import date
+from pathlib import Path
+
+# [<session>#<line>] — session excludes [ ] # " and whitespace so the nested
+# JSON-ish form ["[sess#2]"] yields session "sess", not '"[sess'.
+SOURCE_RE = re.compile(r'\[([^\[\]#"\s]+)#(\d+)\]')
+
+
+def parse_frontmatter(text):
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None, text
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        return None, text
+    fm = {}
+    for ln in lines[1:end]:
+        s = ln.strip()
+        if not s or s.startswith("#") or ":" not in s:
+            continue
+        k, v = s.split(":", 1)
+        fm[k.strip()] = v.strip()
+    body = "\n".join(lines[end + 1:])
+    return fm, body
+
+
+def parse_sources(raw):
+    """raw like: ["[s#1]", "[s#2]"] -> list of (session, line:int)."""
+    out = []
+    for m in SOURCE_RE.finditer(raw or ""):
+        out.append((m.group(1), int(m.group(2))))
+    return out
+
+
+def build_session_index(transcripts_dir):
+    """Map session-id -> transcript path (file stem = session id)."""
+    idx = {}
+    base = Path(os.path.expanduser(transcripts_dir))
+    if not base.exists():
+        return idx
+    for p in base.rglob("*.jsonl"):
+        idx.setdefault(p.stem, p)
+    return idx
+
+
+_line_counts = {}
+
+
+def transcript_has_line(path, line_no):
+    n = _line_counts.get(path)
+    if n is None:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                n = sum(1 for _ in f)
+        except OSError:
+            n = 0
+        _line_counts[path] = n
+    return 0 <= line_no < n
+
+
+def source_traces(session, line_no, session_index):
+    path = session_index.get(session)
+    return bool(path) and transcript_has_line(path, line_no)
+
+
+def verify_dir(memory_dir, transcripts_dir, today, apply):
+    session_index = build_session_index(transcripts_dir)
+    report = {
+        "now": today, "memory_dir": str(memory_dir), "applied": apply,
+        "verified": [], "already_verified": 0, "unverifiable": [], "scanned": 0,
+    }
+    mem_root = Path(memory_dir)
+    if not mem_root.exists():
+        return report
+    for path in sorted(mem_root.rglob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm, body = parse_frontmatter(text)
+        if not fm or not fm.get("id"):
+            continue
+        if fm.get("status") == "archived":
+            continue
+        report["scanned"] += 1
+        if fm.get("verified_date"):
+            report["already_verified"] += 1
+            continue
+        srcs = parse_sources(fm.get("sources", ""))
+        traced = any(source_traces(s, n, session_index) for s, n in srcs)
+        if not traced:
+            report["unverifiable"].append(fm["id"])
+            continue
+        report["verified"].append(fm["id"])
+        if apply:
+            _stamp(path, text, today)
+    return report
+
+
+def _stamp(path, text, today):
+    """Insert verified_date/verified_by before the closing frontmatter ---."""
+    lines = text.split("\n")
+    # find closing --- (second one)
+    fences = [i for i, ln in enumerate(lines) if ln.strip() == "---"]
+    if len(fences) < 2:
+        return
+    close = fences[1]
+    inject = [f"verified_date: {today}", "verified_by: Gibby"]
+    new = lines[:close] + inject + lines[close:]
+    path.write_text("\n".join(new), encoding="utf-8")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Deterministic VERIFY: stamp memories whose sources trace to a real transcript line.")
+    ap.add_argument("--memory-dir", default=".company/memory")
+    ap.add_argument("--transcripts-dir", default="~/.claude/projects")
+    ap.add_argument("--now", default=None)
+    ap.add_argument("--apply", action="store_true", help="Write verified_date (default: dry-run).")
+    args = ap.parse_args(argv)
+    today = args.now or date.today().isoformat()
+    report = verify_dir(Path(args.memory_dir), args.transcripts_dir, today, args.apply)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

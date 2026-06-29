@@ -5,7 +5,9 @@ Deterministic: builds a temp .company with fabricated daily logs and checks new-
 detection (excluding dry-runs), the marker/ack cycle, and the summary string.
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -68,7 +70,8 @@ class TestNotify(unittest.TestCase):
     def test_ack_writes_marker(self):
         with tempfile.TemporaryDirectory() as d:
             c = _company(d, LOG)
-            ns.main(["--company", c, "--ack"])
+            with contextlib.redirect_stdout(io.StringIO()):  # don't leak JSON to suite output
+                ns.main(["--company", c, "--ack"])
             self.assertTrue(os.path.exists(os.path.join(c, "ops", ".last_notified")))
             # after ack, nothing is "new"
             self.assertEqual(len(ns.collect_runs(c, ns.read_marker(c))), 0)

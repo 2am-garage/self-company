@@ -6,7 +6,7 @@ Quantifies entropy across four dimensions:
   1. dup_rate: Approximate duplicate memories (Jaccard similarity)
   2. contradiction_score: Detected contradictions (slug family + opposing keywords)
   3. stale_rate: Expired memories (decay_score below tier thresholds)
-  4. unverified_rate: Missing/empty sources
+  4. unverified_rate: Not confirmed by VERIFY (no verified_date) or no sources
 
 Formula:
   Entropy = w1*dup_rate + w2*contradiction_score + w3*stale_rate + w4*unverified_rate
@@ -240,6 +240,7 @@ def load_memories(memory_dir, include_archived=False):
                 'tier': fm.get('tier', 'L0'),
                 'status': fm.get('status', 'active'),
                 'sources': fm.get('sources', []),
+                'verified_date': fm.get('verified_date'),
                 'reinforce_count': int(fm.get('reinforce_count', 1)),
                 'last_reinforced': fm.get('last_reinforced', ''),
                 'decay_score': float(fm.get('decay_score', 1.0)),
@@ -425,14 +426,24 @@ def compute_stale_rate(memories, now_date):
 
 def compute_unverified_rate(memories):
     """
-    Compute fraction of memories with empty/missing sources.
+    Fraction of memories the VERIFY loop has NOT confirmed.
+
+    A memory is unverified if it lacks a `verified_date` (VERIFY never stamped it)
+    OR has empty/missing sources (it can never be verified). The old definition
+    only checked empty sources — but CAPTURE always writes a non-empty source
+    placeholder, so that metric was structurally pinned at 0.0 and the KPI reported
+    a perfect score for a stage (VERIFY) that had never run once. Counting
+    verified_date makes the KPI reflect whether provenance was actually confirmed.
+
     Returns: (unverified_rate, unverified_ids)
     """
     unverified_ids = []
 
     for mem in memories:
         sources = mem.get('sources', [])
-        if not sources or (isinstance(sources, list) and len(sources) == 0):
+        has_sources = bool(sources) and not (isinstance(sources, list) and len(sources) == 0)
+        verified = bool(mem.get('verified_date'))
+        if not has_sources or not verified:
             unverified_ids.append(mem['id'])
 
     unverified_rate = len(unverified_ids) / max(1, len(memories)) if memories else 0.0

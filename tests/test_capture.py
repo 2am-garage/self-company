@@ -82,7 +82,8 @@ class TestWriteL0(unittest.TestCase):
                 [{"id": "Pref Async", "body": "likes async", "source_lines": [6, 18]}],
                 "s.20260626", d, today="2026-06-26")
             self.assertEqual(written, ["pref-async"])
-            txt = open(os.path.join(d, "memory", "L0-working", "pref-async.md")).read()
+            with open(os.path.join(d, "memory", "L0-working", "pref-async.md")) as f:
+                txt = f.read()
             self.assertIn("tier: L0", txt)
             self.assertIn("owner: Tony", txt)
             self.assertIn('sources: ["[s.20260626#6]", "[s.20260626#18]"]', txt)
@@ -102,9 +103,25 @@ class TestWriteL0(unittest.TestCase):
             self._company(d)
             ct.write_l0([{"id": "a", "body": "first", "source_lines": [1]}], "s", d)
             ct.write_l0([{"id": "a", "body": "SECOND", "source_lines": [2]}], "s", d)
-            txt = open(os.path.join(d, "memory", "L0-working", "a.md")).read()
+            with open(os.path.join(d, "memory", "L0-working", "a.md")) as f:
+                txt = f.read()
             self.assertIn("first", txt)
             self.assertNotIn("SECOND", txt)
+
+    def test_system_noise_is_quarantined(self):
+        # A2: a bug/system-failure "observation" must not be written as memory,
+        # but a genuine standing preference must be.
+        with tempfile.TemporaryDirectory() as d:
+            self._company(d)
+            obs = [
+                {"id": "bug", "body": "The skill failed at 2am and the cron didn't fire.",
+                 "source_lines": [1]},
+                {"id": "pref", "body": "Chairman wants push notifications, not Discord.",
+                 "source_lines": [2]},
+            ]
+            written = ct.write_l0(obs, "s", d)
+            self.assertIn("pref", written)
+            self.assertNotIn("bug", written)
 
     def test_respects_max_observations(self):
         with tempfile.TemporaryDirectory() as d:
