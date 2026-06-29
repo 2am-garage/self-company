@@ -80,6 +80,27 @@ class TestDailyRun(unittest.TestCase):
         finally:
             subprocess.run(["rm", "-rf", d])
 
+    def test_token_breaker_caps_agent(self):
+        # B1: with the per-day agent-run counter already past the cap, the agent
+        # step is skipped (no claude call) — proven hermetically by pre-maxing it.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            date = subprocess.check_output(["date", "+%F"], text=True).strip()
+            logs = os.path.join(company, "ops", "logs")
+            os.makedirs(logs, exist_ok=True)
+            with open(os.path.join(logs, f".agent_runs_{date}"), "w") as f:
+                f.write("99\n")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d])  # agent ON by default
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(logs, f"daily-{date}.md")) as f:
+                text = f.read()
+            self.assertIn("cap reached", text)
+            # the agent must NOT have been invoked (no audit log created)
+            self.assertFalse(os.path.exists(os.path.join(logs, f"agent-{date}.log")))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
 
 class TestInstallHook(unittest.TestCase):
     SH = os.path.join(REPO, "scripts", "install-hook.sh")

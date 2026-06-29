@@ -50,13 +50,13 @@ printf '\n## Daily run %s%s\n' "$ts" "$($DRY_RUN && echo ' (dry-run)')" >> "$LOG
 # Capture each script's JSON to a temp file, then parse via a heredoc that reads
 # the FILES by path. (Piping data INTO a `python3 <<'PY'` heredoc does not work —
 # the heredoc itself becomes stdin, so the pipe is ignored.)
-DOUT="$(mktemp)"; EOUT="$(mktemp)"; VOUT="$(mktemp)"
-trap 'rm -f "$DOUT" "$EOUT" "$VOUT"' EXIT
+DOUT="$(mktemp)"; EOUT="$(mktemp)"; VOUT="$(mktemp)"; SERR="$(mktemp)"
+trap 'rm -f "$DOUT" "$EOUT" "$VOUT" "$SERR"' EXIT
 
 if [[ -f "$SCRIPTS/decay.py" ]]; then
   decay_args=(--memory-dir "$MEM" --config "$POLICY")
   $DRY_RUN || decay_args+=(--apply)
-  python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>/dev/null || true
+  python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>>"$SERR" || true
 fi
 # VERIFY: stamp verified_date on memories whose [session#line] sources trace to a
 # real transcript line (deterministic provenance gate). Before entropy so the KPI
@@ -64,10 +64,10 @@ fi
 if [[ -f "$SCRIPTS/verify_memory.py" ]]; then
   verify_args=(--memory-dir "$MEM" --transcripts-dir "$HOME/.claude/projects")
   $DRY_RUN || verify_args+=(--apply)
-  python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>/dev/null || true
+  python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>>"$SERR" || true
 fi
 [[ -f "$SCRIPTS/entropy.py" ]] && \
-  python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>/dev/null || true
+  python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
 
 DRY_FLAG="$($DRY_RUN && echo 1 || echo 0)"
 python3 - "$DOUT" "$EOUT" "$VOUT" "$LOG" "$DRY_FLAG" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
@@ -121,11 +121,35 @@ with open(log, "a") as f:
     f.write("\n".join(lines) + "\n")
 PY
 
+# C2: surface any script warnings/errors instead of swallowing them (e.g. the
+# policy-provenance [WARN] that P3 added, or a real crash).
+if [[ -s "$SERR" ]]; then
+  {
+    echo "- script warnings/errors:"
+    sed 's/^/    /' "$SERR" | head -20
+  } >> "$LOG"
+fi
+
 # --- 3. optional headless agent (CONSOLIDATE / VERIFY judgment) -------------
 if $RUN_AGENT; then
+  # B1 token-breaker proxy: cap headless-agent runs per day (a proxy for the
+  # policy §3 daily token ceiling — the agent step is the only token spend). Past
+  # the cap, degrade to deterministic-only so unattended runs can't overspend.
+  CAP="$(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
+try:
+    from policy_config import load_policy_constants as L
+    print(int(L('$POLICY').get('DAILY_RUNS_PER_DAY', 4)))
+except Exception:
+    print(4)" 2>/dev/null || echo 4)"
+  COUNTER="$LOGDIR/.agent_runs_$DATE"
+  RUNS="$(cat "$COUNTER" 2>/dev/null || echo 0)"
+  [[ "$RUNS" =~ ^[0-9]+$ ]] || RUNS=0
   CLAUDE_BIN="$(command -v claude || true)"
   [[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
-  if [[ -n "$CLAUDE_BIN" ]]; then
+  if (( RUNS >= CAP )); then
+    echo "- agent: skipped — daily agent-run cap reached ($RUNS/$CAP, token breaker)" >> "$LOG"
+  elif [[ -n "$CLAUDE_BIN" ]]; then
+    AGENT_LOG="$LOGDIR/agent-$DATE.log"
     read -r -d '' PROMPT <<EOF || true
 You are the self-company DAILY maintenance agent running non-interactively (no human).
 Working dir: $PROJECT_DIR . Memory lives in .company/memory (L0-working, L1-warm, L2-cold).
@@ -139,13 +163,18 @@ Do a CONSERVATIVE consolidation pass per references/pipeline.md and references/m
 - Append a short summary of what you changed to .company/ops/logs/daily-$DATE.md.
 Be quick and conservative. If unsure, leave it and just note it in the log.
 EOF
+    # A3: capture the agent's stdout/stderr to an audit log (not /dev/null).
     # Recursion guard so this agent's own Stop hook (CAPTURE) no-ops; hard timeout.
-    if SELF_COMPANY_CAPTURE_ACTIVE=1 timeout "${SELF_COMPANY_DAILY_TIMEOUT:-600}" \
+    printf '\n===== agent run %s =====\n' "$ts" >> "$AGENT_LOG"
+    SELF_COMPANY_CAPTURE_ACTIVE=1 timeout "${SELF_COMPANY_DAILY_TIMEOUT:-600}" \
          "$CLAUDE_BIN" -p "$PROMPT" --model "${SELF_COMPANY_DAILY_MODEL:-claude-sonnet-4-6}" \
-         >/dev/null 2>&1; then
-      echo "- agent (consolidate/verify): ok" >> "$LOG"
+         >>"$AGENT_LOG" 2>&1
+    rc=$?
+    echo "$((RUNS + 1))" > "$COUNTER"   # B1: count the run (it spent tokens) toward the cap
+    if (( rc == 0 )); then
+      echo "- agent (consolidate/verify): ok [run $((RUNS + 1))/$CAP; stdout in agent-$DATE.log]" >> "$LOG"
     else
-      echo "- agent: skipped/failed (rc $?) — deterministic maintenance still applied" >> "$LOG"
+      echo "- agent: failed (rc $rc) [run $((RUNS + 1))/$CAP] — deterministic maintenance still applied" >> "$LOG"
     fi
   else
     echo "- agent: claude CLI not found — skipped (deterministic maintenance applied)" >> "$LOG"
