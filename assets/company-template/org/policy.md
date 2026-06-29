@@ -150,6 +150,13 @@ Phoebe oversees both pipelines:
 
 ## 6. Upgrade Loop (Company Self-Upgrade)
 
+> **Gated by skeleton immutability.** Any step that edits the skill skeleton
+> (SKILL.md / scripts / references / assets / personas) runs ONLY in the skill's
+> development repo (`.self-company-dev` marker) or on explicit Chairman order
+> (`SELF_COMPANY_ALLOW_SKELETON=1`). Check `scripts/skeleton_guard.sh` first. In a
+> usage project the loop still diagnoses and reports, but changes stay inside
+> `.company/`. See SKILL.md "Governance: Skeleton Immutability".
+
 Company self-iteration process:
 
 ```

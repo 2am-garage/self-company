@@ -131,6 +131,32 @@ Full spec: **[references/execution-model.md](references/execution-model.md)**.
 
 ---
 
+## Governance: Skeleton Immutability (dev vs usage)
+
+This skill is **self-improving — but only in its own development repo.**
+
+- **Development repo** (the skill's source, marked by a `.self-company-dev` file at
+  the working-tree root): changes to the skill **skeleton** — `SKILL.md`,
+  `scripts/`, `references/`, `assets/`, `design/`, employee personas — are made
+  here, committed, and become part of the skill. The full upgrade loop (Tony
+  proposes → Elon decides → Phoebe plans → Bob/Tom implement on the skill files)
+  runs here.
+- **Usage (any other project)**: the company operates **entirely within that
+  project's `.company/`** (memory, ops, reports) and must **NOT modify its own
+  skeleton** — no edits to `SKILL.md`/`scripts/`/personas — **unless the Chairman
+  explicitly orders it** (`SELF_COMPANY_ALLOW_SKELETON=1`). Elon's daily survey
+  there only inspects and reports; it never self-modifies.
+
+**Before any skill-source edit, consult the guard:**
+```bash
+bash .company/scripts/skeleton_guard.sh   # exit 0 = allowed, exit 1 = locked
+```
+Allowed only when `.self-company-dev` is present (dev repo) or the Chairman set
+`SELF_COMPANY_ALLOW_SKELETON=1`. This is what makes the self-upgrading company
+safe to deploy inside a real codebase: it won't rewrite itself there.
+
+---
+
 ## Session Catch-Up Notification (Chairman opt-in: "Option B")
 
 The unattended daily cron (`schedule.sh`) runs silently and only writes logs. So

@@ -17,9 +17,10 @@ import _helpers
 REPO = _helpers.REPO_ROOT
 
 
-def _bash(args, **kw):
+def _bash(args, env=None, **kw):
     return subprocess.run(["bash", *args], capture_output=True, text=True,
-                          stdin=subprocess.DEVNULL, **kw)
+                          stdin=subprocess.DEVNULL,
+                          env={**os.environ, **(env or {})}, **kw)
 
 
 def _fresh_project():
@@ -156,6 +157,24 @@ class TestScheduleGuards(unittest.TestCase):
             r = _bash([os.path.join(REPO, "scripts", "schedule.sh"), "install", d])
             self.assertEqual(r.returncode, 1)
             self.assertIn(".company not found", r.stderr)
+
+
+class TestSkeletonGuard(unittest.TestCase):
+    SH = os.path.join(REPO, "scripts", "skeleton_guard.sh")
+
+    def test_dev_marker_allows(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, ".self-company-dev"), "w").close()
+            self.assertEqual(_bash([self.SH, d]).returncode, 0)
+
+    def test_usage_mode_locked(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(_bash([self.SH, d]).returncode, 1)
+
+    def test_chairman_override_allows(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = _bash([self.SH, d], env={"SELF_COMPANY_ALLOW_SKELETON": "1"})
+            self.assertEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":

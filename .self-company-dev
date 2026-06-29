@@ -1,0 +1,11 @@
+This file marks the self-company skill's DEVELOPMENT repository.
+
+Its presence permits changes to the skill SKELETON — SKILL.md, scripts/,
+references/, assets/, design/, and the employee personas. The full self-upgrade
+loop (Tony proposes -> Elon decides -> Phoebe plans -> Bob/Tom implement on the
+skill files) runs only where this marker exists.
+
+When the skill is USED in any other project, this marker is absent: the company
+operates entirely within that project's .company/ (memory, ops, reports) and must
+NOT modify its own skeleton, unless the Chairman explicitly orders otherwise
+(SELF_COMPANY_ALLOW_SKELETON=1). See SKILL.md "Governance: Skeleton Immutability".
