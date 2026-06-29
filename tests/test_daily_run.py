@@ -57,7 +57,8 @@ class TestDailyRun(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             log = os.path.join(company, "ops", "logs",
                                "daily-" + subprocess.check_output(["date", "+%F"], text=True).strip() + ".md")
-            text = open(log).read()
+            with open(log) as f:
+                text = f.read()
             self.assertIn("(dry-run)", text)
             self.assertIn("- decay:", text)
             self.assertIn("- entropy", text)
@@ -94,7 +95,8 @@ class TestInstallHook(unittest.TestCase):
                 json.dump({"permissions": {"allow": ["Bash(ls)"]}}, f)
             _bash([self.SH, "install", d])
             _bash([self.SH, "install", d])  # twice -> still one
-            cfg = json.load(open(self._settings(d)))
+            with open(self._settings(d)) as f:
+                cfg = json.load(f)
             self.assertEqual(len(cfg["hooks"]["Stop"]), 1)
             self.assertEqual(cfg["permissions"]["allow"], ["Bash(ls)"])  # preserved
             cmd = cfg["hooks"]["Stop"][0]["hooks"][0]["command"]
@@ -117,7 +119,8 @@ class TestInstallHook(unittest.TestCase):
                 json.dump({"permissions": {"allow": ["Bash(ls)"]}}, f)
             _bash([self.SH, "install", d])
             _bash([self.SH, "uninstall", d])
-            cfg = json.load(open(self._settings(d)))
+            with open(self._settings(d)) as f:
+                cfg = json.load(f)
             self.assertNotIn("hooks", cfg)
             self.assertEqual(cfg["permissions"]["allow"], ["Bash(ls)"])
 
