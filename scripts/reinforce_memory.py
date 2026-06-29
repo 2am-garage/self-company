@@ -56,8 +56,12 @@ try:
 except Exception:
     _HAS_DEPS = False
 
-DEFAULT_THRESHOLD = 0.92
-SOURCE_ITEM_RE = re.compile(r'"[^"]*"|\[[^\]]*\]')
+DEFAULT_THRESHOLD = 0.85   # tuned: catches clear re-observations (~0.88) but not
+                           # merely-related-but-distinct ones (~0.80), with margin.
+# Source items are the quoted strings in a `sources: ["[s#1]", "[s#2]"]` list.
+# (An earlier `"..."|[...]` form wrongly matched the outer bracket and corrupted
+# the merged line — never reintroduce the bracket alternative.)
+SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
 
 
 def parse_frontmatter(text):

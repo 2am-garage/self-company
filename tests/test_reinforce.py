@@ -10,6 +10,7 @@ import os
 os.environ["SC_RAG_REEXEC"] = "1"  # do NOT re-exec into the venv during tests
 
 import importlib.util
+import tempfile
 import unittest
 
 import _helpers
@@ -62,6 +63,40 @@ class TestPlan(unittest.TestCase):
             mems, [("a", "b", 0.95), ("a", "c", 0.94), ("b", "c", 0.93)], 0.92)
         involved = [x for rr in r for x in (rr["canonical"], rr["absorbed"])]
         self.assertEqual(len(involved), len(set(involved)))  # no id reused
+
+
+def _write(path, id, sources):
+    with open(path, "w") as f:
+        f.write(f"---\nid: {id}\ntier: L0\nowner: Tony\nsources: {sources}\n"
+                f"created: 2026-06-01\nlast_reinforced: 2026-06-01\nreinforce_count: 1\n"
+                f"decay_score: 1.0\nstatus: active\n---\nbody {id}\n")
+
+
+class TestApplyMergesSources(unittest.TestCase):
+    def test_merge_produces_valid_balanced_sources(self):
+        # Regression: the source merge must not corrupt the frontmatter (an earlier
+        # regex produced unbalanced `[["[...]]`).
+        with tempfile.TemporaryDirectory() as d:
+            import os
+            cp = os.path.join(d, "c.md")
+            ap = os.path.join(d, "a.md")
+            _write(cp, "c", '["[A#1]"]')
+            _write(ap, "a", '["[B#2]"]')
+            with open(cp) as f:
+                canon = {"id": "c", "path": cp, "text": f.read()}
+            with open(ap) as f:
+                absorbed = {"id": "a", "path": ap, "text": f.read()}
+            rm.apply_reinforcement(canon, absorbed, "2026-06-30")
+            self.assertFalse(os.path.exists(ap))           # duplicate removed
+            with open(cp) as f:
+                t = f.read()
+            sline = [l for l in t.splitlines() if l.startswith("sources:")][0]
+            v = sline.split(":", 1)[1].strip()
+            self.assertEqual(v.count("["), v.count("]"))   # balanced — no corruption
+            self.assertIn('"[A#1]"', t)
+            self.assertIn('"[B#2]"', t)                    # both sources merged in
+            self.assertIn("reinforce_count: 2", t)
+            self.assertIn("last_reinforced: 2026-06-30", t)
 
 
 if __name__ == "__main__":
