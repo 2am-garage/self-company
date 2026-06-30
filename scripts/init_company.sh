@@ -128,8 +128,17 @@ copy_scripts() {
     log_success "Copied capture-trigger.py into ${TARGET_DIR}/scripts/"
   fi
 
-  # Daily-run + scheduler + hook installer + RAG setup + skeleton guard (Tom's automation).
-  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh skeleton_guard.sh; do
+  # Scheduled-work ledger (report.py) + event trigger #3 engine (trigger_engine.py).
+  for p in report.py trigger_engine.py; do
+    if [[ -f "${SCRIPT_DIR}/${p}" ]]; then
+      cp "${SCRIPT_DIR}/${p}" "${TARGET_DIR}/scripts/" \
+        && chmod +x "${TARGET_DIR}/scripts/${p}" 2>/dev/null || true
+      log_success "Copied ${p} into ${TARGET_DIR}/scripts/"
+    fi
+  done
+
+  # Daily-run + scheduler + hook installer + RAG setup + skeleton guard + event trigger entry.
+  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh skeleton_guard.sh fire-trigger.sh; do
     if [[ -f "${SCRIPT_DIR}/${s}" ]]; then
       cp "${SCRIPT_DIR}/${s}" "${TARGET_DIR}/scripts/" \
         && chmod +x "${TARGET_DIR}/scripts/${s}" 2>/dev/null || true

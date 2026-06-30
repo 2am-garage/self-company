@@ -1,0 +1,9 @@
+# Example. Fired by an external producer when a training run finishes:
+#   .company/scripts/fire-trigger.sh example-training-done '{"val_bpb": 0.98}'
+name: example-training-done
+on: push
+condition: val_bpb < 0.99
+action: A training run improved val_bpb. Review the result and propose the next experiment via Phoebe.
+cooldown: 30m
+dedupe: true
+budget: 20000

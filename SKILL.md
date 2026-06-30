@@ -208,6 +208,37 @@ This is the artifact the Chairman wakes up to.
 
 ---
 
+## Triggers — three ways the company starts working
+
+| # | Trigger | Mechanism | Fired by |
+|---|---|---|---|
+| 1 | Chairman calls | conversation | the Chairman |
+| 2 | Clock | cron → `daily-run.sh` (every 6h) | time |
+| 3 | **Event** | **`fire-trigger.sh <name> <payload>`** (push) | any external program / user-defined |
+
+**Trigger #3 (event-driven)** is push-first: the company is dormant until an
+external producer (a training run, trading bot, CI job, …) fires it — no polling,
+no daemon. Triggers are **user-defined**, declarative, one file per trigger under
+`org/triggers/<name>.yaml` (flat `key: value`; see `org/triggers/README.md`). The
+engine is never edited:
+
+```
+your program ── fire-trigger.sh training-done '{"val_bpb":0.98}' ──┐
+                                                                    ▼
+   trigger_engine.py: eval condition → guards(cooldown/dedupe/daily-cap)
+                                                                    │ pass
+                                          detached, bounded `claude -p` → Phoebe
+```
+
+Decision is deterministic and testable (`trigger_engine.py`); orchestration —
+the bounded, recursion-guarded, detached agent — lives in `fire-trigger.sh`, the
+same split as `daily-run.sh`. Every call (fired or held) is appended to
+`ops/reports/triggers.md`. For sources that *cannot* call us, an optional cron
+**poll adapter** can check them and call the same entry point — push primary,
+poll only as a fallback.
+
+---
+
 ## How to Install
 
 Run:
