@@ -14,12 +14,15 @@ Usage:
   notify-status.py --emit-hook [--company DIR]  # SessionStart hook mode (see below)
 
 --emit-hook is the SessionStart wiring: it runs when the Chairman opens a session.
-If there are new background runs AND they are SUBSTANTIVE (entropy/memory moved,
-something decayed, or there are pending TODOs), it prints a SessionStart
-additionalContext payload instructing the agent to send exactly ONE PushNotification
-(push only — never Discord, per the Chairman's standing preference) and then
-self-acks so the same window is never re-pushed. If nothing substantive changed it
-silently acks and prints nothing — zero noise on quiet days.
+The REPORT and the PUSH are decoupled:
+  * REPORT — if the company has ever run, it ALWAYS emits the recent scheduled-work
+    ledger as SessionStart additionalContext, so the Chairman sees the report on
+    every entry (this is what he kept not seeing when it was gated).
+  * PUSH — only when there are NEW runs since the marker AND they are SUBSTANTIVE
+    (entropy/memory moved, decay, or pending TODOs) does it also ask the agent to
+    send ONE PushNotification (push only — never Discord) and advance the marker.
+The marker governs the push alone; a self-ack can never swallow the report.
+If the company has never run, it stays silent.
 
 Pure stdlib.
 """
@@ -166,24 +169,24 @@ def main(argv=None):
         return 0
 
     if args.emit_hook:
-        runs = collect_runs(company, read_marker(company))
-        if not runs:
-            return 0                          # nothing new — silent
-        if not substantive(company, runs):
-            write_marker(company)             # quiet ack, no notification
-            return 0
-        ctx = (
-            f"[self-company] {len(runs)} background maintenance run(s) completed while you were "
-            f"away. {summarize(runs)}. Per the Chairman's standing push-notification-only "
-            f"preference, send exactly ONE PushNotification with this summary now — push only, "
-            f"do NOT use Discord. This catch-up is already acknowledged; do not run "
-            f"notify-status --ack for it."
-        )
-        ledger = recent_ledger_md(company)    # show the report inline (Chairman's request)
-        if ledger:
-            ctx += ("\nThen display this scheduled-work ledger to the Chairman inline in your "
-                    "reply, rendered as-is (it is the report he asked to see here):\n\n" + ledger)
-        write_marker(company)                 # ack now: deterministic, never double-pushes
+        # The REPORT and the PUSH are decoupled (the Chairman kept "not seeing the
+        # report"): always surface the ledger on session entry; only the push is
+        # gated on substantive new runs + the marker. A self-ack must never be able
+        # to swallow the report — the marker governs the push alone.
+        all_runs = collect_runs(company, None)
+        if not all_runs:
+            return 0                          # company has never run — nothing to show
+        ledger = recent_ledger_md(company)
+        ctx = ("[self-company] Scheduled-work report. Render this ledger inline to the "
+               "Chairman in your reply — it is the report he wants to see on entry, "
+               "every session, whether or not anything changed:\n\n" + ledger)
+
+        new_runs = collect_runs(company, read_marker(company))
+        if new_runs and substantive(company, new_runs):
+            ctx += (f"\n\nAlso, {len(new_runs)} new run(s) since last seen — {summarize(new_runs)}. "
+                    f"Send exactly ONE PushNotification with that summary (push only, never "
+                    f"Discord). Already acknowledged; do not run notify-status --ack for it.")
+            write_marker(company)             # ack ONLY the push, not the report
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "SessionStart", "additionalContext": ctx}}))
         return 0
