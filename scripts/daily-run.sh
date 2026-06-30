@@ -133,6 +133,14 @@ except Exception:
     print('- elon survey: no output')" >> "$LOG" || true
 fi
 
+# Scheduled-work ledger (autoresearch-style): regenerate ops/reports/ledger.md so
+# the Chairman wakes up to a one-row-per-run report — entropy headline, keep/flat/
+# skip/fail verdict, one-line description. Read-only over the logs; deterministic.
+if [[ -f "$SCRIPTS/report.py" ]]; then
+  python3 "$SCRIPTS/report.py" --company "$COMPANY" --write >/dev/null 2>>"$SERR" \
+    && echo "- ledger: refreshed ops/reports/ledger.{md,tsv}" >> "$LOG" || true
+fi
+
 # C2: surface any script warnings/errors instead of swallowing them (e.g. the
 # policy-provenance [WARN] that P3 added, or a real crash).
 if [[ -s "$SERR" ]]; then

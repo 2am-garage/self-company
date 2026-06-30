@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 ###############################################################################
-# install-hook.sh — install/uninstall/status the CAPTURE Stop hook (Tom's job).
+# install-hook.sh — install/uninstall/status the self-company hooks (Tom's job).
 #
-# Ships the hook-install mechanism *inside the skill*. Writes the Stop hook into
-# the project's `.claude/settings.json` (the SHARED settings file) — NOT
-# settings.local.json, because Claude Code's permission auto-writer rewrites
-# settings.local.json and would clobber an externally-added hook. settings.json
-# is stable. The merge preserves any existing settings/hooks.
+# Installs TWO hooks into the project's `.claude/settings.json` (the SHARED
+# settings file) — NOT settings.local.json, because Claude Code's permission
+# auto-writer rewrites settings.local.json and would clobber an externally-added
+# hook. settings.json is stable. The merge preserves any existing settings/hooks.
+#
+#   Stop         -> capture-trigger.py     (CAPTURE: cheap real-time memory capture)
+#   SessionStart -> notify-status.py --emit-hook  (catch-up PUSH on session entry:
+#                   surfaces unattended daily-run results; pushes only when something
+#                   substantive changed, then self-acks. push-only, never Discord.)
 #
 # Usage:
 #   install-hook.sh install   [PROJECT_DIR]
@@ -19,13 +23,22 @@ CMD="${1:-status}"
 PROJECT_DIR="${2:-${SELF_COMPANY_PROJECT_DIR:-$PWD}}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")"
 SETTINGS="$PROJECT_DIR/.claude/settings.json"
-MARK="self-company-capture"
-HOOK_CMD='python3 "$CLAUDE_PROJECT_DIR/.company/scripts/capture-trigger.py" --company "$CLAUDE_PROJECT_DIR/.company"'
+STOP_MARK="self-company-capture"
+STOP_CMD='python3 "$CLAUDE_PROJECT_DIR/.company/scripts/capture-trigger.py" --company "$CLAUDE_PROJECT_DIR/.company"'
+NOTIFY_MARK="self-company-notify"
+NOTIFY_CMD='python3 "$CLAUDE_PROJECT_DIR/.company/scripts/notify-status.py" --company "$CLAUDE_PROJECT_DIR/.company" --emit-hook'
 
-python3 - "$CMD" "$SETTINGS" "$MARK" "$HOOK_CMD" <<'PY'
+python3 - "$CMD" "$SETTINGS" "$STOP_MARK" "$STOP_CMD" "$NOTIFY_MARK" "$NOTIFY_CMD" <<'PY'
 import json, os, sys
 
-cmd, settings, mark, hook_cmd = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+cmd, settings = sys.argv[1], sys.argv[2]
+stop_mark, stop_cmd, notify_mark, notify_cmd = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+
+# (settings event, marker, command) for every hook this skill owns
+HOOKS = [
+    ("Stop", stop_mark, stop_cmd),
+    ("SessionStart", notify_mark, notify_cmd),
+]
 
 def load():
     try:
@@ -37,11 +50,8 @@ def load():
         print(f"[install-hook] error: {settings} is not valid JSON ({e})", file=sys.stderr)
         sys.exit(1)
 
-def is_ours(group):
-    for h in group.get("hooks", []):
-        if mark in h.get("command", ""):
-            return True
-    return False
+def is_ours(group, mark):
+    return any(mark in h.get("command", "") for h in group.get("hooks", []))
 
 def save(d):
     os.makedirs(os.path.dirname(settings), exist_ok=True)
@@ -50,28 +60,35 @@ def save(d):
         f.write("\n")
 
 d = load()
-stop = d.setdefault("hooks", {}).setdefault("Stop", [])
-# our hook command carries the marker as a trailing shell comment so we can find it
-marked_cmd = hook_cmd + f'  # {mark}'
 
 if cmd == "install":
-    stop[:] = [g for g in stop if not is_ours(g)]            # idempotent
-    stop.append({"hooks": [{"type": "command", "command": marked_cmd}]})
+    hooks = d.setdefault("hooks", {})
+    for event, mark, hook_cmd in HOOKS:
+        groups = hooks.setdefault(event, [])
+        groups[:] = [g for g in groups if not is_ours(g, mark)]   # idempotent
+        groups.append({"hooks": [{"type": "command", "command": f"{hook_cmd}  # {mark}"}]})
     save(d)
-    print(f"[install-hook] installed CAPTURE Stop hook -> {settings}")
+    print(f"[install-hook] installed Stop(capture) + SessionStart(notify) hooks -> {settings}")
 elif cmd == "uninstall":
-    before = len(stop)
-    stop[:] = [g for g in stop if not is_ours(g)]
-    if not stop:
-        d["hooks"].pop("Stop", None)
-        if not d["hooks"]:
-            d.pop("hooks", None)
+    hooks = d.get("hooks", {})
+    removed = 0
+    for event, mark, _ in HOOKS:
+        groups = hooks.get(event, [])
+        before = len(groups)
+        groups[:] = [g for g in groups if not is_ours(g, mark)]
+        removed += before - len(groups)
+        if not groups:
+            hooks.pop(event, None)
+    if not hooks:
+        d.pop("hooks", None)
     save(d)
-    print("[install-hook] removed CAPTURE Stop hook" if before else "[install-hook] nothing to remove")
+    print(f"[install-hook] removed {removed} self-company hook(s)" if removed
+          else "[install-hook] nothing to remove")
 elif cmd == "status":
-    installed = any(is_ours(g) for g in stop)
-    print("[install-hook] INSTALLED" if installed else "[install-hook] not installed")
-    sys.exit(0 if installed else 0)
+    hooks = d.get("hooks", {})
+    for event, mark, _ in HOOKS:
+        ok = any(is_ours(g, mark) for g in hooks.get(event, []))
+        print(f"[install-hook] {event}: {'INSTALLED' if ok else 'not installed'}")
 else:
     print("usage: install-hook.sh [install|uninstall|status] [PROJECT_DIR]", file=sys.stderr)
     sys.exit(2)

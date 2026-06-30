@@ -8,6 +8,7 @@ detection (excluding dry-runs), the marker/ack cycle, and the summary string.
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -78,6 +79,44 @@ class TestNotify(unittest.TestCase):
 
     def test_empty_summary_when_no_runs(self):
         self.assertIn("no new", ns.summarize([]))
+
+    def test_emit_hook_substantive_pushes_and_self_acks(self):
+        # LOG has drop>0 and entropy moving 0.1 -> 0.0: clearly substantive.
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, LOG)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ns.main(["--company", c, "--emit-hook"])
+            out = buf.getvalue().strip()
+            self.assertTrue(out, "expected a hook payload for substantive runs")
+            payload = json.loads(out)
+            ctx = payload["hookSpecificOutput"]["additionalContext"]
+            self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+            self.assertIn("PushNotification", ctx)
+            self.assertIn("do NOT use Discord", ctx)
+            # self-acked: a second emit-hook run is now silent
+            self.assertTrue(os.path.exists(os.path.join(c, "ops", ".last_notified")))
+            buf2 = io.StringIO()
+            with contextlib.redirect_stdout(buf2):
+                ns.main(["--company", c, "--emit-hook"])
+            self.assertEqual(buf2.getvalue().strip(), "")
+
+    def test_emit_hook_quiet_when_flat(self):
+        # All-flat run: no decay, entropy unchanged, no memory delta, no TODO.
+        flat = ("## Daily run 2026-06-26T06:07:01\n"
+                "- decay --apply: scanned 9 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+                "- entropy 0.03 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.03) over 9 memories\n"
+                "\n## Daily run 2026-06-26T12:07:01\n"
+                "- decay --apply: scanned 9 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+                "- entropy 0.03 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.03) over 9 memories\n")
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, flat)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ns.main(["--company", c, "--emit-hook"])
+            self.assertEqual(buf.getvalue().strip(), "")        # silent
+            # but it still acked, so the window won't be re-examined
+            self.assertTrue(os.path.exists(os.path.join(c, "ops", ".last_notified")))
 
 
 if __name__ == "__main__":
