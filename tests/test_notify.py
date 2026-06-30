@@ -80,7 +80,7 @@ class TestNotify(unittest.TestCase):
     def test_empty_summary_when_no_runs(self):
         self.assertIn("no new", ns.summarize([]))
 
-    def test_emit_hook_substantive_pushes_and_self_acks(self):
+    def test_emit_hook_substantive_shows_ledger_and_pushes(self):
         # LOG has drop>0 and entropy moving 0.1 -> 0.0: clearly substantive.
         with tempfile.TemporaryDirectory() as d:
             c = _company(d, LOG)
@@ -88,21 +88,22 @@ class TestNotify(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 ns.main(["--company", c, "--emit-hook"])
             out = buf.getvalue().strip()
-            self.assertTrue(out, "expected a hook payload for substantive runs")
-            payload = json.loads(out)
-            ctx = payload["hookSpecificOutput"]["additionalContext"]
-            self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-            self.assertIn("PushNotification", ctx)
-            self.assertIn("do NOT use Discord", ctx)
-            # self-acked: a second emit-hook run is now silent
-            self.assertTrue(os.path.exists(os.path.join(c, "ops", ".last_notified")))
+            self.assertTrue(out, "expected a hook payload")
+            ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Scheduled-work report", ctx)        # report always present
+            self.assertIn("| run | entropy", ctx)              # the ledger table
+            self.assertIn("PushNotification", ctx)             # + push, since substantive
+            self.assertIn("Discord", ctx)                      # push-only guard mentioned
+            # push self-acked, but the REPORT must STILL show on a second run
             buf2 = io.StringIO()
             with contextlib.redirect_stdout(buf2):
                 ns.main(["--company", c, "--emit-hook"])
-            self.assertEqual(buf2.getvalue().strip(), "")
+            ctx2 = json.loads(buf2.getvalue().strip())["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Scheduled-work report", ctx2)       # report not swallowed
+            self.assertNotIn("PushNotification", ctx2)         # but no second push
 
-    def test_emit_hook_quiet_when_flat(self):
-        # All-flat run: no decay, entropy unchanged, no memory delta, no TODO.
+    def test_emit_hook_flat_still_shows_report_no_push(self):
+        # All-flat runs: report must STILL surface (decoupled), but no push.
         flat = ("## Daily run 2026-06-26T06:07:01\n"
                 "- decay --apply: scanned 9 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
                 "- entropy 0.03 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.03) over 9 memories\n"
@@ -114,9 +115,19 @@ class TestNotify(unittest.TestCase):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 ns.main(["--company", c, "--emit-hook"])
-            self.assertEqual(buf.getvalue().strip(), "")        # silent
-            # but it still acked, so the window won't be re-examined
-            self.assertTrue(os.path.exists(os.path.join(c, "ops", ".last_notified")))
+            ctx = json.loads(buf.getvalue().strip())["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Scheduled-work report", ctx)        # report shows anyway
+            self.assertNotIn("PushNotification", ctx)          # but nothing substantive -> no push
+
+    def test_emit_hook_silent_when_no_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            logs = os.path.join(d, ".company", "ops", "logs")
+            os.makedirs(logs)
+            open(os.path.join(logs, "daily-2026-06-26.md"), "w").close()  # no runs
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ns.main(["--company", os.path.join(d, ".company"), "--emit-hook"])
+            self.assertEqual(buf.getvalue().strip(), "")        # silent: never ran
 
 
 if __name__ == "__main__":
