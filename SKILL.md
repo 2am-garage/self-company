@@ -159,21 +159,52 @@ safe to deploy inside a real codebase: it won't rewrite itself there.
 
 ## Session Catch-Up Notification (Chairman opt-in: "Option B")
 
-The unattended daily cron (`schedule.sh`) runs silently and only writes logs. So
-the Chairman doesn't have to dig through logs, do this **once when self-company is
-first engaged in a session**:
+The unattended daily cron (`schedule.sh`) runs silently and only writes logs. The
+Chairman shouldn't have to dig through logs, so this is now **automated via a
+`SessionStart` hook** (installed by `install-hook.sh` alongside the Stop/CAPTURE
+hook):
 
-1. Run `python3 .company/scripts/notify-status.py`.
-2. If the JSON shows `new_runs > 0`, send the Chairman **one** `PushNotification`
-   with the `summary` string, AND state the same one-line summary in your reply —
-   PushNotification suppresses while the Chairman is actively typing (~60s), so the
-   in-chat line guarantees he sees it even when the push is held back.
-3. Then run `python3 .company/scripts/notify-status.py --ack` to mark "notified up
-   to here" so the same runs aren't reported again.
-4. If `new_runs == 0`, stay silent — no notification.
+- On session start the hook runs `notify-status.py --emit-hook`. If there are new
+  background runs AND they are **substantive** (entropy or memory count moved,
+  something decayed, or there are pending TODOs), it injects a `SessionStart`
+  `additionalContext` line telling the agent to send **one** `PushNotification`
+  with the summary — **push only, never Discord** (per the Chairman's
+  `push-notification-only` preference). The script self-acks, so the same window is
+  never pushed twice.
+- If nothing substantive changed, it silently acks and emits nothing — zero noise
+  on quiet days. This is the gate the Chairman asked for: notify only on real change.
+
+When you receive that `additionalContext`, also state the one-line summary in your
+reply — PushNotification suppresses while the Chairman is actively typing (~60s),
+so the in-chat line guarantees he sees it even when the push is held back. The
+payload also embeds the recent scheduled-work ledger (see below); render it inline
+in your reply so the Chairman sees the report here, not just a file path.
+
+Manual fallback (hook absent / ad-hoc check): run `notify-status.py`, and if
+`new_runs > 0` push the `summary`, then `notify-status.py --ack`.
 
 This is how the silent local cron reaches the Chairman's phone without Discord or
-a cloud agent: the cron does the work; the next agent session relays the summary.
+a cloud agent: the cron does the work; the SessionStart hook relays the summary.
+
+---
+
+## Scheduled-Work Ledger (autoresearch-style report)
+
+The push is a one-liner; the **report** is `ops/reports/ledger.md`, regenerated at
+the end of every `daily-run.sh` by `report.py`. Modeled on Karpathy's autoresearch
+`results.tsv`: one row per unattended run, a single headline metric (**entropy**,
+lower = healthier — the `val_bpb` analog), a verdict, and a one-line description.
+
+```
+| run         | entropy ↓  | mem | status | what happened                  |
+| 06-29 18:07 | 0.0356 v   | 45  | keep   | verify +14, merged 8 dup, ...  |
+| 06-30 06:07 | 0.0400 =   | 40  | flat   | no-op maintenance              |
+```
+
+Verdict: `keep` (something substantive moved), `flat` (clean but no change),
+`skip` (agent step capped/absent), `fail` (agent errored). Run on demand with
+`report.py --company .company` (`--write` to save, `--tsv` for the raw flat file).
+This is the artifact the Chairman wakes up to.
 
 ---
 

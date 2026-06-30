@@ -9,8 +9,17 @@ This script is deterministic and only READS logs + a marker file; it cannot push
 (PushNotification is an agent-only tool). The agent does the push.
 
 Usage:
-  notify-status.py [--company DIR]     # print JSON {new_runs, since, summary, details}
+  notify-status.py [--company DIR]        # print JSON {new_runs, since, summary, details}
   notify-status.py --ack [--company DIR]  # mark "notified up to now" (call after pushing)
+  notify-status.py --emit-hook [--company DIR]  # SessionStart hook mode (see below)
+
+--emit-hook is the SessionStart wiring: it runs when the Chairman opens a session.
+If there are new background runs AND they are SUBSTANTIVE (entropy/memory moved,
+something decayed, or there are pending TODOs), it prints a SessionStart
+additionalContext payload instructing the agent to send exactly ONE PushNotification
+(push only — never Discord, per the Chairman's standing preference) and then
+self-acks so the same window is never re-pushed. If nothing substantive changed it
+silently acks and prints nothing — zero noise on quiet days.
 
 Pure stdlib.
 """
@@ -96,24 +105,87 @@ def summarize(runs):
             f"memory {mem}, entropy {ent}, {dropped} decayed, agent ok {agents}/{n}")
 
 
+def write_marker(company):
+    p = Path(company) / MARKER
+    p.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().replace(microsecond=0).isoformat()
+    p.write_text(now + "\n", encoding="utf-8")
+    return now
+
+
+def recent_ledger_md(company, n=8):
+    """Render the last N rows of the scheduled-work ledger (report.py), or "" if
+    unavailable. Imported lazily by path so notify-status stays standalone."""
+    try:
+        import importlib.util
+        rp_path = Path(__file__).resolve().parent / "report.py"
+        spec = importlib.util.spec_from_file_location("report", rp_path)
+        rp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rp)
+        table = rp.build(rp.collect(company))
+        return rp.render_md(table[-n:]) if table else ""
+    except Exception:
+        return ""
+
+
+def substantive(company, runs):
+    """Did anything worth a push actually change across the new runs?"""
+    if any(b["drop"] for b in runs):
+        return True
+    ents = [b["entropy"] for b in runs if b["entropy"] is not None]
+    if ents and ents[0] != ents[-1]:
+        return True
+    mems = [b["memories"] for b in runs if b["memories"] is not None]
+    if mems and mems[0] != mems[-1]:
+        return True
+    # pending TODOs for the latest run's date count as worth surfacing
+    d = runs[-1]["ts"].strftime("%Y-%m-%d")
+    todo = Path(company) / "ops" / "plans" / f"todo-{d}.md"
+    if todo.exists() and re.search(r"^\s*\d+\.", todo.read_text(encoding="utf-8"), re.M):
+        return True
+    return False
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--company", default=".company")
     ap.add_argument("--ack", action="store_true",
                     help="Record 'notified up to now' (call after pushing).")
+    ap.add_argument("--emit-hook", action="store_true",
+                    help="SessionStart mode: emit a push instruction if substantive, then self-ack.")
     args = ap.parse_args(argv)
 
     company = args.company
     if not Path(company).exists():
-        print(json.dumps({"new_runs": 0, "since": None, "summary": "", "note": "no .company"}))
+        if not args.emit_hook:
+            print(json.dumps({"new_runs": 0, "since": None, "summary": "", "note": "no .company"}))
         return 0
 
     if args.ack:
-        p = Path(company) / MARKER
-        p.parent.mkdir(parents=True, exist_ok=True)
-        now = datetime.now().replace(microsecond=0).isoformat()
-        p.write_text(now + "\n", encoding="utf-8")
-        print(json.dumps({"acked_at": now}))
+        print(json.dumps({"acked_at": write_marker(company)}))
+        return 0
+
+    if args.emit_hook:
+        runs = collect_runs(company, read_marker(company))
+        if not runs:
+            return 0                          # nothing new — silent
+        if not substantive(company, runs):
+            write_marker(company)             # quiet ack, no notification
+            return 0
+        ctx = (
+            f"[self-company] {len(runs)} background maintenance run(s) completed while you were "
+            f"away. {summarize(runs)}. Per the Chairman's standing push-notification-only "
+            f"preference, send exactly ONE PushNotification with this summary now — push only, "
+            f"do NOT use Discord. This catch-up is already acknowledged; do not run "
+            f"notify-status --ack for it."
+        )
+        ledger = recent_ledger_md(company)    # show the report inline (Chairman's request)
+        if ledger:
+            ctx += ("\nThen display this scheduled-work ledger to the Chairman inline in your "
+                    "reply, rendered as-is (it is the report he asked to see here):\n\n" + ledger)
+        write_marker(company)                 # ack now: deterministic, never double-pushes
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": ctx}}))
         return 0
 
     since = read_marker(company)
