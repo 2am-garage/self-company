@@ -224,6 +224,17 @@ The script will:
 
 After completion, read `.company/org/policy.md` to understand the company charter, then start talking to Elon.
 
+### Optional local setup (not pre-installed on clone)
+
+These are opt-in and live only on your machine (`.claude/` is git-ignored):
+
+- **Hooks** — `scripts/install-hook.sh install` wires the `Stop` (CAPTURE) and
+  `SessionStart` (catch-up push) hooks into `.claude/settings.json`.
+- **Dev repo only** — if you cloned the skill's *development* repo (the one with a
+  `.self-company-dev` marker) and want it to load itself as a skill, run
+  `scripts/dev-link-skill.sh` to (re)create the `.claude/skills/self-company/`
+  symlinks. These are intentionally not committed.
+
 ---
 
 ## Language Rules
