@@ -208,6 +208,24 @@ This is the artifact the Chairman wakes up to.
 
 ---
 
+## On-demand views (Chairman asks → render inline)
+
+When the Chairman asks for any of these, run the script and render its output
+inline in your reply (don't just point at a file):
+
+| The Chairman says… | Run | Shows |
+|---|---|---|
+| "report" / "/report" / "scheduled work" | `report.py --company .company` | the scheduled-work ledger |
+| "who's working" / "org status" / "是不是 Elon 在做" | `org-status.py --company .company` | which employees acted recently + who is live now |
+
+`org-status.py` is an honest view: it attributes recent activity from the real
+logs (daily-run → Tony/Gibby/Elon/Tom, trigger ledger → Phoebe/Bob, employee
+`log.md`, and running `claude -p` processes). Interactive chat is Elon-fronted;
+the genuinely-separate work is the cron / dispatch / trigger agents — the view
+makes that split visible rather than pretending seven daemons are always busy.
+
+---
+
 ## Triggers — three ways the company starts working
 
 | # | Trigger | Mechanism | Fired by |
