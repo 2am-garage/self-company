@@ -36,6 +36,16 @@ LEDGER = """\
 """
 
 
+# assignments column is a code-spanned JSON fragment that is TRUNCATED mid-key.
+COMPANY_RUNS = """\
+# Company Runs (session-triggered)
+
+| time | task | planned by | assignments | rc |
+|---|---|---|---|---|
+| 2026-07-01T11:43:16 | improve the trigger ledger | heuristic | `{"bob": "improve the trigger ledger", "gibby": "verify it", "gib` | 0 |
+"""
+
+
 def _company(d):
     base = os.path.join(d, ".company")
     os.makedirs(os.path.join(base, "ops", "logs"))
@@ -44,6 +54,8 @@ def _company(d):
         f.write(DAILY)
     with open(os.path.join(base, "ops", "reports", "triggers.md"), "w") as f:
         f.write(LEDGER)
+    with open(os.path.join(base, "ops", "reports", "company-runs.md"), "w") as f:
+        f.write(COMPANY_RUNS)
     return base
 
 
@@ -62,6 +74,28 @@ class TestOrgStatus(unittest.TestCase):
             # Phoebe attributed from the trigger ledger fire
             self.assertIn("phoebe", acts)
             self.assertIn("dummy-e2e", acts["phoebe"][1])
+
+    def test_company_run_attribution(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d)
+            acts = {}
+            osx.scan_company_runs(c, acts)
+            # Both assigned employees attributed from the (truncated) JSON.
+            self.assertIn("bob", acts)
+            self.assertIn("gibby", acts)
+            self.assertTrue(acts["bob"][1].startswith("session:"))
+            self.assertIn("improve the trigger ledger", acts["bob"][1])
+            self.assertTrue(acts["gibby"][1].startswith("session:"))
+            # The truncated key `"gib` must NOT create a phantom employee.
+            self.assertNotIn("gib", acts)
+
+    def test_company_run_missing_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, ".company")
+            os.makedirs(os.path.join(base, "ops", "reports"))
+            acts = {}
+            osx.scan_company_runs(base, acts)   # no file -> no crash, no acts
+            self.assertEqual(acts, {})
 
     def test_render_lists_all_employees(self):
         with tempfile.TemporaryDirectory() as d:
