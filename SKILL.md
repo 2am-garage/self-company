@@ -1,15 +1,13 @@
 ---
 name: self-company
 description: |
-  Multi-agent personal company — automatically learns the Chairman (Uwe)'s habits and preferences,
-  and continuously fights entropy through structured memory, verification loop, and decay mechanisms.
-  After installation, creates a .company/ hidden skeleton in the current repo (git-ignored, private),
-  project-scoped and not shared across projects.
-  TRIGGER — Use when the user: mentions self-company, wants to install a personal agent assistant,
-  talks to Elon (or names Phoebe/July/Bob/Gibby/Tony/Tom), discusses company memory or Chairman habit records,
-  requests memory maintenance or anti-entropy, checks company entropy reports and health. Also covers
-  installing personal assistant skeleton, learning user habits and preferences, executing memory maintenance
-  (capture/organize/verify/decay), and related scenarios.
+  Multi-agent personal company that learns the Chairman (Uwe)'s habits, preferences, and background across sessions, and continuously fights entropy through structured tiered memory, a verification loop, and decay. On install it creates a git-ignored, project-scoped .company/ skeleton in the current repo (private, not shared across projects).
+  TRIGGER — use this skill proactively for the situations below EVEN WHEN the user never says "self-company" or names a persona:
+  - The user addresses or asks about our internal company personas — Elon (our CEO), Phoebe, July, Bob, Gibby, Tony, or Tom — by name or by role (CEO/PM/HR/RD/QA/Improvement/IT).
+  - The user wants an agent to REMEMBER their habits, preferences, decisions, or project context across sessions / long-term, or to set up a personal agent org/assistant that captures what they care about and fights knowledge, context, or memory rot over time.
+  - The user asks for memory maintenance on this agent's own long-term memory: consolidate or dedupe memories, decay/prune stale or contradictory records, verify memories against sources, capture/organize/reinforce, or compute a memory-entropy score/report.
+  - The user wants a company/org status readout: health or entropy report, which employees did what work, upgrades or improvements Tony proposes, Chairman habit records, or memory tiers.
+  DO NOT trigger when: "Elon"/"Musk" refers to the real person or an external company (only fire when the name maps to OUR CEO persona in this self-company context); the request is Taiwan stock trading (shioaji, e.g. "buy 2330"); the user wants to CREATE, build, make, edit, or optimize a NEW skill or slash-command (e.g. "create a new skill that…" — that is the skill-creator skill's job, never this one); it's payroll/email/dashboards/cron/PR-review for the user's REAL company or codebase; or "entropy/duplicates/cleanup" targets a CODEBASE, Obsidian notes, or a document rather than THIS company's memory.
 ---
 
 ## What This Is
