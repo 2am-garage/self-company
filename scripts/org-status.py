@@ -144,6 +144,44 @@ def scan_emp_logs(company, out):
     return out
 
 
+def scan_company_runs(company, out):
+    """Employees dispatched by a session-triggered company run (Trigger #4).
+
+    Reads <company>/ops/reports/company-runs.md. Each real table row is
+    `| time | task | planned by | assignments | rc |`. The assignments column
+    is a code-spanned JSON fragment that may be TRUNCATED (e.g. `{"bob": "...",
+    "gib`), so ids are pulled best-effort and kept only if they name a real
+    employee. Latest-wins. Robust to a missing/empty file.
+    """
+    p = Path(company) / "ops" / "reports" / "company-runs.md"
+    if not p.exists():
+        return out
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    # Real employees: prefer the on-disk roster, fall back to the known set.
+    known = {e[0] for e in EMPLOYEES}
+    emp_dir = Path(company) / "org" / "employees"
+    if emp_dir.is_dir():
+        known |= {d.name for d in emp_dir.iterdir() if d.is_dir()}
+    for ln in text.splitlines():
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 4:
+            continue
+        ts = _parse_ts(cells[0])
+        if ts is None:                        # header / separator / prose line
+            continue
+        task = cells[1]
+        for emp_id in re.findall(r'"(\w+)"\s*:', cells[3]):
+            if emp_id not in known:
+                continue                       # skip truncated / bogus keys
+            prev = out.get(emp_id)
+            if prev is None or prev[0] is None or ts > prev[0]:
+                out[emp_id] = (ts, f"session: {task}")
+    return out
+
+
 def live_agents():
     """Count running `claude -p` and describe them (cron / trigger / dispatch)."""
     try:
@@ -170,6 +208,7 @@ def render(company, window_hours):
     acts = scan_daily(company)
     scan_triggers(company, acts)
     scan_emp_logs(company, acts)
+    scan_company_runs(company, acts)
     live = live_agents()
     cutoff = now - timedelta(hours=window_hours)
 
