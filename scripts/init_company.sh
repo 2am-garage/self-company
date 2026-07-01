@@ -128,8 +128,9 @@ copy_scripts() {
     log_success "Copied capture-trigger.py into ${TARGET_DIR}/scripts/"
   fi
 
-  # Scheduled-work ledger (report.py) + event trigger #3 engine (trigger_engine.py).
-  for p in report.py trigger_engine.py; do
+  # Scheduled-work ledger (report.py) + event trigger #3 engine (trigger_engine.py)
+  # + org-status visualizer (org-status.py).
+  for p in report.py trigger_engine.py org-status.py; do
     if [[ -f "${SCRIPT_DIR}/${p}" ]]; then
       cp "${SCRIPT_DIR}/${p}" "${TARGET_DIR}/scripts/" \
         && chmod +x "${TARGET_DIR}/scripts/${p}" 2>/dev/null || true
