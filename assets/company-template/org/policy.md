@@ -204,6 +204,24 @@ Tom executes (modify skeleton, tune config, add schedule…)
 | Requires authorization | Needs Elon sign-off (may affect whole company) | No Elon approval needed (routine supervision) |
 | Work registration | Via Phoebe's planning and dispatch | July self-tuning (July autonomous) |
 
+### 6.2 Trigger changes must be measured (verify before merge)
+
+The skill's frontmatter `description` IS the trigger — it decides when the skill
+activates. Any change to it must be **measured with `scripts/trigger_eval.py`**
+against a trigger eval set (should-trigger + tricky should-not near-misses)
+BEFORE it merges. Gate: **recall must not drop and precision must not regress**
+versus the current description.
+
+Guard against a broken instrument. `trigger_eval.py` measures the REAL installed
+skill (does Claude actually invoke the Skill tool for it), not a proxy — first
+confirm it works via `--self-test` (the positive control must fire > 0). A harness
+that reads every version as ~0 is broken, not a verdict: it makes good and bad
+descriptions look identical. (Lesson learned: skill-creator's `run_eval` proxies
+the description as a temporary command and floored at ~0 in a headless env, so it
+could not discriminate; measure the real skill instead. Also: with only 3
+runs/query, queries near the 0.5 threshold flicker within noise — don't chase a
+perfect score against sampling noise.)
+
 ---
 
 ## Appendix A: Memory Tier Reference
