@@ -120,6 +120,16 @@ Verdict: `keep` (something substantive moved), `flat` (clean but no change),
 `report.py --company .company` (`--write` to save, `--tsv` for the raw flat file).
 This is the artifact the Chairman wakes up to.
 
+### Surfacing the report mid-session (P1)
+
+The SessionStart hook only fires on a **fresh** session, so in a long continuous
+session the report never re-surfaces on its own. To fix that, **at the start of
+each reply run `notify-status.py --company .company --delta`**; if it prints a
+one-line summary (new *substantive* runs since you last surfaced one), lead your
+reply with it. It uses a separate `.last_shown` marker (show-once) so it neither
+spams nor collides with the SessionStart push. On demand the Chairman can always
+say "report" → `report.py`.
+
 ### Improvement proposals (Tony, every scheduled run)
 
 The scheduled `daily-run.sh` agent step also has **Tony** append one grounded
