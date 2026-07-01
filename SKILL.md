@@ -86,8 +86,7 @@ Memory is layered: L0 (working, decay away), L1 (weeks-scale, promote on reinfor
 Re-observed and confirmed entries automatically promote (consolidation); memories not reinforced automatically decay and disappear.
 Only true signal is kept.
 
-Deterministic math (decay_score calculation, entropy measurement) is all done by Python script (`scripts/decay.py`, `scripts/entropy.py`, standard library only; bundled in `.company/` and travels with the project).
-Work that needs judgment (which observations to capture, organize placement, verify sources) is written as playbook commands, executed by the corresponding agent.
+Deterministic math (decay, entropy) runs in Python (`scripts/decay.py`, `scripts/entropy.py`); judgment work (what to capture, placement, source verification) is playbook commands run by the owning agent.
 
 Details:
 - **[references/pipeline.md](references/pipeline.md)** — detailed steps for four stages CAPTURE → ORGANIZE → WRITE → VERIFY, handoff brief format
@@ -113,19 +112,14 @@ Details:
 
 ## Execution Model (orchestration vs isolated worker sub-agents)
 
-The company runs in two tiers:
-
-- **Orchestration tier** — Elon (CEO), Phoebe (PM), July (HR lead) operate in the
-  main context. They hold the broad picture (this skill, design, policy,
-  summaries, plans) needed to set direction, plan/dispatch, and tune people.
-- **Execution tier** — the four workers Bob (RD), Gibby (QA), Tony (Improvement),
-  Tom (IT/Ops) run as **isolated sub-agents**. Each gets only its own `persona.md`,
-  the `reads` slice in its own `context.md`, and Phoebe's task brief — **not**
-  `SKILL.md`, the design, other employees' desks, or anything outside its slice.
-  This keeps each worker's full attention on its task, holds entropy out of the
-  main thread, and lets independent workers run **in parallel** (Phoebe dispatches
-  parallel sub-agents for independent tasks, serial handoff for dependency chains
-  like Bob→Gibby).
+The company runs in two tiers. **Orchestration** — Elon, Phoebe, July — work in
+the main context, holding the broad picture (skill, design, policy, plans) to set
+direction, dispatch, and tune people. **Execution** — the four workers (Bob, Gibby,
+Tony, Tom) — run as **isolated sub-agents**, each seeing only its own `persona.md`,
+its `context.md` `reads` slice, and Phoebe's brief — never `SKILL.md`, the design,
+or another desk. This keeps attention focused, holds entropy out of the main
+thread, and lets independent workers run in parallel (serial handoff for chains
+like Bob→Gibby).
 
 Full spec: **[references/execution-model.md](references/execution-model.md)**.
 
@@ -135,17 +129,13 @@ Full spec: **[references/execution-model.md](references/execution-model.md)**.
 
 This skill is **self-improving — but only in its own development repo.**
 
-- **Development repo** (the skill's source, marked by a `.self-company-dev` file at
-  the working-tree root): changes to the skill **skeleton** — `SKILL.md`,
-  `scripts/`, `references/`, `assets/`, `design/`, employee personas — are made
-  here, committed, and become part of the skill. The full upgrade loop (Tony
-  proposes → Elon decides → Phoebe plans → Bob/Tom implement on the skill files)
-  runs here.
+- **Development repo** (marked by a `.self-company-dev` file at the working-tree
+  root): the full upgrade loop runs here and edits the skill **skeleton** —
+  `SKILL.md`, `scripts/`, `references/`, `assets/`, `design/`, personas.
 - **Usage (any other project)**: the company operates **entirely within that
-  project's `.company/`** (memory, ops, reports) and must **NOT modify its own
-  skeleton** — no edits to `SKILL.md`/`scripts/`/personas — **unless the Chairman
-  explicitly orders it** (`SELF_COMPANY_ALLOW_SKELETON=1`). Elon's daily survey
-  there only inspects and reports; it never self-modifies.
+  project's `.company/`** and must **NOT modify its own skeleton unless the
+  Chairman explicitly orders it** (`SELF_COMPANY_ALLOW_SKELETON=1`). Elon's daily
+  survey there only inspects and reports.
 
 **Before any skill-source edit, consult the guard:**
 ```bash
@@ -157,154 +147,20 @@ safe to deploy inside a real codebase: it won't rewrite itself there.
 
 ---
 
-## Session Catch-Up Notification (Chairman opt-in: "Option B")
+## Operations
 
-The unattended daily cron (`schedule.sh`) runs silently and only writes logs. The
-Chairman shouldn't have to dig through logs, so this is now **automated via a
-`SessionStart` hook** (installed by `install-hook.sh` alongside the Stop/CAPTURE
-hook):
+Day-to-day running of the company has four moving parts. **Triggers** — the company
+starts working four ways: the Chairman calls, the clock fires (`daily-run.sh` cron),
+an external event pushes (`fire-trigger.sh`), or the session hands off a task
+(session vs headless dispatch, per the §5.5 chain). **Catch-Up** — a `SessionStart`
+hook (`notify-status.py --emit-hook`) pushes one summary when unattended runs moved
+something substantive; push only, never Discord. **Ledger** — `report.py` writes
+`ops/reports/ledger.md`, an autoresearch-style table with entropy as the headline
+metric and a `keep`/`flat`/`skip`/`fail` verdict. **Views** — on demand, `report.py`
+and `org-status.py` render inline; `supervisor.py` is the live child-process harness.
 
-- On session start the hook runs `notify-status.py --emit-hook`. If there are new
-  background runs AND they are **substantive** (entropy or memory count moved,
-  something decayed, or there are pending TODOs), it injects a `SessionStart`
-  `additionalContext` line telling the agent to send **one** `PushNotification`
-  with the summary — **push only, never Discord** (per the Chairman's
-  `push-notification-only` preference). The script self-acks, so the same window is
-  never pushed twice.
-- If nothing substantive changed, it silently acks and emits nothing — zero noise
-  on quiet days. This is the gate the Chairman asked for: notify only on real change.
-
-When you receive that `additionalContext`, also state the one-line summary in your
-reply — PushNotification suppresses while the Chairman is actively typing (~60s),
-so the in-chat line guarantees he sees it even when the push is held back. The
-payload also embeds the recent scheduled-work ledger (see below); render it inline
-in your reply so the Chairman sees the report here, not just a file path.
-
-Manual fallback (hook absent / ad-hoc check): run `notify-status.py`, and if
-`new_runs > 0` push the `summary`, then `notify-status.py --ack`.
-
-This is how the silent local cron reaches the Chairman's phone without Discord or
-a cloud agent: the cron does the work; the SessionStart hook relays the summary.
-
----
-
-## Scheduled-Work Ledger (autoresearch-style report)
-
-The push is a one-liner; the **report** is `ops/reports/ledger.md`, regenerated at
-the end of every `daily-run.sh` by `report.py`. Modeled on Karpathy's autoresearch
-`results.tsv`: one row per unattended run, a single headline metric (**entropy**,
-lower = healthier — the `val_bpb` analog), a verdict, and a one-line description.
-
-```
-| run         | entropy ↓  | mem | status | what happened                  |
-| 06-29 18:07 | 0.0356 v   | 45  | keep   | verify +14, merged 8 dup, ...  |
-| 06-30 06:07 | 0.0400 =   | 40  | flat   | no-op maintenance              |
-```
-
-Verdict: `keep` (something substantive moved), `flat` (clean but no change),
-`skip` (agent step capped/absent), `fail` (agent errored). Run on demand with
-`report.py --company .company` (`--write` to save, `--tsv` for the raw flat file).
-This is the artifact the Chairman wakes up to.
-
----
-
-## On-demand views (Chairman asks → render inline)
-
-When the Chairman asks for any of these, run the script and render its output
-inline in your reply (don't just point at a file):
-
-| The Chairman says… | Run | Shows |
-|---|---|---|
-| "report" / "/report" / "scheduled work" | `report.py --company .company` | the scheduled-work ledger |
-| "who's working" / "org status" / "是不是 Elon 在做" | `org-status.py --company .company` | which employees acted recently + who is live now |
-
-`org-status.py` is an honest **snapshot** view: it attributes recent activity from
-the real logs (daily-run → Tony/Gibby/Elon/Tom, trigger ledger → Phoebe/Bob,
-employee `log.md`, and running `claude -p` processes). Interactive chat is
-Elon-fronted; the genuinely-separate work is the cron / dispatch / trigger agents
-— the view makes that split visible rather than pretending seven daemons are
-always busy.
-
-### Live supervisor (`supervisor.py`) — the skill's own live harness
-
-For a **live** tree of employees working (not a snapshot), `supervisor.py` is a
-small, skill-owned orchestration harness: it spawns employees as **child
-processes** and reads their stdout streams in real time via `select()`, so status
-is event-driven and synced with the actual work — the supervisor IS the parent of
-the process tree. It is ephemeral (exists only while work runs) and covers ALL
-employees (discovered from `org/employees/`, not a hardcoded subset). OOP:
-`Employee` / `Worker` / `Supervisor` / `LiveTree`. Status protocol: a worker
-prints `@status <phase>` lines as it works; the same protocol serves a simulated
-demo worker and a real `claude -p` agent, so the supervisor is host-agnostic.
-
-- `supervisor.py --demo` — simulate all employees live (no LLM).
-- `supervisor.py --dispatch '{"phoebe":"...","bob":"..."}'` — real agents.
-
-Honest ceiling: in a real terminal this is a live TUI; viewed remotely in the
-Claude app it streams as text (native widgets belong to the host — the one thing
-no modular design can replicate). This is deliberately NOT bound to Claude Code.
-
----
-
-## Triggers — three ways the company starts working
-
-| # | Trigger | Mechanism | Fired by |
-|---|---|---|---|
-| 1 | Chairman calls | conversation | the Chairman |
-| 2 | Clock | cron → `daily-run.sh` (every 6h) | time |
-| 3 | **Event** | **`fire-trigger.sh <name> <payload>`** (push) | any external program / user-defined |
-| 4 | **Session** | **`company-run.sh "<task>"`** | the interactive session (Elon hands work to the company) |
-
-**Trigger #4 (session).** Per MISSION.md, this repo is run by the self-company to
-improve the self-company. Rather than Elon silently editing every file, the
-session hands a task to the company.
-
-There are two dispatch paths — pick by origin:
-
-**Session dispatch (default when the Chairman is present) — real, visible agents.**
-When a cycle is triggered from an interactive session, dispatch employees as REAL
-subagents via the **harness Agent tool** (not a script). These are genuinely
-separate agents AND the Claude app renders them live. Follow the chain and the
-reporting rule (policy.md §5.5):
-
-1. **Phoebe** (Agent) plans a `{employee: subtask}` assignment.
-2. **Assigned workers** (Agent, e.g. Bob) implement. Use `isolation: worktree`
-   when workers edit code in parallel, to avoid conflicts; sequential single-owner
-   edits need no worktree.
-3. **Gibby** (Agent) verifies — reads the diff, runs the suite, sanity-runs the tool.
-4. Workers and Gibby **report to Phoebe**; Phoebe aggregates and **reports to Elon**.
-5. **Elon** resolves small tasks with Phoebe; escalates big ones to the Chairman.
-
-> A bash script cannot call the Agent tool — app-visible subagents are inherently
-> spawned by the main session. So this path is driven by the session agent (Elon),
-> documented here as the standard operating procedure, not by `company-run.sh`.
-
-**Headless dispatch (cron / external trigger / no session) — portable, text-only.**
-`company-run.sh "<task>"` has Phoebe plan, then `supervisor.py` spawns the assigned
-employees as live child processes (`claude -p`); the cycle is logged to
-`ops/reports/company-runs.md`. Not app-visible (native widgets belong to the host),
-but fully modular. `--demo` runs the whole flow with no LLM.
-
-**Trigger #3 (event-driven)** is push-first: the company is dormant until an
-external producer (a training run, trading bot, CI job, …) fires it — no polling,
-no daemon. Triggers are **user-defined**, declarative, one file per trigger under
-`org/triggers/<name>.yaml` (flat `key: value`; see `org/triggers/README.md`). The
-engine is never edited:
-
-```
-your program ── fire-trigger.sh training-done '{"val_bpb":0.98}' ──┐
-                                                                    ▼
-   trigger_engine.py: eval condition → guards(cooldown/dedupe/daily-cap)
-                                                                    │ pass
-                                          detached, bounded `claude -p` → Phoebe
-```
-
-Decision is deterministic and testable (`trigger_engine.py`); orchestration —
-the bounded, recursion-guarded, detached agent — lives in `fire-trigger.sh`, the
-same split as `daily-run.sh`. Every call (fired or held) is appended to
-`ops/reports/triggers.md`. For sources that *cannot* call us, an optional cron
-**poll adapter** can check them and call the same entry point — push primary,
-poll only as a fallback.
+Read **[references/operations.md](references/operations.md)** when you need to run
+or wire the company's triggers, daily cron, catch-up push, or reports.
 
 ---
 
@@ -363,6 +219,12 @@ For company design details, see:
   - **[references/memory-tiers.md](references/memory-tiers.md)** — L0/L1/L2 definitions, consolidation promotion rules, decay formula and thresholds, half-life tables, alignment with scripts
   - **[references/execution-model.md](references/execution-model.md)** — orchestration vs execution tiers, worker sub-agent isolation (least-privilege context), parallel vs serial dispatch
 
+- **Operations & protocols**
+  - **[references/operations.md](references/operations.md)** — triggers (call/clock/event/session), session vs headless dispatch, catch-up push hook, scheduled-work ledger, on-demand views + live supervisor
+  - **[references/red-blue-protocol.md](references/red-blue-protocol.md)** — Bob (Blue) ⚔ Gibby (Red) build-and-attack loop
+  - **[references/rag.md](references/rag.md)** — RAG index design and usage (dormant until Ollama + LanceDB installed)
+  - **[references/status.md](references/status.md)** — completion status (v1 / v2 / v2.5 checklists, deferred items)
+
 - **Executable Python scripts** (standard library only; skill source in `scripts/`, installed by `init_company.sh` to `.company/scripts/` and travels with project)
   - **[scripts/decay.py](scripts/decay.py)** — scan markdown frontmatter, compute decay_score, produce disposal candidates (drop/archive/demote/upgrade_candidates) per threshold, JSON output; `--apply` flag modifies files. After installation, run `python3 .company/scripts/decay.py`
   - **[scripts/entropy.py](scripts/entropy.py)** — measure entropy across four dimensions (duplication, contradiction, stale, unverified), weighted sum, read-only JSON output + diagnostic candidate list. After installation, run `python3 .company/scripts/entropy.py`
@@ -374,41 +236,6 @@ For company design details, see:
   - `memory/` — Chairman memory assets (L0/L1/L2 layered, each with frontmatter)
   - `ops/` — operational traces (logs/plans/schedule)
   - `reports/` — this-period reports (entropy/memory deltas)
-
----
-
-## Completion Status
-
-### v1 Completed
-
-- ✅ Org structure (seven agents, responsibility boundaries, relationship diagram)
-- ✅ Context engineering spec (each agent's context.md)
-- ✅ Addressing protocol + work chain
-- ✅ Installation script (idempotent)
-- ✅ Language rules + personas
-
-### v2 Memory Pipeline Completed
-
-- ✅ Pipeline execution logic — CAPTURE → ORGANIZE → WRITE → VERIFY (loop until clean) detailed steps in `references/pipeline.md`
-- ✅ Decay formula and thresholds — `decay_score = 0.5 ** (age_days / half_life)`, three-tier thresholds, implemented in `scripts/decay.py`
-- ✅ Entropy measurement (KPI) — four dimensions (duplication, contradiction, stale, unverified), implemented in `scripts/entropy.py`
-- ✅ Memory tiers and promotion — L0/L1/L2 + consolidation rules, see `references/memory-tiers.md`
-- ✅ Memory frontmatter schema — nine-column complete definition (id, tier, owner, sources, created, last_reinforced, reinforce_count, decay_score, status)
-
-### v2.5 RAG Deployment Completed
-
-- ✅ RAG infrastructure deployed (dormant, requires Ollama + LanceDB to activate)
-- ✅ Embedding layer — Ollama 'nomic-embed-text' integration via stdlib urllib, no extra dependencies
-- ✅ Vector store — LanceDB embedded serverless index at `.company/memory/index/`
-- ✅ Graceful degradation — clear error messages and exit code 2 if dependencies unavailable
-- ✅ Rebuild/query scripts — `rag_index.py` and `rag_query.py` installed to `.company/scripts/`
-- ✅ Technical reference — see `references/rag.md` for full design and usage
-
-### Deferred to Later Versions
-
-- ⏳ Scheduling and trigger mechanism installation (Stop hook / cron) — proposal in `org/triggers.md`, needs Chairman approval before installation
-- ⏳ Code/Chat entropy — code drift detection, session distillation
-- ⏳ Report automation — v2 produces logs and entropy numbers, report generation deferred to v3
 
 ---
 
