@@ -120,6 +120,15 @@ Verdict: `keep` (something substantive moved), `flat` (clean but no change),
 `report.py --company .company` (`--write` to save, `--tsv` for the raw flat file).
 This is the artifact the Chairman wakes up to.
 
+### Improvement proposals (Tony, every scheduled run)
+
+The scheduled `daily-run.sh` agent step also has **Tony** append one grounded
+improvement proposal (or an explicit "no new proposal") to
+`ops/plans/proposals-<date>.md` — so the company keeps proposing its own upgrades
+even when the Chairman has none (MISSION.md; policy.md §6). **On session entry,
+Elon surfaces any pending proposals** from `ops/plans/proposals-*.md` alongside the
+report, so they are seen rather than buried in a file.
+
 ---
 
 ## On-demand views (Chairman asks → render inline)

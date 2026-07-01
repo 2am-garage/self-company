@@ -181,6 +181,16 @@ Do a CONSERVATIVE consolidation pass per references/pipeline.md and references/m
 - Do NOT invent memories, do NOT delete anything that is not an exact duplicate, do NOT
   touch L2 except to add a contradiction note. Keep frontmatter valid (policy.md §4.2).
 - Append a short summary of what you changed to .company/ops/logs/daily-$DATE.md.
+
+Then, as TONY (Improvement Engineer, policy.md §6), keep the company proposing its
+own improvements even when the Chairman has none: review the current entropy, the
+recent daily logs, the trigger/company-run ledgers, and any weak spots you can
+actually see, and write ONE concrete improvement proposal to
+.company/ops/plans/proposals-$DATE.md (append; create if missing). Format:
+**Problem** (grounded in real logs/metrics — never invented), **Proposal** (the
+change), **Effort** (rough), **Size** (small/big per §5.5). Propose only what the
+evidence supports; if nothing genuinely warrants one, append a single line
+"no new proposal ($DATE): <one-line why>" instead of inventing filler.
 Be quick and conservative. If unsure, leave it and just note it in the log.
 EOF
     # A3: capture the agent's stdout/stderr to an audit log (not /dev/null).
