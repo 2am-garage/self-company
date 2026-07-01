@@ -208,9 +208,9 @@ Tom executes (modify skeleton, tune config, add schedule…)
 
 The skill's frontmatter `description` IS the trigger — it decides when the skill
 activates. Any change to it must be **measured with `scripts/trigger_eval.py`**
-against a trigger eval set (should-trigger + tricky should-not near-misses)
-BEFORE it merges. Gate: **recall must not drop and precision must not regress**
-versus the current description.
+against the canonical trigger eval set (`evals/trigger-evals.json` — should-trigger
++ tricky should-not near-misses) BEFORE it merges. Gate: **recall must not drop and
+precision must not regress** versus the current description.
 
 Guard against a broken instrument. `trigger_eval.py` measures the REAL installed
 skill (does Claude actually invoke the Skill tool for it), not a proxy — first

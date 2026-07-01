@@ -119,6 +119,29 @@ class TestNotify(unittest.TestCase):
             self.assertIn("Scheduled-work report", ctx)        # report shows anyway
             self.assertNotIn("PushNotification", ctx)          # but nothing substantive -> no push
 
+    def test_delta_bootstrap_then_shows_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, LOG)
+            shown = os.path.join(c, "ops", ".last_shown")
+            # first call bootstraps silently and writes the marker
+            b0 = io.StringIO()
+            with contextlib.redirect_stdout(b0):
+                ns.main(["--company", c, "--delta"])
+            self.assertEqual(b0.getvalue().strip(), "")
+            self.assertTrue(os.path.exists(shown))
+            # rewind the marker so the LOG's substantive runs count as new
+            with open(shown, "w") as f:
+                f.write("2026-06-26T00:00:00\n")
+            b1 = io.StringIO()
+            with contextlib.redirect_stdout(b1):
+                ns.main(["--company", c, "--delta"])
+            self.assertIn("daily run", b1.getvalue())          # one-line delta shown
+            # show-once: immediate re-call is silent (marker advanced)
+            b2 = io.StringIO()
+            with contextlib.redirect_stdout(b2):
+                ns.main(["--company", c, "--delta"])
+            self.assertEqual(b2.getvalue().strip(), "")
+
     def test_emit_hook_silent_when_no_runs(self):
         with tempfile.TemporaryDirectory() as d:
             logs = os.path.join(d, ".company", "ops", "logs")

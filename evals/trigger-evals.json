@@ -1,0 +1,23 @@
+[
+  {"query": "hey Elon, what's the entropy looking like today and did the daily runs actually do anything overnight? feels like nothing happened", "should_trigger": true},
+  {"query": "can you install the self-company thing into this repo so it starts learning how I work and keeps notes on my preferences?", "should_trigger": true},
+  {"query": "Phoebe, break this down and dispatch it — I want Bob to refactor the auth module and Gibby to verify before it merges", "should_trigger": true},
+  {"query": "run a memory maintenance pass — consolidate the duplicate memories, decay the stale ones, and then tell me the entropy score", "should_trigger": true},
+  {"query": "I keep having to re-explain my preferences every single session. is there a way for you to actually remember my habits across this project long-term?", "should_trigger": true},
+  {"query": "give me the company health report and tell me which of the employees actually did real work this week vs sat idle", "should_trigger": true},
+  {"query": "Tony, what upgrades are you proposing right now? and remember Elon has to sign off before Phoebe dispatches anything to the workers", "should_trigger": true},
+  {"query": "set up a little agent org inside this project that captures what I care about and fights knowledge rot over time so context doesn't decay", "should_trigger": true},
+  {"query": "check the chairman habit records and update the memory tiers if any of my preferences changed recently", "should_trigger": true},
+  {"query": "how's my personal company doing — are contradictions or stale unverified memories piling up in the L0 working set?", "should_trigger": true},
+
+  {"query": "place a limit buy order for 1000 shares of 2330 on the Taiwan exchange and set a stop loss 3% below fill", "should_trigger": false},
+  {"query": "help me set up a cron job that backs up my postgres database every night at 2am and rotates the old dumps", "should_trigger": false},
+  {"query": "review this pull request for correctness bugs and edge cases before I merge it into main", "should_trigger": false},
+  {"query": "build me a simple fast dashboard to visualize our internal sales metrics from the last quarter", "should_trigger": false},
+  {"query": "create a new skill that formats my git commit messages into conventional-commit style automatically", "should_trigger": false},
+  {"query": "I need to organize my Obsidian vault and clean up all the messy tags and broken wikilinks", "should_trigger": false},
+  {"query": "remind me to email the accountant about payroll for my actual company this Friday before 5pm", "should_trigger": false},
+  {"query": "my codebase is a mess with tons of duplicate functions and dead code — can you help me clean up the entropy in it?", "should_trigger": false},
+  {"query": "summarize this 40-page PDF contract and pull out the key decisions, deadlines, and liabilities", "should_trigger": false},
+  {"query": "who's Elon Musk's newest company and what are they actually building these days?", "should_trigger": false}
+]

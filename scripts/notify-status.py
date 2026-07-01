@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 MARKER = "ops/.last_notified"          # stores ISO timestamp of last notification
+SHOWN_MARKER = "ops/.last_shown"       # P1: last time Elon surfaced a delta in-session
 RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
 
 
@@ -156,16 +157,33 @@ def main(argv=None):
                     help="Record 'notified up to now' (call after pushing).")
     ap.add_argument("--emit-hook", action="store_true",
                     help="SessionStart mode: emit a push instruction if substantive, then self-ack.")
+    ap.add_argument("--delta", action="store_true",
+                    help="P1: one-line delta of new substantive runs since last shown in-session, "
+                         "then advance the .last_shown marker. Elon runs this each engagement so "
+                         "the report surfaces mid-session (SessionStart only fires on a fresh session).")
     args = ap.parse_args(argv)
 
     company = args.company
     if not Path(company).exists():
-        if not args.emit_hook:
+        if not (args.emit_hook or args.delta):
             print(json.dumps({"new_runs": 0, "since": None, "summary": "", "note": "no .company"}))
         return 0
 
     if args.ack:
         print(json.dumps({"acked_at": write_marker(company)}))
+        return 0
+
+    if args.delta:
+        now_iso = datetime.now().replace(microsecond=0).isoformat()
+        p = Path(company) / SHOWN_MARKER
+        if not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)      # bootstrap silently
+            p.write_text(now_iso + "\n", encoding="utf-8")
+            return 0
+        runs = collect_runs(company, _parse_ts(p.read_text(encoding="utf-8").strip()))
+        if runs and substantive(company, runs):
+            print(summarize(runs))                            # one-line delta to surface
+        p.write_text(now_iso + "\n", encoding="utf-8")        # show-once: advance
         return 0
 
     if args.emit_hook:
