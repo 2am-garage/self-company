@@ -257,10 +257,33 @@ no modular design can replicate). This is deliberately NOT bound to Claude Code.
 
 **Trigger #4 (session).** Per MISSION.md, this repo is run by the self-company to
 improve the self-company. Rather than Elon silently editing every file, the
-session hands a task to the company: `company-run.sh "<task>"` has **Phoebe**
-plan a `{employee: subtask}` assignment, then `supervisor.py` spawns the assigned
-employees as live child processes (real agents), and the cycle is logged to
-`ops/reports/company-runs.md`. `--demo` runs the whole flow with no LLM.
+session hands a task to the company.
+
+There are two dispatch paths — pick by origin:
+
+**Session dispatch (default when the Chairman is present) — real, visible agents.**
+When a cycle is triggered from an interactive session, dispatch employees as REAL
+subagents via the **harness Agent tool** (not a script). These are genuinely
+separate agents AND the Claude app renders them live. Follow the chain and the
+reporting rule (policy.md §5.5):
+
+1. **Phoebe** (Agent) plans a `{employee: subtask}` assignment.
+2. **Assigned workers** (Agent, e.g. Bob) implement. Use `isolation: worktree`
+   when workers edit code in parallel, to avoid conflicts; sequential single-owner
+   edits need no worktree.
+3. **Gibby** (Agent) verifies — reads the diff, runs the suite, sanity-runs the tool.
+4. Workers and Gibby **report to Phoebe**; Phoebe aggregates and **reports to Elon**.
+5. **Elon** resolves small tasks with Phoebe; escalates big ones to the Chairman.
+
+> A bash script cannot call the Agent tool — app-visible subagents are inherently
+> spawned by the main session. So this path is driven by the session agent (Elon),
+> documented here as the standard operating procedure, not by `company-run.sh`.
+
+**Headless dispatch (cron / external trigger / no session) — portable, text-only.**
+`company-run.sh "<task>"` has Phoebe plan, then `supervisor.py` spawns the assigned
+employees as live child processes (`claude -p`); the cycle is logged to
+`ops/reports/company-runs.md`. Not app-visible (native widgets belong to the host),
+but fully modular. `--demo` runs the whole flow with no LLM.
 
 **Trigger #3 (event-driven)** is push-first: the company is dormant until an
 external producer (a training run, trading bot, CI job, …) fires it — no polling,
