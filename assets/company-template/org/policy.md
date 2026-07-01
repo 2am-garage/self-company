@@ -146,6 +146,30 @@ Phoebe oversees both pipelines:
 1. **Build Pipeline** — Chairman intent → spec/plan (Phoebe output) → Bob builds → Gibby verifies → report back.
 2. **Memory Pipeline (v2)** — CAPTURE (cross-department quick observations, Haiku) → ORGANIZE (Phoebe decides placement/tier) → WRITE (Tony writes to markdown) → VERIFY (Gibby traces provenance, loop until clean) → store. See `references/pipeline.md`.
 
+### 5.5 Reporting & Escalation Chain
+
+Reporting flows UP through Phoebe; decisions are gated by task size.
+
+```
+Workers (Bob / Tom / Gibby / July)
+      │  report to Phoebe after a task (NOT directly to Elon)
+      ▼
+Phoebe  — sorts / aggregates all task outcomes, reports UP to Elon
+      │  with a recommendation and a small/big read
+      ▼
+Elon    — decides by task size:
+            • small task → Elon resolves WITH Phoebe (no Chairman needed)
+            • big task   → Elon escalates to the Chairman before acting
+```
+
+- **Workers report to Phoebe, not straight to Elon.** Phoebe is the single point
+  that collects, de-duplicates, and orders outcomes so Elon sees a clean picture.
+- **Phoebe reports up with a recommendation**, including her read of each item as
+  *small* (Elon + Phoebe resolve) or *big* (needs the Chairman).
+- **Elon holds the size decision.** Small tasks close inside the company (Elon +
+  Phoebe). Big tasks — direction shifts, anything hard to reverse or outward-facing
+  — are discussed with the Chairman before action.
+
 ---
 
 ## 6. Upgrade Loop (Company Self-Upgrade)
