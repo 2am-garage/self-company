@@ -218,11 +218,31 @@ inline in your reply (don't just point at a file):
 | "report" / "/report" / "scheduled work" | `report.py --company .company` | the scheduled-work ledger |
 | "who's working" / "org status" / "是不是 Elon 在做" | `org-status.py --company .company` | which employees acted recently + who is live now |
 
-`org-status.py` is an honest view: it attributes recent activity from the real
-logs (daily-run → Tony/Gibby/Elon/Tom, trigger ledger → Phoebe/Bob, employee
-`log.md`, and running `claude -p` processes). Interactive chat is Elon-fronted;
-the genuinely-separate work is the cron / dispatch / trigger agents — the view
-makes that split visible rather than pretending seven daemons are always busy.
+`org-status.py` is an honest **snapshot** view: it attributes recent activity from
+the real logs (daily-run → Tony/Gibby/Elon/Tom, trigger ledger → Phoebe/Bob,
+employee `log.md`, and running `claude -p` processes). Interactive chat is
+Elon-fronted; the genuinely-separate work is the cron / dispatch / trigger agents
+— the view makes that split visible rather than pretending seven daemons are
+always busy.
+
+### Live supervisor (`supervisor.py`) — the skill's own live harness
+
+For a **live** tree of employees working (not a snapshot), `supervisor.py` is a
+small, skill-owned orchestration harness: it spawns employees as **child
+processes** and reads their stdout streams in real time via `select()`, so status
+is event-driven and synced with the actual work — the supervisor IS the parent of
+the process tree. It is ephemeral (exists only while work runs) and covers ALL
+employees (discovered from `org/employees/`, not a hardcoded subset). OOP:
+`Employee` / `Worker` / `Supervisor` / `LiveTree`. Status protocol: a worker
+prints `@status <phase>` lines as it works; the same protocol serves a simulated
+demo worker and a real `claude -p` agent, so the supervisor is host-agnostic.
+
+- `supervisor.py --demo` — simulate all employees live (no LLM).
+- `supervisor.py --dispatch '{"phoebe":"...","bob":"..."}'` — real agents.
+
+Honest ceiling: in a real terminal this is a live TUI; viewed remotely in the
+Claude app it streams as text (native widgets belong to the host — the one thing
+no modular design can replicate). This is deliberately NOT bound to Claude Code.
 
 ---
 
