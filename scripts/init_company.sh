@@ -139,7 +139,7 @@ copy_scripts() {
   done
 
   # Daily-run + scheduler + hook installer + RAG setup + skeleton guard + event trigger entry.
-  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh skeleton_guard.sh fire-trigger.sh; do
+  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh skeleton_guard.sh fire-trigger.sh company-run.sh; do
     if [[ -f "${SCRIPT_DIR}/${s}" ]]; then
       cp "${SCRIPT_DIR}/${s}" "${TARGET_DIR}/scripts/" \
         && chmod +x "${TARGET_DIR}/scripts/${s}" 2>/dev/null || true

@@ -253,6 +253,14 @@ no modular design can replicate). This is deliberately NOT bound to Claude Code.
 | 1 | Chairman calls | conversation | the Chairman |
 | 2 | Clock | cron → `daily-run.sh` (every 6h) | time |
 | 3 | **Event** | **`fire-trigger.sh <name> <payload>`** (push) | any external program / user-defined |
+| 4 | **Session** | **`company-run.sh "<task>"`** | the interactive session (Elon hands work to the company) |
+
+**Trigger #4 (session).** Per MISSION.md, this repo is run by the self-company to
+improve the self-company. Rather than Elon silently editing every file, the
+session hands a task to the company: `company-run.sh "<task>"` has **Phoebe**
+plan a `{employee: subtask}` assignment, then `supervisor.py` spawns the assigned
+employees as live child processes (real agents), and the cycle is logged to
+`ops/reports/company-runs.md`. `--demo` runs the whole flow with no LLM.
 
 **Trigger #3 (event-driven)** is push-first: the company is dormant until an
 external producer (a training run, trading bot, CI job, …) fires it — no polling,
