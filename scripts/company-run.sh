@@ -101,8 +101,13 @@ fi
 rc=$?
 
 # --- 3. LEDGER -------------------------------------------------------------
+# Store the FULL assignment JSON (no truncation) so org-status.py can attribute
+# EVERY assigned employee, not just the first. Sanitize '|' -> '/' so a subtask
+# string can't break the markdown table (JSON itself has none). Task stays short.
+assign_cell="${plan_json//|//}"          # sanitize pipes; keep the FULL json
+task_short="${TASK:0:40}"; task_cell="${task_short//|//}"
 [[ -f "$LEDGER" ]] || printf '# Company Runs (session-triggered)\n\n_Each row: a company work cycle started from the session. See MISSION.md._\n\n| time | task | planned by | assignments | rc |\n|---|---|---|---|---|\n' > "$LEDGER"
-printf '| %s | %s | %s | `%s` | %s |\n' "$TS" "${TASK:0:40}" "$planned_by" "${plan_json:0:60}" "$rc" >> "$LEDGER"
+printf '| %s | %s | %s | `%s` | %s |\n' "$TS" "$task_cell" "$planned_by" "$assign_cell" "$rc" >> "$LEDGER"
 
 echo "[company-run] done (rc $rc) — logged to ops/reports/company-runs.md"
 exit "$rc"
