@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Show environment
+        run: python3 --version
+
+      # The skill is stdlib-only and dormant-safe: RAG tests skip when Ollama /
+      # LanceDB are absent, so the suite runs on a bare Python. PyYAML is optional
+      # (trigger_engine falls back to a flat parser) — install it so the yaml path
+      # is exercised too, matching a typical dev machine.
+      - name: Install optional dev dep (PyYAML)
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Run test suite
+        working-directory: tests
+        run: python3 -m unittest discover -s . -p 'test_*.py' -v
+
+      - name: Syntax-check shell scripts
+        run: bash -n scripts/*.sh
