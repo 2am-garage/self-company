@@ -137,7 +137,7 @@ This skill is **self-improving — but only in its own development repo.**
 
 **Before any skill-source edit, consult the guard:**
 ```bash
-bash .company/scripts/skeleton_guard.sh   # exit 0 = allowed, exit 1 = locked
+bash scripts/skeleton_guard.sh   # exit 0 = allowed, exit 1 = locked
 ```
 Allowed only when `.self-company-dev` is present (dev repo) or the Chairman set
 `SELF_COMPANY_ALLOW_SKELETON=1`. This is what makes the self-upgrading company
@@ -172,11 +172,27 @@ Run:
 The script will:
 1. Check if `./.company/` already exists
 2. If not → copy skeleton from `assets/company-template/` to `./.company/` (preserving `.gitkeep`)
-3. Copy `decay.py`, `entropy.py`, `rag_index.py`, and `rag_query.py` into `./.company/scripts/` (travel with project; can run directly via `python3 .company/scripts/decay.py`; the rag scripts are dormant until Ollama + LanceDB are installed)
-4. Automatically add `.company/` to the repo's `.gitignore` — company memory is private, never uploaded to git
-5. If already exists → don't overwrite, prompt for manual handling
+3. Automatically add `.company/` to the repo's `.gitignore` — company memory is private, never uploaded to git
+4. If already exists → don't overwrite, prompt for manual handling
+
+`.company/` is **DATA only** (memory, org config, ops). The Python/shell scripts are
+NOT copied into it — the runtime (daily-run, schedule, hooks, company-run) resolves and
+runs the CANONICAL scripts straight from the skill/plugin, so a skill update takes effect
+immediately with no stale-copy drift.
 
 After completion, read `.company/org/policy.md` to understand the company charter, then start talking to Elon.
+
+### Upgrading (after a skill/plugin update)
+
+The cron lines and Claude Code hooks are **absolute-path snapshots** of where the scripts
+lived at install time. After the skill/plugin moves or updates, re-run both installers so
+the snapshots point at the new location:
+```bash
+bash scripts/schedule.sh install       # refresh the cron lines
+bash scripts/install-hook.sh install   # refresh the Stop/SessionStart hooks
+```
+(Under a plugin the hooks use `${CLAUDE_PLUGIN_ROOT}` and survive version bumps, but
+re-running is harmless and idempotent.)
 
 ### Optional local setup (not pre-installed on clone)
 
@@ -223,9 +239,9 @@ For company design details, see:
   - **[references/rag.md](references/rag.md)** — RAG index design and usage (dormant until Ollama + LanceDB installed)
   - **[references/status.md](references/status.md)** — completion status (v1 / v2 / v2.5 checklists, deferred items)
 
-- **Executable Python scripts** (standard library only; skill source in `scripts/`, installed by `init_company.sh` to `.company/scripts/` and travels with project)
-  - **[scripts/decay.py](scripts/decay.py)** — scan markdown frontmatter, compute decay_score, produce disposal candidates (drop/archive/demote/upgrade_candidates) per threshold, JSON output; `--apply` flag modifies files. After installation, run `python3 .company/scripts/decay.py`
-  - **[scripts/entropy.py](scripts/entropy.py)** — measure entropy across four dimensions (duplication, contradiction, stale, unverified), weighted sum, read-only JSON output + diagnostic candidate list. After installation, run `python3 .company/scripts/entropy.py`
+- **Executable Python scripts** (standard library only; canonical source in `scripts/`, run in place from the skill/plugin — NOT copied into `.company/`)
+  - **[scripts/decay.py](scripts/decay.py)** — scan markdown frontmatter, compute decay_score, produce disposal candidates (drop/archive/demote/upgrade_candidates) per threshold, JSON output; `--apply` flag modifies files. Run `python3 scripts/decay.py --memory-dir .company/memory`
+  - **[scripts/entropy.py](scripts/entropy.py)** — measure entropy across four dimensions (duplication, contradiction, stale, unverified), weighted sum, read-only JSON output + diagnostic candidate list. Run `python3 scripts/entropy.py --memory-dir .company/memory`
   - **[scripts/rag_index.py](scripts/rag_index.py)** — build/rebuild RAG index from markdown memory (requires Ollama + LanceDB). Dormant by default; activate on Chairman order or when memory crosses threshold. See `references/rag.md`.
   - **[scripts/rag_query.py](scripts/rag_query.py)** — semantic query interface for RAG index (Tony queries during maintenance; Gibby queries during VERIFY for dup/contradiction detection). Offline only, privacy hard rule.
 

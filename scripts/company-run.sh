@@ -44,7 +44,13 @@ if [[ -z "$COMPANY" ]]; then
   elif [[ "$(basename "$(dirname "$SCRIPT_DIR")")" == ".company" ]]; then COMPANY="$(dirname "$SCRIPT_DIR")"
   else COMPANY="$PROJECT_DIR/.company"; fi
 fi
-SCRIPTS_RT="$COMPANY/scripts"; [[ -f "$SCRIPTS_RT/supervisor.py" ]] || SCRIPTS_RT="$SCRIPT_DIR"
+# Run the CANONICAL scripts: plugin root -> own dir -> legacy .company/scripts fallback.
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/scripts" ]]; then
+  SCRIPTS_RT="${CLAUDE_PLUGIN_ROOT}/scripts"
+else
+  SCRIPTS_RT="$SCRIPT_DIR"
+fi
+[[ -f "$SCRIPTS_RT/supervisor.py" ]] || SCRIPTS_RT="$COMPANY/scripts"   # legacy fallback (B1)
 
 if [[ -z "$TASK" ]]; then
   echo "usage: company-run.sh \"<task>\" [--demo] [--company DIR]" >&2
