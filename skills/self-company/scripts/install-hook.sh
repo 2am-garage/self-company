@@ -24,12 +24,12 @@ PROJECT_DIR="${2:-${SELF_COMPANY_PROJECT_DIR:-$PWD}}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")"
 SETTINGS="$PROJECT_DIR/.claude/settings.json"
 # Code/data separation: the hook runs the CANONICAL script, not a .company/scripts
-# copy. Under a plugin, write the LITERAL ${CLAUDE_PLUGIN_ROOT}/scripts so the hook
-# shell expands it at runtime (survives plugin version bumps); else snapshot the
-# resolved absolute dev path. --company stays the data dir (unchanged). A1: because
+# copy. Under a plugin, write the LITERAL ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts
+# so the hook shell expands it at runtime (survives plugin version bumps); else snapshot
+# the resolved absolute dev path. --company stays the data dir (unchanged). A1: because
 # the dev path is an absolute snapshot, re-run install-hook.sh after a skill move.
 if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-  HOOK_SCRIPTS='${CLAUDE_PLUGIN_ROOT}/scripts'
+  HOOK_SCRIPTS='${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts'
 else
   HOOK_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi

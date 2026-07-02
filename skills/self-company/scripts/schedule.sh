@@ -37,8 +37,8 @@ LOGFILE="$PROJECT_DIR/.company/ops/logs/cron.log"
 # Resolve the CANONICAL scripts dir (code/data separation). Precedence: plugin root
 # -> own dir -> legacy .company/scripts. A1: cron carries an ABSOLUTE snapshot of the
 # script path, so a skill/plugin update requires re-running `schedule.sh install`.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/scripts" ]]; then
-  SCRIPTS_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
+  SCRIPTS_DIR="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
 else
   SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi

@@ -45,8 +45,8 @@ if [[ -z "$COMPANY" ]]; then
   else COMPANY="$PROJECT_DIR/.company"; fi
 fi
 # Run the CANONICAL scripts: plugin root -> own dir -> legacy .company/scripts fallback.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/scripts" ]]; then
-  SCRIPTS_RT="${CLAUDE_PLUGIN_ROOT}/scripts"
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
+  SCRIPTS_RT="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
 else
   SCRIPTS_RT="$SCRIPT_DIR"
 fi

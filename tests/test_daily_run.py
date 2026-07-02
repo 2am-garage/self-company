@@ -27,7 +27,7 @@ def _fresh_project():
     """Make a temp project with a real .company (via init), return its path."""
     d = tempfile.mkdtemp()
     for sub in ("assets", "scripts"):
-        subprocess.run(["cp", "-r", os.path.join(REPO, sub), d], check=True)
+        subprocess.run(["cp", "-r", os.path.join(REPO, "skills", "self-company", sub), d], check=True)
     _bash([os.path.join(d, "scripts", "init_company.sh")], cwd=d)
     return d
 
@@ -45,7 +45,7 @@ def _write_mem(company, mid, last_reinforced="2026-06-26", rc=1):
 class TestDailyRun(unittest.TestCase):
     def test_missing_company_is_noop(self):
         with tempfile.TemporaryDirectory() as d:
-            r = _bash([os.path.join(REPO, "scripts", "daily-run.sh"), d, "--no-agent"])
+            r = _bash([os.path.join(REPO, "skills", "self-company", "scripts","daily-run.sh"), d, "--no-agent"])
             self.assertEqual(r.returncode, 0)
             self.assertIn("nothing to do", r.stdout)
 
@@ -104,7 +104,7 @@ class TestDailyRun(unittest.TestCase):
 
 
 class TestInstallHook(unittest.TestCase):
-    SH = os.path.join(REPO, "scripts", "install-hook.sh")
+    SH = os.path.join(REPO, "skills", "self-company", "scripts","install-hook.sh")
 
     def _settings(self, d):
         return os.path.join(d, ".claude", "settings.json")
@@ -149,18 +149,18 @@ class TestInstallHook(unittest.TestCase):
 
 class TestScheduleGuards(unittest.TestCase):
     def test_bad_command_exits_2(self):
-        r = _bash([os.path.join(REPO, "scripts", "schedule.sh"), "bogus", "/tmp"])
+        r = _bash([os.path.join(REPO, "skills", "self-company", "scripts","schedule.sh"), "bogus", "/tmp"])
         self.assertEqual(r.returncode, 2)
 
     def test_install_without_company_errors(self):
         with tempfile.TemporaryDirectory() as d:
-            r = _bash([os.path.join(REPO, "scripts", "schedule.sh"), "install", d])
+            r = _bash([os.path.join(REPO, "skills", "self-company", "scripts","schedule.sh"), "install", d])
             self.assertEqual(r.returncode, 1)
             self.assertIn(".company not found", r.stderr)
 
 
 class TestSkeletonGuard(unittest.TestCase):
-    SH = os.path.join(REPO, "scripts", "skeleton_guard.sh")
+    SH = os.path.join(REPO, "skills", "self-company", "scripts","skeleton_guard.sh")
 
     def test_dev_marker_allows(self):
         with tempfile.TemporaryDirectory() as d:
