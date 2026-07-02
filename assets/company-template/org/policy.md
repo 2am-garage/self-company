@@ -222,6 +222,28 @@ could not discriminate; measure the real skill instead. Also: with only 3
 runs/query, queries near the 0.5 threshold flicker within noise — don't chase a
 perfect score against sampling noise.)
 
+### 6.3 Proposal approval authority (who signs off Tony's proposals)
+
+Tony's improvement proposals are approved by SIZE, but **only after a mandatory
+premise-check** — because auto-generated proposals can rest on stale or wrong
+premises (e.g. a 2026-07-02 proposal to prune "retired" memory stubs that did not
+exist — the convention is `archived`, and those were already excluded from
+metrics).
+
+1. **Premise-check first, always.** Before ANY approval, verify the proposal's
+   stated problem is real against the CURRENT state (grep/inspect/measure). No
+   approval — by anyone — for a problem that doesn't reproduce. This is the guard
+   that stops the company building machinery for phantom problems.
+2. **Small proposal → Phoebe approves** and dispatches. Small = contained,
+   low-risk, reversible, no direction / skeleton / public-trigger implications.
+   This offloads Elon and keeps routine improvement flowing.
+3. **Big proposal → Elon adjudicates**, and per §5.5 escalates to the Chairman —
+   direction shifts, skeleton or public-trigger changes, anything hard to reverse
+   or outward-facing.
+
+Proposer ≠ approver stays true for big items, and the premise-check is independent
+of whoever approves.
+
 ---
 
 ## Appendix A: Memory Tier Reference
