@@ -30,4 +30,4 @@ jobs:
         run: python3 -m unittest discover -s . -p 'test_*.py' -v
 
       - name: Syntax-check shell scripts
-        run: bash -n scripts/*.sh
+        run: bash -n skills/self-company/scripts/*.sh

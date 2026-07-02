@@ -34,8 +34,8 @@ COMPANY="$PROJECT_DIR/.company"
 # .company/scripts copy. Precedence: plugin root -> own dir -> legacy .company/scripts.
 # The legacy fallback (B1 safety net) only kicks in if a needed sibling isn't beside
 # us but an old .company/scripts copy still has it — so existing installs never break.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/scripts" ]]; then
-  SCRIPTS="${CLAUDE_PLUGIN_ROOT}/scripts"
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
+  SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
 else
   SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi

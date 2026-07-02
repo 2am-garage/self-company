@@ -12,7 +12,7 @@ import unittest
 import _helpers
 
 REAL_POLICY = os.path.join(
-    _helpers.REPO_ROOT, "assets", "company-template", "org", "policy.md")
+    _helpers.REPO_ROOT, "skills", "self-company", "assets", "company-template", "org", "policy.md")
 
 
 class TestDimensions(unittest.TestCase):
