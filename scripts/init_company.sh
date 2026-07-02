@@ -78,99 +78,14 @@ ensure_gitignore() {
   log_success "Added '${pattern}' to ${gitignore} — company memory stays private"
 }
 
-# Copy the deterministic Python scripts into .company/scripts/ so they travel
-# with the company folder and stay runnable after the skill source is edited.
-# Shared by full init and --sync-scripts so the two can never drift.
-copy_scripts() {
-  mkdir -p "${TARGET_DIR}/scripts"
-
-  # Core maintenance scripts + the shared policy_config module they import; fail if missing.
-  if cp "${SCRIPT_DIR}/decay.py" "${SCRIPT_DIR}/entropy.py" "${SCRIPT_DIR}/policy_config.py" "${TARGET_DIR}/scripts/"; then
-    chmod +x "${TARGET_DIR}/scripts/decay.py" "${TARGET_DIR}/scripts/entropy.py" 2>/dev/null || true
-    log_success "Copied decay.py / entropy.py / policy_config.py into ${TARGET_DIR}/scripts/"
-  else
-    log_error "Failed to copy decay.py / entropy.py / policy_config.py into ${TARGET_DIR}/scripts/"
-    exit 1
-  fi
-
-  # Catch-up notifier (Option B): summarises unattended daily runs since last seen.
-  if [[ -f "${SCRIPT_DIR}/notify-status.py" ]]; then
-    cp "${SCRIPT_DIR}/notify-status.py" "${TARGET_DIR}/scripts/" \
-      && chmod +x "${TARGET_DIR}/scripts/notify-status.py" 2>/dev/null || true
-    log_success "Copied notify-status.py into ${TARGET_DIR}/scripts/"
-  fi
-
-  # VERIFY provenance gate if present (stamps verified_date in the daily run).
-  if [[ -f "${SCRIPT_DIR}/verify_memory.py" ]]; then
-    cp "${SCRIPT_DIR}/verify_memory.py" "${TARGET_DIR}/scripts/" \
-      && chmod +x "${TARGET_DIR}/scripts/verify_memory.py" 2>/dev/null || true
-    log_success "Copied verify_memory.py into ${TARGET_DIR}/scripts/"
-  fi
-
-  # Elon's daily survey (prioritized TODO from metrics) if present.
-  if [[ -f "${SCRIPT_DIR}/elon_survey.py" ]]; then
-    cp "${SCRIPT_DIR}/elon_survey.py" "${TARGET_DIR}/scripts/" \
-      && chmod +x "${TARGET_DIR}/scripts/elon_survey.py" 2>/dev/null || true
-    log_success "Copied elon_survey.py into ${TARGET_DIR}/scripts/"
-  fi
-
-  # RAG-powered reinforce (C1) if present.
-  if [[ -f "${SCRIPT_DIR}/reinforce_memory.py" ]]; then
-    cp "${SCRIPT_DIR}/reinforce_memory.py" "${TARGET_DIR}/scripts/" \
-      && chmod +x "${TARGET_DIR}/scripts/reinforce_memory.py" 2>/dev/null || true
-    log_success "Copied reinforce_memory.py into ${TARGET_DIR}/scripts/"
-  fi
-
-  # CAPTURE hook entrypoint if present (used by the Stop-hook memory capture).
-  if [[ -f "${SCRIPT_DIR}/capture-trigger.py" ]]; then
-    cp "${SCRIPT_DIR}/capture-trigger.py" "${TARGET_DIR}/scripts/" \
-      && chmod +x "${TARGET_DIR}/scripts/capture-trigger.py" 2>/dev/null || true
-    log_success "Copied capture-trigger.py into ${TARGET_DIR}/scripts/"
-  fi
-
-  # Scheduled-work ledger (report.py) + event trigger #3 engine (trigger_engine.py)
-  # + org-status visualizer (org-status.py).
-  for p in report.py trigger_engine.py org-status.py supervisor.py; do
-    if [[ -f "${SCRIPT_DIR}/${p}" ]]; then
-      cp "${SCRIPT_DIR}/${p}" "${TARGET_DIR}/scripts/" \
-        && chmod +x "${TARGET_DIR}/scripts/${p}" 2>/dev/null || true
-      log_success "Copied ${p} into ${TARGET_DIR}/scripts/"
-    fi
-  done
-
-  # Daily-run + scheduler + hook installer + RAG setup + skeleton guard + event trigger entry.
-  for s in daily-run.sh schedule.sh install-hook.sh rag_setup.sh skeleton_guard.sh fire-trigger.sh company-run.sh research-scan.sh; do
-    if [[ -f "${SCRIPT_DIR}/${s}" ]]; then
-      cp "${SCRIPT_DIR}/${s}" "${TARGET_DIR}/scripts/" \
-        && chmod +x "${TARGET_DIR}/scripts/${s}" 2>/dev/null || true
-      log_success "Copied ${s} into ${TARGET_DIR}/scripts/"
-    fi
-  done
-
-  # RAG scripts (index/query + shared fastembed backend) if available.
-  if [[ -f "${SCRIPT_DIR}/rag_index.py" ]] && [[ -f "${SCRIPT_DIR}/rag_query.py" ]]; then
-    if cp "${SCRIPT_DIR}/rag_index.py" "${SCRIPT_DIR}/rag_query.py" "${SCRIPT_DIR}/rag_embed.py" "${TARGET_DIR}/scripts/"; then
-      chmod +x "${TARGET_DIR}/scripts/rag_index.py" "${TARGET_DIR}/scripts/rag_query.py" 2>/dev/null || true
-      log_success "Copied rag_index.py / rag_query.py / rag_embed.py into ${TARGET_DIR}/scripts/"
-    else
-      log_error "Failed to copy rag_index.py / rag_query.py into ${TARGET_DIR}/scripts/"
-      exit 1
-    fi
-  else
-    log_info "RAG scripts (rag_index.py, rag_query.py) not yet built — skipping"
-  fi
-}
-
-# Re-copy ONLY the scripts into an existing .company/ — a hot-sync to run after
-# editing the skill's scripts/*.py. Leaves memory/org/ops/reports untouched.
+# Phase 1b (code/data separation): scripts are NO LONGER copied into
+# .company/scripts/. The runtime self-resolves the CANONICAL scripts from the
+# skill/plugin, so a skill update takes effect immediately (no P3 drift). This is
+# now a DEPRECATION NO-OP kept so old muscle-memory / docs referencing
+# `--sync-scripts` don't error.
 sync_scripts() {
-  if [[ ! -d "${TARGET_DIR}" ]]; then
-    log_error "'${TARGET_DIR}' not found — run init first (without --sync-scripts)."
-    exit 1
-  fi
-  log_info "Syncing scripts into existing ${TARGET_DIR}/scripts/ (memory/org untouched)"
-  copy_scripts
-  log_success "Scripts synced. Memory and config were not modified."
+  log_info "scripts now run from the skill; nothing to sync"
+  log_info "(code/data separation: .company/ is data only — the runtime resolves scripts from the skill/plugin)"
   exit 0
 }
 
@@ -179,14 +94,14 @@ sync_scripts() {
 ################################################################################
 
 main() {
-  # --sync-scripts: only refresh .company/scripts/ from the skill source; -h help.
+  # --sync-scripts: deprecated no-op (scripts now run from the skill, not copied); -h help.
   for arg in "$@"; do
     case "$arg" in
       --sync-scripts) sync_scripts ;;
       -h|--help)
         echo "Usage: init_company.sh [--sync-scripts]"
-        echo "  (no args)        initialize ./.company/ from the template"
-        echo "  --sync-scripts   re-copy scripts/*.py into an existing ./.company/scripts/"
+        echo "  (no args)        initialize ./.company/ (data only) from the template"
+        echo "  --sync-scripts   DEPRECATED no-op — scripts run from the skill, nothing to sync"
         exit 0 ;;
     esac
   done
@@ -222,11 +137,11 @@ main() {
     exit 1
   fi
 
-  # Copy the deterministic Python scripts into .company/scripts/ so they travel
-  # with the company folder. The pipeline/triggers docs reference
-  # `.company/scripts/decay.py`, `.company/scripts/entropy.py`, `.company/scripts/rag_index.py`,
-  # and `.company/scripts/rag_query.py` — they must actually exist there after install.
-  copy_scripts
+  # Code/data separation (Phase 1b): scripts are NO LONGER copied into
+  # .company/scripts/. The runtime (daily-run.sh, schedule.sh, hooks, company-run.sh)
+  # self-resolves and runs the CANONICAL scripts from the skill/plugin. .company/ is
+  # DATA only (memory/org/ops). This kills the P3 drift where a stale copy shadowed
+  # the updated skill script.
 
   # Privacy: ensure git never tracks the company folder.
   # Company memory is personal — it must not be committed or pushed.

@@ -30,7 +30,18 @@ for a in "$@"; do
 done
 
 COMPANY="$PROJECT_DIR/.company"
-SCRIPTS="$COMPANY/scripts"
+# Resolve the scripts dir (code/data separation): run the CANONICAL scripts, not a
+# .company/scripts copy. Precedence: plugin root -> own dir -> legacy .company/scripts.
+# The legacy fallback (B1 safety net) only kicks in if a needed sibling isn't beside
+# us but an old .company/scripts copy still has it — so existing installs never break.
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/scripts" ]]; then
+  SCRIPTS="${CLAUDE_PLUGIN_ROOT}/scripts"
+else
+  SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+if [[ ! -f "$SCRIPTS/decay.py" && -f "$COMPANY/scripts/decay.py" ]]; then
+  SCRIPTS="$COMPANY/scripts"
+fi
 POLICY="$COMPANY/org/policy.md"
 MEM="$COMPANY/memory"
 LOGDIR="$COMPANY/ops/logs"
