@@ -21,19 +21,26 @@
 ### Output
 - L0 draft files (0..N entries), each containing:
   - `id`: slug (lowercase + hyphen)
+  - `category`: one of `profile` / `projects` / `preferences` (the knowledge
+    class; the promoter routes on this to `L2-cold/<category>/`)
   - `body`: actual observation content (1–3 sentences)
   - `sources`: precise reference to the conversation (session id + chunk)
-  - frontmatter initial values: tier=L0, owner=Tony, reinforce_count=1, decay_score=1.0, status=active, created=today, last_reinforced=today
+  - frontmatter initial values: tier=L0, owner=Tony, category=<class>, reinforce_count=1, decay_score=1.0, status=active, created=today, last_reinforced=today
 
 ### Exact Steps
 
 1. **Scan conversation**: find "observations worth recording about the Chairman"
-   - Preferences: "Chairman mentioned liking / disliking something"
-   - Habits: "Chairman tends to work / decide in a certain way"
-   - Identity / Background: "Chairman mentioned past experience, identity, goals"
-   - Ongoing projects: "what the Chairman is currently doing, progress"
-   - Decisions: "specific decisions the Chairman made in this conversation"
-   - **Style**: "Chairman's tone, priorities, discipline"
+   and tag each into ONE of three **equally-weighted** classes (aim 1:1:1; do
+   not over-collect preferences — profile/projects are the currently-empty tiers):
+   - **profile** — durable facts about WHO he is: role, background, domain
+     expertise, tools/stack, environment (e.g. "trades TWSE futures via Shioaji")
+   - **projects** — WHAT he is building: active work, goals, deadlines,
+     constraints; convert relative dates ("by Friday") to absolute using the run
+     date (e.g. "shipping X by 2026-07-10")
+   - **preferences** — HOW he likes to be served/work: likes/dislikes, habits,
+     working style, decisions, tone/discipline (e.g. "push notifications, not Discord")
+   - Prefer substance (profile/project facts, even stated in passing) over
+     restating a known style preference.
 
 2. **Capture cheaply and abundantly** — don't over-filter
    - "Noise" at this stage will naturally decay away; no need to demand 100% accuracy in CAPTURE
@@ -203,8 +210,22 @@ Decision list:
      - `reinforce_count++` (old value + 1)
      - Append new source to `sources` array (no duplicates)
    - body: optionally supplement (usually don't change)
-   - **Check promotion candidate**: if `reinforce_count` now reaches `L0_TO_L1_RC=2`, change `tier:L1`, move file to `memory/L1-warm/<id>.md`
-   - If reaches `L1_TO_L2_RC=4`, change `tier:L2`, move file to `memory/L2-cold/{profile|preferences|projects}/<id>.md` (categorize by content)
+   - **Do NOT hand-move promotions.** When `reinforce_count` reaches a promotion
+     gate (`L0_TO_L1_RC=2`, `L1_TO_L2_RC=4`), the file is promoted by the
+     **deterministic applier** — `decay.py --apply` retires-on-promote: it
+     physically MOVES the file up one tier (`L0-working`→`L1-warm`→
+     `L2-cold/<category>/`), rewrites `tier:`, and leaves no shadow stub at the
+     old tier. Hand-moving is what left every promoted concept with an L0 shadow
+     that got re-flagged as a duplicate days later; let the applier do it.
+   - **One tier-move per `--apply` run per memory (by id).** Even an rc≥4 memory
+     advances at most ONE tier per invocation (`L0`→`L1` this run, `L1`→`L2` a
+     later run), so a fresh high-rc observation cannot reach the permanent `L2`
+     tier the same day without review. Re-running `--apply` advances it one more
+     step; promotion stays deterministic and idempotent.
+   - For L1→L2, the applier carries the file's existing `L2-cold/<category>/`
+     subdir if present, else defaults to `preferences`. If a different category
+     (`profile`/`projects`) fits the content better, move the file to that
+     subdir after the applier runs; don't re-create the old-tier copy.
 
    **If `action: contradiction`**
    - Compare both memories, adjudicate:
@@ -418,7 +439,9 @@ If [4] Reject:
 |---|---|---|
 | Extract observation, write sources | CAPTURE (staff + Haiku) | direct conversation observation, no script |
 | Decide placement, judge promotion candidate | ORGANIZE (Phoebe + Sonnet) | playbook (this file) |
-| Write markdown, execute promotion | WRITE (Tony + Sonnet) | playbook (this file) |
+| Write markdown (new/update/contradiction) | WRITE (Tony + Sonnet) | playbook (this file) |
+| **Execute promotion (move file + rewrite tier, retire-on-promote; ≤1 tier-move per id per run)** | **decay.py --apply** (deterministic applier) | `L0-working`→`L1-warm`→`L2-cold/<category>/` |
+| **Reap archived/defunct stubs past grace window** | **decay.py --apply** (deterministic applier) | `REAP_GRACE_DAYS=7`, `path.unlink()` |
 | Verify provenance, reject loop | VERIFY (Gibby + Sonnet) | playbook (this file) |
 | **Calculate decay_score** | **decay.py** (pure Python, stdlib) | `0.5^(age_days/half_life(rc))` |
 | **Judge promotion / demotion / decay thresholds** | **decay.py** (output JSON candidates) | threshold constants § 1.1–1.3 |

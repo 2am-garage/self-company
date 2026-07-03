@@ -145,6 +145,23 @@ safe to deploy inside a real codebase: it won't rewrite itself there.
 
 ---
 
+## Change Management
+
+Any **big change to the company itself** — multi-file edits, changes to core scripts
+(decay/entropy/verify/capture/daily-run), anything risky/irreversible, or anything touching
+the memory lifecycle or the entropy KPI — runs a fixed six-stage pipeline: **Elon + Phoebe
+write a spec → Phoebe dispatches (file-batched) → Bob builds ⚔ Gibby attacks → Tony measures
+entropy before/after → Tom integration-checks → Elon closes out.** Small one-file mechanical
+edits take the lightweight path (Bob + a single Gibby pass), no spec. This pipeline edits the
+skeleton, so it runs **only where skeleton edits are permitted** (dev repo / Chairman grant,
+per Governance above) — in a usage repo the company still must not modify its own skeleton.
+
+Full process: **[references/change-management.md](references/change-management.md)** (six
+stages, iron disciplines, worked examples). Start a spec from
+**[assets/spec-template.md](assets/spec-template.md)**.
+
+---
+
 ## Operations
 
 Day-to-day running of the company has four moving parts. **Triggers** — the company

@@ -130,6 +130,41 @@ reply with it. It uses a separate `.last_shown` marker (show-once) so it neither
 spams nor collides with the SessionStart push. On demand the Chairman can always
 say "report" → `report.py`.
 
+### Adjudication ledger — stop re-flagging judged-distinct pairs (Item 7)
+
+`entropy.py` surfaces duplicate/contradiction **candidate** pairs every run.
+Many are false positives of the Jaccard/cosine heuristic — two *distinct*
+preferences that merely share vocabulary. When Tony/Elon judge such a pair
+`distinct`, that verdict is recorded once in **`ops/adjudications.md`** so the
+pair stops re-surfacing (and stops inflating `dup_rate`).
+
+**Format** — a single markdown table keyed by the **unordered** pair
+`(id_a, id_b)`; entropy sorts the pair before matching, so column order is
+irrelevant:
+
+```
+| id_a | id_b | verdict | by | date | reason |
+|------|------|---------|----|------|--------|
+| foo  | bar  | distinct| Tony | 2026-07-03 | different scope |
+```
+
+- `verdict` ∈ `{distinct, duplicate}`. entropy acts on **`distinct`**: it omits
+  the pair from the surfaced duplicate/contradiction candidate lists AND does
+  not count it in `dup_rate` / `contradiction_score`. `duplicate` rows are an
+  audit record only (CONSOLIDATE does the actual merge).
+- **Additive & auditable** — append rows, never delete one; a superseding
+  verdict is a new row.
+- **Stale-guard** — if either id no longer exists, the row is inert (ignored),
+  never an error.
+- **To adjudicate**, just append one table row — no script needed. entropy reads
+  it via `--adjudications` (default `.company/ops/adjudications.md`) and reports
+  what it applied under the JSON `adjudications` block.
+
+The ledger is seeded with the 10 preference pairs judged `distinct` on
+2026-07-03 (the `format-flexible-presentation` / `delegation-…` /
+`visual-work-status-…` / `scheduled-work-report-…` /
+`rejects-suboptimal-…` cluster).
+
 ### Improvement proposals (Tony, every scheduled run)
 
 The scheduled `daily-run.sh` agent step also has **Tony** append one grounded

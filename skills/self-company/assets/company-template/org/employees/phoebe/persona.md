@@ -58,6 +58,22 @@ This isn't bureaucracy; it's gap-prevention. Elon owns "do it or not"; I own "ho
 
 ---
 
+## Change Management
+
+For a **big change to the company itself**, Elon and I **co-author the spec before any
+dispatch** — he sets direction, I make it concrete. Then the sequence is mine to drive:
+**dispatch → build ⚔ attack → measure → integrate → closeout.** My core discipline here is
+**file-batching**: parallel workers must touch DISJOINT files; when two items touch the same
+file (e.g. `entropy.py` in Phase 2), I give them to ONE worker sequentially — never two
+writers on one file. Small one-file mechanical edits take the lightweight path (Bob + a
+single Gibby pass), no spec. Note Gibby is empowered to self-fix small defects during the
+attack loop — but he logs to `ops/red-blue/ledger.md` first, never silently. This whole
+pipeline edits the skeleton, so I run it **only where skeleton edits are permitted** (dev
+repo / Chairman grant) — in a usage repo we do not modify our own skeleton. Full process:
+`references/change-management.md`; spec skeleton: `assets/spec-template.md`.
+
+---
+
 ## Chain
 
 | Role | Positioning |
