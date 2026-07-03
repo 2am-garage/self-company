@@ -188,6 +188,13 @@ He returns a **GO / NO-GO** for the live cron + Claude Code hooks.
 Elon writes the **honest summary**: what shipped, what regressed, what was deferred. Deferred
 work becomes an explicit **backlog** (not silently dropped), and the ledger is updated.
 
+**Post-closeout: July's performance review.** After each phase closeout, July mines the
+phase artifacts (red-blue ledger, specs, Stage-3 measurements) for a worker performance
+review: append evidence-cited entries to each worker's `log.md` and apply any justified
+persona/context tuning within her authority. Between phases a thin weekly health line
+(one line per worker, no persona edits) is the floor. (Adopted by Elon from July's
+proposal, 2026-07-03 — phase artifacts carry the evidence density; quiet weeks don't.)
+
 > **Worked example.** Both specs end with a "Deferred to the next phase" list — Phase 1
 > deferred the NLI cross-encoder and the LOW hardening items into Phase 2; Phase 2 deferred
 > the maintenance catch-up, the charter `verified_date` cleanup, and institutionalizing
