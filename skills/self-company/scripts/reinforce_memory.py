@@ -14,10 +14,12 @@ CONSERVATIVE BY DESIGN:
 - The absorbed entry is ALWAYS an L0 (we never delete L1/L2).
 - NEVER auto-modifies L2: if the match is an L2 memory, it is only reported, not
   changed.
-- High threshold (default 0.92). Dry-run by default; --apply to act. Reversible
-  (logged). Requires the RAG venv (re-exec); no-op with a message if absent.
+- High threshold (default 0.85 = DEFAULT_THRESHOLD, tuned on live-corpus pairs;
+  above entropy's 0.82 review-flag gate). Dry-run by default; --apply to act.
+  Reversible (logged). Requires the RAG venv (re-exec); no-op with a message if
+  absent.
 
-Usage: reinforce_memory.py [--memory-dir DIR] [--threshold 0.92] [--now DATE] [--apply]
+Usage: reinforce_memory.py [--memory-dir DIR] [--threshold 0.85] [--now DATE] [--apply]
 """
 
 import argparse
