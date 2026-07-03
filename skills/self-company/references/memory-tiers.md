@@ -254,6 +254,53 @@ Memory `id` determines "same slug family" to detect contradictions (entropy.py).
 
 ---
 
-**Version**: v2 (memory pipeline)  
-**Last updated**: 2026-06-24  
-**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py
+## 8. Charter / Axiom Source Class (Item 6)
+
+Most memories are **claims**: they cite a transcript source `[session#line]` and
+VERIFY (`verify_memory.py`) confirms that the cited line really exists. A handful
+of memories are **axioms** instead — install-seeded architectural facts about how
+this company is built (e.g. `org-hierarchy`, `merge-gate`). They were never said
+in a transcript, so they carry synthetic sources that can never trace, and used
+to sit permanently in entropy's `unverified_rate` (its largest component).
+
+### Provenance
+
+A charter/axiom memory declares its provenance one of two ways:
+
+- a frontmatter key `provenance: charter`, and/or
+- a source of the form `charter:<slug>` (e.g. `sources: ["charter:org-hierarchy"]`).
+
+VERIFY treats charter provenance as **inherently valid** — it stamps
+`verified_date` with `verified_by: charter` (no transcript trace needed) — and
+entropy's `unverified_rate` **excludes** charter-class memories entirely (from
+both numerator and denominator): they are axioms, not claims awaiting a source.
+
+### Anti-abuse rule (Chairman-approved)
+
+A memory is honoured as charter **only if its id is in the blessed seed set** —
+the 8 known install seeds:
+
+```
+elon-as-manager        org-hierarchy            merge-gate
+repo-scoped-skill      sub-agent-isolation      verify-before-commit
+four-daily-runs        minimal-permission-overhead
+```
+
+This set is declared in `verify_memory.CHARTER_SEED_IDS` and mirrored in
+`entropy.CHARTER_SEED_IDS`. A **normal captured memory that self-declares
+`charter:`** (frontmatter or source) but is **not** in the blessed set is NOT
+silently trusted:
+
+- VERIFY does not stamp it; it lists the id under `flagged_charter` (suspicious).
+- entropy does not exclude it (it is still counted in `unverified_rate`) and
+  surfaces its id under `details.suspicious_charter_ids`.
+
+So "add `provenance: charter` to skip VERIFY forever" does not work — the blessed
+allow-list is the gate. New axioms are added deliberately (extend the seed set in
+both scripts), never by self-declaration.
+
+---
+
+**Version**: v3 (memory pipeline + charter class)  
+**Last updated**: 2026-07-03  
+**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py / scripts/verify_memory.py

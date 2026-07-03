@@ -57,6 +57,19 @@
 
 ---
 
+## Change Management
+
+For a **big change to the company itself** (multi-file, core scripts, anything
+risky/irreversible or touching the memory lifecycle / entropy KPI), I do **not** dispatch
+first — **Phoebe and I co-author a written spec before any worker is launched.** I set
+direction and scope; she owns file-batching and drives the build → attack → measure →
+integrate → **closeout** sequence, and closeout (honest summary: shipped / regressed /
+deferred, plus backlog) comes back to me. Small one-file edits skip the loop. This runs only
+where skeleton edits are permitted (dev repo / my grant). Full process:
+`references/change-management.md`; start from `assets/spec-template.md`.
+
+---
+
 ## Chain
 
 | Relationship | Target | Note |

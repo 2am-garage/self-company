@@ -19,14 +19,15 @@ vm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vm)
 
 
-def _mem(path, *, id, sources, verified=False):
+def _mem(path, *, id, sources, verified=False, provenance=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     extra = "verified_date: 2026-06-01\nverified_by: Gibby\n" if verified else ""
+    prov = f"provenance: {provenance}\n" if provenance else ""
     with open(path, "w") as f:
         f.write(
             f"---\nid: {id}\ntier: L0\nowner: Tony\nsources: {sources}\n"
             f"created: 2026-06-01\nlast_reinforced: 2026-06-01\nreinforce_count: 1\n"
-            f"decay_score: 1.0\nstatus: active\n{extra}---\nbody\n")
+            f"decay_score: 1.0\nstatus: active\n{prov}{extra}---\nbody\n")
 
 
 def _transcripts(d, session, nlines):
@@ -78,6 +79,55 @@ class TestVerify(unittest.TestCase):
             rep = vm.verify_dir(mem, tdir, "2026-06-30", apply=True)
             self.assertEqual(rep["already_verified"], 1)
             self.assertEqual(rep["verified"], [])
+
+
+class TestCharterClass(unittest.TestCase):
+    """Item 6 — charter/axiom provenance class + anti-abuse."""
+
+    def _emptytx(self, d):
+        tdir = os.path.join(d, "transcripts")
+        os.makedirs(tdir, exist_ok=True)
+        return tdir
+
+    def test_blessed_charter_stamped_by_charter(self):
+        # A blessed seed with charter provenance and NO traceable source is
+        # honoured — stamped verified_by: charter, not listed unverifiable.
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory")
+            _mem(os.path.join(mem, "L0-working", "a.md"),
+                 id="org-hierarchy", sources='["charter:org-hierarchy"]',
+                 provenance="charter")
+            rep = vm.verify_dir(mem, self._emptytx(d), "2026-07-03", apply=True)
+            self.assertIn("org-hierarchy", rep["charter_verified"])
+            self.assertNotIn("org-hierarchy", rep["unverifiable"])
+            with open(os.path.join(mem, "L0-working", "a.md")) as f:
+                txt = f.read()
+            self.assertIn("verified_by: charter", txt)
+            self.assertIn("verified_date: 2026-07-03", txt)
+
+    def test_charter_via_source_tag_only(self):
+        # Provenance declared purely via a charter:<slug> source (no frontmatter
+        # key) is still recognised for a blessed id.
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory")
+            _mem(os.path.join(mem, "L0-working", "c.md"),
+                 id="merge-gate", sources='["charter:merge-gate"]')
+            rep = vm.verify_dir(mem, self._emptytx(d), "2026-07-03", apply=True)
+            self.assertIn("merge-gate", rep["charter_verified"])
+
+    def test_nonblessed_charter_flagged_not_trusted(self):
+        # A NON-blessed memory self-declaring charter is flagged, never stamped.
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory")
+            _mem(os.path.join(mem, "L0-working", "b.md"),
+                 id="fake-axiom", sources='["charter:fake-axiom"]',
+                 provenance="charter")
+            rep = vm.verify_dir(mem, self._emptytx(d), "2026-07-03", apply=True)
+            self.assertIn("fake-axiom", rep["flagged_charter"])
+            self.assertNotIn("fake-axiom", rep["charter_verified"])
+            self.assertNotIn("fake-axiom", rep["verified"])
+            with open(os.path.join(mem, "L0-working", "b.md")) as f:
+                self.assertNotIn("verified_date", f.read())
 
 
 if __name__ == "__main__":

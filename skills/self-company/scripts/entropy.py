@@ -34,6 +34,48 @@ try:
 except Exception:  # pragma: no cover - defensive
     _shared_load_policy = None
 
+# --- Item 2: optional offline embedding backend for the semantic dedup pass ---
+# entropy.py is stdlib-only and MUST run without the RAG venv. When the venv IS
+# present we re-exec into it (same pattern reinforce_memory.py uses) so the
+# embedding second pass in compute_dup_rate can run against the SAME offline
+# model (rag_embed / bge-small-en-v1.5, 384-dim). When it is absent we fall back
+# to Jaccard-only — never a hard fail, never a network call. Set SC_NO_RAG=1 to
+# force Jaccard-only (used by tests to exercise the fallback path).
+def _reexec_into_rag_venv():
+    if os.environ.get("SC_NO_RAG") or os.environ.get("SC_RAG_REEXEC"):
+        return
+    try:
+        import fastembed  # noqa: F401
+        import numpy  # noqa: F401
+        return
+    except Exception:
+        pass
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / ".rag-venv" / "bin" / "python",
+                 Path.cwd() / ".company" / ".rag-venv" / "bin" / "python"):
+        if cand.exists():
+            os.environ["SC_RAG_REEXEC"] = "1"
+            os.execv(str(cand), [str(cand)] + sys.argv)
+
+
+# NOTE: _reexec_into_rag_venv() is intentionally NOT called at import time.
+# Importing entropy from a base-python process must never os.execv and replace
+# the caller's program. The re-exec is performed only when this file is run
+# directly, from the __main__ entrypoint below (see main()).
+
+try:
+    if os.environ.get("SC_NO_RAG"):
+        raise ImportError("SC_NO_RAG set")
+    import rag_embed
+    import numpy as np
+    _HAS_RAG = True
+except Exception:
+    _HAS_RAG = False
+
+# Populated by compute_dup_rate; surfaced in JSON as `semantic_dedup` so callers
+# can see whether the embedding pass ran or was skipped (and why).
+_SEMANTIC_META = None
+
 # ============================================================================
 # Constants (tunable, defaults == manifest §1)
 # ============================================================================
@@ -45,7 +87,64 @@ W3_STALE = 0.20
 W4_UNVERIFIED = 0.20
 
 # Duplicate detection
-DUP_JACCARD = 0.8
+DUP_JACCARD = 0.8   # cheap first pass: word-overlap >= this counts as a dup
+
+# Semantic (embedding) second pass — Item 2. Jaccard misses cross-session
+# paraphrase dups (independently authored bodies -> low word overlap). For pairs
+# whose Jaccard lands in an AMBIGUOUS band we add an offline cosine-embedding
+# check. The band is bounded so we only spend embeddings where they help: below
+# _LO the bodies are unrelated word-wise, above _HI Jaccard is already near its
+# own dup gate.
+#
+# Values below are Tony's evidence-based tuning from 11,175 measured pairs on the
+# live corpus (shipped offline model / bge-small-en-v1.5):
+#   * Real cross-session paraphrase dups all sit at Jaccard < 0.15, cosine
+#     0.74-0.89 -> the OLD band [0.30, 0.60] was dead code (never entered by a
+#     real dup). BAND_LO drops to 0.05, BAND_HI rises to 0.80 to cover them.
+#   * Distinct-but-on-topic hard-negatives reach cosine up to 0.811, and the
+#     overlap zone [0.74, 0.81] cannot be split by cosine alone. So the SCORED
+#     hard-dup gate DUP_COSINE sits at 0.82 (FP=0 on Tony's labeled
+#     hard-negatives; do NOT go below 0.812).
+#
+# Two-tier flag: pairs with DUP_REVIEW_COSINE <= cosine < DUP_COSINE (0.78-0.82)
+# are REVIEW CANDIDATES — surfaced in the JSON for Tony but NOT counted as
+# duplicates (they must not inflate dup_rate/entropy or auto-consolidate). Only
+# cosine >= DUP_COSINE counts as a scored duplicate. DUP_COSINE stays distinct
+# from (and lower than) reinforce_memory's 0.85 auto-absorb threshold: entropy
+# only FLAGS pairs for Tony's review (reversible).
+DUP_SEM_BAND_LO = 0.05
+DUP_SEM_BAND_HI = 0.8
+DUP_COSINE = 0.82
+DUP_REVIEW_COSINE = 0.78
+
+# --- Item 6: charter/axiom source class -------------------------------------
+# Charter memories are install-seeded architectural axioms (true by
+# construction), NOT transcript-sourced claims — so unverified_rate must NOT
+# count them (they can never carry a traceable [session#line] source). A memory
+# is charter-class when it self-declares charter provenance (`provenance:
+# charter` frontmatter OR a `charter:<slug>` source) AND its id is in the
+# blessed seed set. A NON-blessed memory that merely self-declares charter is
+# an abuse attempt — it is NOT excluded (still counted unverified) and is
+# surfaced separately as `suspicious_charter_ids`. The seed set lives in ONE
+# shared place (charter_ids.py, same dir) since Phase 4 Item 1 — verify_memory,
+# entropy, and decay all import it. Best-effort import with a verbatim fallback
+# copy (same pattern as the policy loader above) so a missing sibling module
+# degrades instead of crashing the KPI pass.
+try:
+    from charter_ids import (CHARTER_SEED_IDS,
+                             self_declares_charter as _shared_self_declares_charter)
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: charter_ids.py)
+    CHARTER_SEED_IDS = frozenset({
+        "elon-as-manager",
+        "org-hierarchy",
+        "merge-gate",
+        "repo-scoped-skill",
+        "sub-agent-isolation",
+        "verify-before-commit",
+        "four-daily-runs",
+        "minimal-permission-overhead",
+    })
+    _shared_self_declares_charter = None
 
 # Decay thresholds (must match decay.py)
 HL_BASE = 7.0
@@ -108,6 +207,15 @@ def parse_frontmatter(text):
         elif ':' in line:
             key, val = line.split(':', 1)
             result[key.strip()] = val.strip()
+
+    # `defunct` is a legacy alias for `archived` (the daily agent writes it
+    # when its sandboxed `rm` can't delete a merged-away stub). Mirror
+    # decay.py's on-read migration so both scanners agree on the active set:
+    # without this, defunct stubs kept counting as live memories — inflating
+    # total_memories and every rate — for the whole reap grace window, so a
+    # completed merge didn't lower measured entropy until reap. (Phase 4 #5)
+    if result.get('status') == 'defunct':
+        result['status'] = 'archived'
 
     # Defaults
     result.setdefault('tier', 'L0')
@@ -215,7 +323,9 @@ def load_memories(memory_dir, include_archived=False):
 
             fm = parse_frontmatter(content)
 
-            # Skip archived unless requested
+            # Skip archived unless requested. `defunct` is normalised to
+            # `archived` by parse_frontmatter (decay.py parity), so defunct
+            # stubs are excluded here too — and included by --include-archived.
             if not include_archived and fm.get('status') == 'archived':
                 continue
 
@@ -240,6 +350,7 @@ def load_memories(memory_dir, include_archived=False):
                 'tier': fm.get('tier', 'L0'),
                 'status': fm.get('status', 'active'),
                 'sources': fm.get('sources', []),
+                'provenance': fm.get('provenance'),  # Item 6: charter/axiom class
                 'verified_date': fm.get('verified_date'),
                 'reinforce_count': int(fm.get('reinforce_count', 1)),
                 'last_reinforced': fm.get('last_reinforced', ''),
@@ -252,21 +363,128 @@ def load_memories(memory_dir, include_archived=False):
     return memories
 
 # ============================================================================
+# Item 7: Adjudication ledger (persisted verdicts on candidate pairs)
+# ============================================================================
+
+def load_adjudications(path):
+    """
+    Parse the adjudication ledger — a markdown table at .company/ops/
+    adjudications.md keyed by the UNORDERED pair (id_a, id_b):
+
+        | id_a | id_b | verdict | by | date | reason |
+        |------|------|---------|----|------|--------|
+        | foo  | bar  | distinct| Elon | 2026-07-03 | ... |
+
+    Returns a dict keyed by the sorted-tuple pair -> {verdict, by, date, reason}.
+    Only rows whose verdict is a recognised value ({distinct, duplicate}) are
+    kept; the header and `---` separator rows are ignored. Missing file -> {};
+    never raises (a malformed ledger degrades to "no adjudications", never a
+    hard fail). Stale-guard is implicit: an entry for ids that no longer exist
+    simply never matches a live pair, so it is inert (ignored), not an error.
+    """
+    records = {}
+    try:
+        p = Path(path)
+        if not p.exists():
+            return records
+        for raw in p.read_text(encoding='utf-8').splitlines():
+            line = raw.strip()
+            if not line.startswith('|'):
+                continue
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            if len(cells) < 3:
+                continue
+            a, b, verdict = cells[0], cells[1], cells[2].lower()
+            if verdict not in ('distinct', 'duplicate'):
+                continue  # skips header ("verdict") and separator ("---") rows
+            if not a or not b:
+                continue
+            key = tuple(sorted([a, b]))
+            records[key] = {
+                'verdict': verdict,
+                'by': cells[3] if len(cells) > 3 else '',
+                'date': cells[4] if len(cells) > 4 else '',
+                'reason': cells[5] if len(cells) > 5 else '',
+            }
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"[entropy] adjudication ledger skipped ({e})", file=sys.stderr)
+    return records
+
+
+def distinct_pairs_from(adjudications):
+    """Set of sorted-tuple pairs adjudicated `distinct` (the ones entropy omits
+    from candidate lists and does not count)."""
+    return {k for k, v in adjudications.items() if v['verdict'] == 'distinct'}
+
+
+# ============================================================================
 # Entropy Dimensions
 # ============================================================================
 
-def compute_dup_rate(memories):
+def _semantic_cosines(memories, band_candidates):
     """
-    Find approximate duplicates using Jaccard similarity >= DUP_JACCARD.
-    Returns: (dup_rate, duplicate_pairs)
+    Cosine similarity for each (i, j) index pair in band_candidates, using the
+    shared offline embedding backend (rag_embed / bge-small-en-v1.5, 384-dim) —
+    the SAME model reinforce_memory.py uses. Only the memories that actually
+    appear in a band candidate are embedded, keeping the second pass cheap. No
+    network. Returns a list of cosines aligned with band_candidates.
     """
+    idxs = sorted({k for pair in band_candidates for k in pair})
+    bodies = [memories[k]['body'] or memories[k]['id'] for k in idxs]
+    vecs = np.array(rag_embed.embed_batch(bodies), dtype="float32")
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    unit = vecs / norms
+    row = {k: r for k, r in zip(idxs, unit)}
+    return [float(row[i] @ row[j]) for i, j in band_candidates]
+
+
+def compute_dup_rate(memories, distinct_pairs=None):
+    """
+    Find approximate duplicates in two passes:
+      1. Jaccard (cheap, always): word-overlap >= DUP_JACCARD -> duplicate.
+      2. Semantic (optional): pairs whose Jaccard lands in the ambiguous band
+         [DUP_SEM_BAND_LO, DUP_SEM_BAND_HI] get an offline cosine-embedding
+         re-check, resolved in two tiers:
+           * cosine >= DUP_COSINE      -> SCORED duplicate (counts in dup_rate,
+                                          appears in the returned `pairs`).
+           * DUP_REVIEW_COSINE <= cosine < DUP_COSINE -> REVIEW CANDIDATE:
+                                          surfaced in _SEMANTIC_META
+                                          ['review_candidates'] for Tony but NOT
+                                          counted (never inflates dup_rate, never
+                                          in `pairs`, never auto-consolidates).
+         This catches cross-session paraphrase dups (same meaning, different
+         words) that Jaccard alone misses, while keeping the scored gate
+         precision-safe against on-topic hard-negatives.
+
+    Graceful fallback: when the RAG backend (fastembed/numpy) is absent, the
+    embedding pass is skipped and behaviour is IDENTICAL to Jaccard-only. The
+    outcome is recorded in the module-level _SEMANTIC_META (surfaced in JSON)
+    and a one-line notice goes to stderr — never a hard failure.
+
+    Item 7: `distinct_pairs` (a set of sorted-tuple id pairs adjudicated
+    `distinct`) is honoured — such a pair is NEVER surfaced as a duplicate or
+    review candidate and NEVER counted in dup_rate. Stale-guard: a pair whose
+    ids are absent from `memories` simply never matches, so it is inert.
+
+    Returns: (dup_rate, duplicate_pairs)   [contract unchanged; review
+    candidates are carried out-of-band via _SEMANTIC_META so they never touch
+    the (dup_rate, pairs) contract]
+    """
+    global _SEMANTIC_META
+    distinct_pairs = distinct_pairs or set()
     pairs = []
+    review_candidates = []  # {'id_a','id_b','cosine'}; NOT scored duplicates
     n = len(memories)
 
     if n < 2:
+        _SEMANTIC_META = {'pass': 'jaccard-only', 'reason': 'fewer than 2 memories',
+                          'band_candidates': 0, 'embedding_pairs': 0,
+                          'review_candidates': []}
         return 0.0, pairs
 
     seen_pairs = set()
+    band_candidates = []  # (i, j) index pairs to re-check with embeddings
     for i in range(n):
         for j in range(i+1, n):
             id1, id2 = memories[i]['id'], memories[j]['id']
@@ -274,11 +492,72 @@ def compute_dup_rate(memories):
 
             if pair_key in seen_pairs:
                 continue
+            # Item 7: adjudicated-distinct pairs are never candidates and never
+            # counted — skip before any scoring (covers Jaccard, the embedding
+            # band, and review candidates in one place).
+            if pair_key in distinct_pairs:
+                continue
 
             sim = jaccard_similarity(memories[i]['body'], memories[j]['body'])
             if sim >= DUP_JACCARD:
                 pairs.append([id1, id2])
                 seen_pairs.add(pair_key)
+            elif DUP_SEM_BAND_LO <= sim <= DUP_SEM_BAND_HI:
+                band_candidates.append((i, j))
+
+    # Pass 2: semantic embedding check on the ambiguous band only.
+    if not band_candidates:
+        _SEMANTIC_META = {'pass': 'jaccard+embedding', 'reason': 'no in-band candidates',
+                          'band_candidates': 0, 'embedding_pairs': 0,
+                          'cosine_threshold': DUP_COSINE,
+                          'review_cosine_threshold': DUP_REVIEW_COSINE,
+                          'review_candidates': []}
+    elif not _HAS_RAG:
+        # C1: name the actual trigger — SC_NO_RAG force-disable vs venv truly
+        # absent. (Runtime backend failures get their own message below.)
+        why = ('force-disabled via SC_NO_RAG' if os.environ.get('SC_NO_RAG')
+               else 'RAG venv absent')
+        notice = f'embedding pass skipped ({why})'
+        print(f"[entropy] {notice}", file=sys.stderr)
+        _SEMANTIC_META = {'pass': 'jaccard-only', 'reason': notice,
+                          'band_candidates': len(band_candidates), 'embedding_pairs': 0,
+                          'review_candidates': []}
+    else:
+        # Import succeeded, but embedding can still fail at runtime (e.g. model
+        # not cached). Degrade to Jaccard-only rather than hard-fail or hit the
+        # network — same guarantee as the venv-absent branch.
+        try:
+            cosines = _semantic_cosines(memories, band_candidates)
+        except Exception as e:
+            notice = f'embedding pass skipped (backend error: {e})'
+            print(f"[entropy] {notice}", file=sys.stderr)
+            _SEMANTIC_META = {'pass': 'jaccard-only', 'reason': notice,
+                              'band_candidates': len(band_candidates), 'embedding_pairs': 0,
+                              'review_candidates': []}
+            cosines = None
+        if cosines is not None:
+            embedding_pairs = 0
+            for (i, j), cos in zip(band_candidates, cosines):
+                id1, id2 = memories[i]['id'], memories[j]['id']
+                pair_key = tuple(sorted([id1, id2]))
+                if pair_key in seen_pairs:
+                    continue
+                if cos >= DUP_COSINE:
+                    # Tier 1: SCORED duplicate — counts in dup_rate + pairs.
+                    pairs.append([id1, id2])
+                    seen_pairs.add(pair_key)
+                    embedding_pairs += 1
+                elif cos >= DUP_REVIEW_COSINE:
+                    # Tier 2: REVIEW CANDIDATE — surfaced for Tony only. Do NOT
+                    # add to seen_pairs/pairs and do NOT count toward dup_rate.
+                    review_candidates.append(
+                        {'id_a': id1, 'id_b': id2, 'cosine': round(cos, 4)})
+            _SEMANTIC_META = {'pass': 'jaccard+embedding', 'reason': 'ok',
+                              'band_candidates': len(band_candidates),
+                              'embedding_pairs': embedding_pairs,
+                              'cosine_threshold': DUP_COSINE,
+                              'review_cosine_threshold': DUP_REVIEW_COSINE,
+                              'review_candidates': review_candidates}
 
     dup_rate = len(pairs) / max(1, n)
     dup_rate = min(1.0, dup_rate)
@@ -317,13 +596,19 @@ def slug_family_prefix(mem_id):
         return mem_id
     return parts[0]
 
-def compute_contradiction_score(memories):
+def compute_contradiction_score(memories, distinct_pairs=None):
     """
     Detect contradictions: two memories about the same topic (same slug
     family OR Jaccard 0.5-0.8) that ALSO contain opposing keywords. Opposing
     keywords are required — sharing a topic without opposition is not a conflict.
+
+    Item 7: `distinct_pairs` (sorted-tuple id pairs adjudicated `distinct`) are
+    omitted from the surfaced contradiction candidate list and do not count in
+    the score. Stale-guard: pairs referencing absent ids simply never match.
+
     Returns: (contradiction_score, contradiction_pairs)
     """
+    distinct_pairs = distinct_pairs or set()
     pairs = []
     n = len(memories)
 
@@ -339,6 +624,8 @@ def compute_contradiction_score(memories):
 
             if pair_key in seen_pairs:
                 continue
+            if pair_key in distinct_pairs:
+                continue  # adjudicated distinct — never a contradiction candidate
 
             # Same slug family (tier-aware prefix) OR topical similarity only
             # tells us two memories are ABOUT the same thing — that is necessary
@@ -424,6 +711,37 @@ def compute_stale_rate(memories, now_date):
 
     return stale_rate, stale_ids
 
+def _self_declares_charter(mem):
+    """True if a memory SELF-DECLARES charter provenance — via a
+    `provenance: charter` frontmatter key OR any `charter:<slug>` source. Says
+    nothing about trust; the blessed-set gate below decides that.
+    Delegates to the shared charter_ids helper when it imported; the inline
+    fallback is behaviour-identical for entropy's parsed-list `sources`."""
+    if _shared_self_declares_charter is not None:
+        return _shared_self_declares_charter(mem)
+    prov = str(mem.get('provenance') or '').strip().lower()
+    if prov == 'charter':
+        return True
+    for s in mem.get('sources', []) or []:
+        if str(s).strip().startswith('charter:'):
+            return True
+    return False
+
+
+def is_charter_memory(mem):
+    """A memory is HONOURED as charter-class only when it self-declares charter
+    provenance AND its id is in the blessed install-seed set. Non-blessed
+    charter claims are NOT charter-class (they stay ordinary claims)."""
+    return _self_declares_charter(mem) and mem['id'] in CHARTER_SEED_IDS
+
+
+def find_suspicious_charter(memories):
+    """Item 6 anti-abuse: NON-blessed memories that self-declare charter. These
+    are surfaced (never trusted, never excluded from unverified_rate)."""
+    return [m['id'] for m in memories
+            if _self_declares_charter(m) and m['id'] not in CHARTER_SEED_IDS]
+
+
 def compute_unverified_rate(memories):
     """
     Fraction of memories the VERIFY loop has NOT confirmed.
@@ -435,18 +753,29 @@ def compute_unverified_rate(memories):
     a perfect score for a stage (VERIFY) that had never run once. Counting
     verified_date makes the KPI reflect whether provenance was actually confirmed.
 
+    Item 6: charter/axiom-class memories (blessed install seeds) are EXCLUDED
+    entirely — from both numerator and denominator. They are axioms true by
+    construction, not claims needing a transcript, so counting them as
+    "unverified" permanently pinned the KPI's largest component. A non-blessed
+    memory that merely self-declares charter is NOT excluded (anti-abuse: it is
+    still counted here and separately flagged as suspicious).
+
     Returns: (unverified_rate, unverified_ids)
     """
     unverified_ids = []
+    considered = 0
 
     for mem in memories:
+        if is_charter_memory(mem):
+            continue  # axiom, not a claim — excluded from the rate entirely
+        considered += 1
         sources = mem.get('sources', [])
         has_sources = bool(sources) and not (isinstance(sources, list) and len(sources) == 0)
         verified = bool(mem.get('verified_date'))
         if not has_sources or not verified:
             unverified_ids.append(mem['id'])
 
-    unverified_rate = len(unverified_ids) / max(1, len(memories)) if memories else 0.0
+    unverified_rate = len(unverified_ids) / max(1, considered) if considered else 0.0
     unverified_rate = min(1.0, unverified_rate)
 
     return unverified_rate, unverified_ids
@@ -477,6 +806,12 @@ def load_policy_constants(policy_path):
 # ============================================================================
 
 def main():
+    # Re-exec into the RAG venv (if present) so the embedding second pass can
+    # run. Done here, at the direct-run entrypoint — NOT at import time — so that
+    # `import entropy` from another program never replaces the caller's process.
+    # SC_NO_RAG=1 suppresses this (jaccard-only, no re-exec).
+    _reexec_into_rag_venv()
+
     parser = argparse.ArgumentParser(
         description='Measure entropy KPI across Chairman memory dimensions.'
     )
@@ -500,6 +835,12 @@ def main():
         action='store_true',
         help='Include archived memories in entropy calculation'
     )
+    parser.add_argument(
+        '--adjudications',
+        default='.company/ops/adjudications.md',
+        help='Adjudication ledger of judged pairs (Item 7). '
+             'distinct-verdict pairs are omitted from candidates and not counted.'
+    )
 
     args = parser.parse_args()
 
@@ -519,6 +860,7 @@ def main():
     global HL_BASE, HL_GROWTH, L0_DROP_THRESHOLD, L1_ARCHIVE_THRESHOLD
     global L1_DEMOTE_RC, L0_TO_L1_RC, L1_TO_L2_RC
     global W1_DUP, W2_CONTRA, W3_STALE, W4_UNVERIFIED, DUP_JACCARD
+    global DUP_SEM_BAND_LO, DUP_SEM_BAND_HI, DUP_COSINE, DUP_REVIEW_COSINE
 
     if 'HL_BASE' in policy_config:
         HL_BASE = policy_config['HL_BASE']
@@ -544,11 +886,20 @@ def main():
         W4_UNVERIFIED = policy_config['W4_UNVERIFIED']
     if 'DUP_JACCARD' in policy_config:
         DUP_JACCARD = policy_config['DUP_JACCARD']
+    if 'DUP_SEM_BAND_LO' in policy_config:
+        DUP_SEM_BAND_LO = policy_config['DUP_SEM_BAND_LO']
+    if 'DUP_SEM_BAND_HI' in policy_config:
+        DUP_SEM_BAND_HI = policy_config['DUP_SEM_BAND_HI']
+    if 'DUP_COSINE' in policy_config:
+        DUP_COSINE = policy_config['DUP_COSINE']
+    if 'DUP_REVIEW_COSINE' in policy_config:
+        DUP_REVIEW_COSINE = policy_config['DUP_REVIEW_COSINE']
 
     # P3: provenance — which constants came from policy vs built-in defaults.
     consumed = ['HL_BASE', 'HL_GROWTH', 'L0_DROP_THRESHOLD', 'L1_ARCHIVE_THRESHOLD',
                 'L1_DEMOTE_RC', 'L0_TO_L1_RC', 'L1_TO_L2_RC',
-                'W1_DUP', 'W2_CONTRA', 'W3_STALE', 'W4_UNVERIFIED', 'DUP_JACCARD']
+                'W1_DUP', 'W2_CONTRA', 'W3_STALE', 'W4_UNVERIFIED', 'DUP_JACCARD',
+                'DUP_SEM_BAND_LO', 'DUP_SEM_BAND_HI', 'DUP_COSINE', 'DUP_REVIEW_COSINE']
     config_sources = {k: ('policy' if k in policy_config else 'default') for k in consumed}
     config_exists = Path(args.config).exists() if args.config else False
     fell_back = sorted(k for k, s in config_sources.items() if s == 'default')
@@ -559,9 +910,20 @@ def main():
     # Load memories
     memories = load_memories(args.memory_dir, include_archived=args.include_archived)
 
+    # Item 7: adjudication ledger — pairs judged `distinct` are dropped from
+    # candidate lists and excluded from dup_rate / contradiction_score.
+    adjudications = load_adjudications(args.adjudications)
+    distinct_pairs = distinct_pairs_from(adjudications)
+    live_ids = {m['id'] for m in memories}
+    applied_distinct = sorted(list(k) for k in distinct_pairs
+                              if k[0] in live_ids and k[1] in live_ids)
+
+    # Item 6 anti-abuse: non-blessed memories self-declaring charter (suspicious).
+    suspicious_charter_ids = find_suspicious_charter(memories)
+
     # Compute dimensions
-    dup_rate, dup_pairs = compute_dup_rate(memories)
-    contra_score, contra_pairs = compute_contradiction_score(memories)
+    dup_rate, dup_pairs = compute_dup_rate(memories, distinct_pairs=distinct_pairs)
+    contra_score, contra_pairs = compute_contradiction_score(memories, distinct_pairs=distinct_pairs)
     stale_rate, stale_ids = compute_stale_rate(memories, now_date)
     unverified_rate, unverified_ids = compute_unverified_rate(memories)
 
@@ -597,6 +959,18 @@ def main():
             'contradiction_pairs': contra_pairs,
             'stale_ids': stale_ids,
             'unverified_ids': unverified_ids,
+            # Item 6 anti-abuse: memories self-declaring charter without being a
+            # blessed seed (surfaced, never trusted, never excluded above).
+            'suspicious_charter_ids': suspicious_charter_ids,
+        },
+        # Item 2: whether the semantic (embedding) dedup pass ran or fell back.
+        'semantic_dedup': _SEMANTIC_META,
+        # Item 7: adjudication ledger provenance — how many distinct-verdict
+        # pairs were loaded and which live pairs they suppressed this run.
+        'adjudications': {
+            'source_file': args.adjudications if Path(args.adjudications).exists() else None,
+            'distinct_pairs': len(distinct_pairs),
+            'applied_distinct_pairs': applied_distinct,
         },
         'config': {
             'source_file': args.config if config_exists else None,

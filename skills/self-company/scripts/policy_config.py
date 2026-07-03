@@ -35,6 +35,7 @@ CONSTANT_SPECS = {
     "L0_DROP_THRESHOLD": float,
     "L1_ARCHIVE_THRESHOLD": float,
     "L1_DEMOTE_RC": int,
+    "REAP_GRACE_DAYS": int,
     "L0_TO_L1_RC": int,
     "L1_TO_L2_RC": int,
     "w1": float,
@@ -42,9 +43,14 @@ CONSTANT_SPECS = {
     "w3": float,
     "w4": float,
     "DUP_JACCARD": float,
+    "DUP_SEM_BAND_LO": float,
+    "DUP_SEM_BAND_HI": float,
+    "DUP_COSINE": float,
+    "DUP_REVIEW_COSINE": float,
     "VERIFY_MAX_RETRY": int,
     "RAG_ENABLE_THRESHOLD": int,
     "DAILY_RUNS_PER_DAY": int,
+    "CAPTURE_COOLDOWN_MINUTES": int,
 }
 
 # Candidate numeric token. We deliberately capture an optional sign and any

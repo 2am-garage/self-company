@@ -103,6 +103,206 @@ class TestDailyRun(unittest.TestCase):
             subprocess.run(["rm", "-rf", d])
 
 
+def _today():
+    return subprocess.check_output(["date", "+%F"], text=True).strip()
+
+
+def _read_log(company):
+    with open(os.path.join(company, "ops", "logs", f"daily-{_today()}.md")) as f:
+        return f.read()
+
+
+def _fake_rag_venv(company, script_body):
+    """Plant a fake .company/.rag-venv/bin/python so the reinforce step 'runs'."""
+    bindir = os.path.join(company, ".rag-venv", "bin")
+    os.makedirs(bindir, exist_ok=True)
+    py = os.path.join(bindir, "python")
+    with open(py, "w") as f:
+        f.write("#!/usr/bin/env bash\n" + script_body)
+    os.chmod(py, 0o755)
+    return py
+
+
+def _fake_claude(d):
+    """Plant a fake `claude` CLI that passes the auth probe and dumps the -p
+    prompt to $FAKE_CLAUDE_PROMPT_FILE. Returns the dir to prepend to PATH."""
+    bindir = os.path.join(d, "fakebin")
+    os.makedirs(bindir, exist_ok=True)
+    path = os.path.join(bindir, "claude")
+    with open(path, "w") as f:
+        f.write(
+            '#!/usr/bin/env bash\n'
+            'if [[ "${1:-}" == "auth" ]]; then echo \'{"loggedIn": true}\'; exit 0; fi\n'
+            'while (($#)); do\n'
+            '  if [[ "$1" == "-p" ]]; then shift; printf \'%s\' "$1" > "$FAKE_CLAUDE_PROMPT_FILE"; fi\n'
+            '  shift\n'
+            'done\nexit 0\n')
+    os.chmod(path, 0o755)
+    return bindir
+
+
+class TestDailyRunReinforce(unittest.TestCase):
+    """P4 Item 2: reinforce_memory.py wired into the deterministic core."""
+
+    def test_venv_absent_one_line_skip_core_completes(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- reinforce: skipped — RAG venv absent", text)
+            self.assertIn("- decay --apply:", text)   # core unaffected
+            self.assertIn("- entropy", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_reinforce_log_line_and_apply_flag(self):
+        # fake venv python: record argv, emit a canned reinforce JSON
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            argfile = os.path.join(d, "reinf_args.txt")
+            _fake_rag_venv(company, (
+                f'printf \'%s \' "$@" > "{argfile}"\n'
+                'echo \'{"applied": true, "threshold": 0.85, "reinforcements": '
+                '[{"canonical": "a", "absorbed": "b", "canonical_tier": "L0", "score": 0.95}], '
+                '"skipped_l2": [{"pair": ["c", "d"], "score": 0.93}], "scanned": 7}\'\n'))
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- reinforce --apply: absorbed 1 | skipped-L2 1 (scanned 7", text)
+            with open(argfile) as f:
+                args = f.read()
+            self.assertIn("reinforce_memory.py", args)
+            self.assertIn("--apply", args)
+            self.assertNotIn("--threshold", args)  # never lower the default
+            # reinforce must run BEFORE decay: its log line comes first
+            self.assertLess(text.index("- reinforce"), text.index("- decay"))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_dry_run_does_not_pass_apply(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            argfile = os.path.join(d, "reinf_args.txt")
+            _fake_rag_venv(company, (
+                f'printf \'%s \' "$@" > "{argfile}"\n'
+                'echo \'{"applied": false, "threshold": 0.85, "reinforcements": [], '
+                '"skipped_l2": [], "scanned": 1}\'\n'))
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--dry-run"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(argfile) as f:
+                self.assertNotIn("--apply", f.read())
+            self.assertIn("- reinforce: absorbed 0", _read_log(company))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_reinforce_failure_never_aborts_core(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _fake_rag_venv(company, 'echo "boom" >&2\nexit 1\n')
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- reinforce: no output (errored) — deterministic core continues", text)
+            self.assertIn("- decay --apply:", text)
+            self.assertIn("- entropy", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+class TestDailyRunAgentPrompt(unittest.TestCase):
+    """P4 Item 4: agent prompt aimed at the measured backlog."""
+
+    BODY = "the chairman prefers dark terminal themes for late night garage work"
+
+    def _write_body_mem(self, company, mid, body):
+        p = os.path.join(company, "memory", "L0-working", f"{mid}.md")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(
+                f"---\nid: {mid}\ntier: L0\nowner: Tony\nsources: [\"[s#1]\"]\n"
+                f"created: 2026-06-01\nlast_reinforced: {_today()}\n"
+                f"reinforce_count: 1\ndecay_score: 1.0\nstatus: active\n---\n{body}\n")
+
+    def _run_with_fake_claude(self, d):
+        promptfile = os.path.join(d, "prompt.txt")
+        env = {"PATH": _fake_claude(d) + os.pathsep + os.environ["PATH"],
+               "FAKE_CLAUDE_PROMPT_FILE": promptfile}
+        r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d], env=env)
+        return r, promptfile
+
+    def test_prompt_injects_measured_backlog(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            # identical bodies -> Jaccard 1.0 -> scored duplicate pair (no RAG needed)
+            self._write_body_mem(company, "pref-dark-theme-one", self.BODY)
+            self._write_body_mem(company, "pref-dark-theme-two", self.BODY)
+            r, promptfile = self._run_with_fake_claude(d)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(promptfile) as f:
+                prompt = f.read()
+            self.assertIn("PAIR BY PAIR", prompt)
+            self.assertIn("SCORED DUPLICATE pairs", prompt)
+            self.assertIn("pref-dark-theme-one", prompt)
+            self.assertIn("pref-dark-theme-two", prompt)
+            # exact adjudication row format quoted
+            self.assertIn("| <id_a> | <id_b> | distinct | Tony |", prompt)
+            self.assertIn(".company/ops/adjudications.md", prompt)
+            # injection hygiene + budget: ids only, sane size
+            self.assertNotIn(self.BODY, prompt)          # bodies never embedded
+            self.assertLess(len(prompt), 8000)
+            # Tony-proposal tail unchanged
+            self.assertIn("as TONY", prompt)
+            self.assertIn("measured backlog injected", _read_log(company))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_prompt_generic_when_no_candidates(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            self._write_body_mem(company, "pref-dark-theme-one", self.BODY)
+            r, promptfile = self._run_with_fake_claude(d)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(promptfile) as f:
+                prompt = f.read()
+            self.assertIn("Read L0-working memories", prompt)   # today's generic text
+            self.assertNotIn("SCORED DUPLICATE pairs", prompt)
+            self.assertIn("agent prompt: generic", _read_log(company))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_auth_fail_path_unchanged(self):
+        # AUTH pre-flight still short-circuits BEFORE any prompt build/agent call.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            promptfile = os.path.join(d, "prompt.txt")
+            env = {"PATH": _fake_claude(d) + os.pathsep + os.environ["PATH"],
+                   "FAKE_CLAUDE_PROMPT_FILE": promptfile,
+                   "SELF_COMPANY_FORCE_AUTH_FAIL": "1"}
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d], env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("AUTH_FAIL x1", text)
+            self.assertFalse(os.path.exists(promptfile))     # agent never invoked
+            marker = os.path.join(company, "ops", "auth-fail.marker")
+            self.assertTrue(os.path.exists(marker))
+            with open(marker) as f:
+                self.assertIn("reason=auth", f.read())
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
 class TestInstallHook(unittest.TestCase):
     SH = os.path.join(REPO, "skills", "self-company", "scripts","install-hook.sh")
 

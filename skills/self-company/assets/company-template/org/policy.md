@@ -23,7 +23,7 @@ Each weight (all **tunable**, dimensionless, sum to 1.0, for easy reading as a 0
 | Duplication rate | `dup_rate` | `w1 = 0.25` | Count of duplicate pairs with Jaccard similarity ≥ 0.8 / total memories; uses cheap heuristic (§2.1.1), no LLM |
 | Contradiction score | `contradiction_score` | `w2 = 0.35` | Count of detected contradictions / total memories; heuristic detects same-id-prefix or high Jaccard with opposing keywords (§2.1.2); contradictions damage trust most, highest weight |
 | Stale rate | `stale_rate` | `w3 = 0.20` | Fraction of active memories with decay_score below tier threshold (L0<0.25, L1<0.15, L2 not counted); auto-cleaned by decay, slightly lower weight |
-| Unverified rate | `unverified_rate` | `w4 = 0.20` | Memories with empty/missing sources / total memories; violates verify-loop principle but usually small volume |
+| Unverified rate | `unverified_rate` | `w4 = 0.20` | Memories not confirmed by VERIFY (no `verified_date`) OR with empty/missing sources / total memories; blessed charter seeds are excluded (axiomatic by construction, not transcript-verifiable); violates verify-loop principle but usually small volume |
 
 ### 2.1.1 Duplication Detection (heuristic)
 
@@ -302,6 +302,7 @@ This section centralizes all **tunable** values; single source of truth for `scr
 | `L0_DROP_THRESHOLD` | **0.25** | ~14 days no reinforce | L0 drop | ✓ |
 | `L1_ARCHIVE_THRESHOLD` | **0.15** | ~19 days no reinforce | L1 demote/archive | ✓ |
 | `L1_DEMOTE_RC` | **2** | reinforce_count ≤ this | L1 demote back to L0 (else archive); set to 2 because normal L1 promotion has rc minimum 2; setting to 1 makes "demote to L0" impossible | ✓ |
+| `REAP_GRACE_DAYS` | **7** | days since `last_reinforced` | archived/defunct file untouched past this grace window is physically dropped in decay.py's `--apply` reap pass (never reaps active; never reaps L2) | ✓ |
 
 **L2 never decays**: L2 memories exempt from decay actions, only accept contradiction detection and updates.
 
@@ -328,6 +329,10 @@ Each reinforcement: `reinforce_count++`, `last_reinforced = today`. Promotion "d
 | `w3` (stale) | **0.20** | Stale auto-cleaned by decay, slightly lower weight | ✓ |
 | `w4` (unverified) | **0.20** | Violates verify-loop, but usually small volume | ✓ |
 | `DUP_JACCARD` | **0.8** | Jaccard similarity ≥ this counts as duplicate | ✓ |
+| `DUP_SEM_BAND_LO` | **0.05** | Jaccard lower bound of ambiguous band re-checked by cosine embedding (real paraphrase dups sit below 0.15) | ✓ |
+| `DUP_SEM_BAND_HI` | **0.8** | Jaccard upper bound of ambiguous band | ✓ |
+| `DUP_COSINE` | **0.82** | Cosine ≥ this = SCORED semantic duplicate (counts in dup_rate + pairs). Do not go below 0.812 | ✓ |
+| `DUP_REVIEW_COSINE` | **0.78** | `DUP_REVIEW_COSINE ≤ cosine < DUP_COSINE` = review candidate; surfaced but NOT counted | ✓ |
 
 ### 7.5 VERIFY Retry Ceiling
 
@@ -348,6 +353,7 @@ Each reinforcement: `reinforce_count++`, `last_reinforced = today`. Promotion "d
 | Constant | Default | Meaning | tunable |
 |---|---|---|---|
 | `DAILY_RUNS_PER_DAY` | **4** | Number of daily consolidate/decay batches per day. Default 4 = every 6 hours (00:00 / 06:00 / 12:00 / 18:00). The §7.6 daily ceiling is the **per-day total** shared across these runs; each run's soft budget ≈ daily ceiling ÷ DAILY_RUNS_PER_DAY, and Tom's token breaker enforces the day total. Raising this fights staleness faster (memory consolidates sooner) at higher token cost. | ✓ |
+| `CAPTURE_COOLDOWN_MINUTES` | **30** | Per-session CAPTURE throttle. The Stop hook fires on **every reply-stop**, not once per conversation; after a capture attempt for a session, further hook fires for the SAME session within this many minutes are one-line-logged no-ops (no model call, no L0 writes) — see `scripts/capture-trigger.py`. Marker: `ops/.capture-cooldown.json` (small JSON map, auto-pruned); a missing/corrupt marker **fails open** (capture proceeds — never lose a capture to a broken marker). Set to **0** to disable the throttle. | ✓ |
 
 > The daily batch is idempotent (`decay.py --apply` re-run is a no-op on already-disposed memory, verified in the red/blue ledger), so running it 4× a day is safe — extra runs simply catch newly-captured L0 sooner.
 
@@ -372,5 +378,5 @@ RAG ships dormant:
 
 ---
 
-Version: v3 (RAG dormant)  
-Last updated: 2026-06-25
+Version: v4 (RAG dormant; §7.7 scheduling cadence + CAPTURE throttle)  
+Last updated: 2026-07-03

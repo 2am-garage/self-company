@@ -37,6 +37,11 @@ from pathlib import Path
 
 MARKER = "ops/.last_notified"          # stores ISO timestamp of last notification
 SHOWN_MARKER = "ops/.last_shown"       # P1: last time Elon surfaced a delta in-session
+FAIL_MARKER = "ops/auth-fail.marker"   # B3 (Item 4): consecutive agent/auth fail streak
+# B3: consecutive-fail count at/above which --emit-hook surfaces a HIGH-priority
+# escalation, distinct from the routine ledger. NEW constant, default 2; env
+# override for tests. daily-run.sh writes the streak into FAIL_MARKER; we only READ.
+FAIL_STREAK_ESCALATE = int(os.environ.get("SELF_COMPANY_FAIL_STREAK_ESCALATE", "2"))
 RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
 
 
@@ -52,6 +57,42 @@ def read_marker(company):
     if not p.exists():
         return None
     return _parse_ts(p.read_text(encoding="utf-8").strip())
+
+
+def read_fail_marker(company):
+    """B3: read the deterministic fail-streak marker written by daily-run.sh's auth
+    pre-flight / agent-fail path. Returns (count:int, reason:str|None). Read-only —
+    notify-status never writes or resets this marker (a successful agent run does)."""
+    p = Path(company) / FAIL_MARKER
+    if not p.exists():
+        return 0, None
+    count, reason = 0, None
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if line.startswith("count="):
+                try:
+                    count = int(line[len("count="):].strip())
+                except ValueError:
+                    count = 0
+            elif line.startswith("reason="):
+                reason = line[len("reason="):].strip()
+    except OSError:
+        return 0, None
+    return count, reason
+
+
+def escalation_line(company):
+    """B3: a HIGH-priority escalation string when the consecutive-fail streak crosses
+    FAIL_STREAK_ESCALATE, else "". Wording tracks the marker's reason so the Chairman
+    gets an actionable pointer (auth => /login; agent => the agent log)."""
+    count, reason = read_fail_marker(company)
+    if count < FAIL_STREAK_ESCALATE:
+        return ""
+    if reason == "auth":
+        return (f"⚠ {count} consecutive agent auth-fails — the maintenance "
+                f"agent is NOT logged in; run /login to restore unattended runs.")
+    return (f"⚠ {count} consecutive agent failures — unattended maintenance "
+            f"has not completed; check ops/logs/agent-*.log (and /login).")
 
 
 def collect_runs(company, since):
@@ -199,6 +240,14 @@ def main(argv=None):
                "Chairman in your reply — it is the report he wants to see on entry, "
                "every session, whether or not anything changed:\n\n" + ledger)
 
+        # B3 (Item 4): a fail-streak escalation is HIGH-priority — prepend it so the
+        # Chairman sees it FIRST, clearly distinct from the routine ledger. This ADDS
+        # to the always-on report contract; it never replaces it.
+        esc = escalation_line(company)
+        if esc:
+            ctx = ("[self-company] ‼ HIGH-PRIORITY ESCALATION — surface this to the "
+                   "Chairman FIRST, before the ledger: " + esc + "\n\n" + ctx)
+
         new_runs = collect_runs(company, read_marker(company))
         if new_runs and substantive(company, new_runs):
             ctx += (f"\n\nAlso, {len(new_runs)} new run(s) since last seen — {summarize(new_runs)}. "
@@ -211,10 +260,14 @@ def main(argv=None):
 
     since = read_marker(company)
     runs = collect_runs(company, since)
+    fail_count, fail_reason = read_fail_marker(company)
     print(json.dumps({
         "new_runs": len(runs),
         "since": since.isoformat() if since else None,
         "summary": summarize(runs),
+        "fail_streak": fail_count,
+        "fail_reason": fail_reason,
+        "escalation": escalation_line(company),
         "details": [{"ts": b["ts"].isoformat(), "drop": b["drop"],
                      "memories": b["memories"], "entropy": b["entropy"],
                      "agent": b["agent"]} for b in runs],
