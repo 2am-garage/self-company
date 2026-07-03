@@ -32,13 +32,63 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
+
+# Shared policy loader (org/policy.md §7) — best-effort import, mirroring
+# decay.py: if the module is somehow missing we fall back to the built-in
+# defaults rather than ever crashing the Stop hook.
+try:
+    from policy_config import resolve as _resolve_config
+except Exception:  # pragma: no cover - defensive
+    _resolve_config = None
 
 RECURSION_GUARD = "SELF_COMPANY_CAPTURE_ACTIVE"
 DEFAULT_MODEL = os.environ.get("SELF_COMPANY_CAPTURE_MODEL", "claude-haiku-4-5-20251001")
 MAX_CHAIRMAN_CHARS = 24000   # cap transcript size fed to the model
 MAX_OBSERVATIONS = 12        # cap L0 drafts written per session
+
+# Per-session CAPTURE cooldown (survey F3): the Stop hook fires on EVERY
+# reply-stop, not once per conversation — one session produced 19 CAPTURE
+# blocks and 63 L0 files in a day. After a capture ATTEMPT for a session,
+# further hook fires for the SAME session inside this window are logged
+# no-ops (no model call, no transcript read). Policy §7.7
+# CAPTURE_COOLDOWN_MINUTES overrides the default; 0 disables the throttle.
+DEFAULT_CAPTURE_COOLDOWN_MINUTES = 30
+# One small JSON map {safe-session-id: iso-timestamp} under <company>/ops/,
+# mirroring the other ops dotfile markers (.last_notified, logs/.agent_runs_*).
+COOLDOWN_MARKER = ".capture-cooldown.json"
+
+# Reinforce-not-duplicate (survey F3, second half): a compact digest of RECENT
+# L0 memories is fed to the prompt so the model returns
+# `"reinforce": "<existing-id>"` for an already-captured fact instead of
+# minting a fresh slug for it (the id-only dedup cannot catch fresh slugs).
+RECENT_WINDOW_HOURS = 48          # digest window
+RECENT_DIGEST_MAX = 30            # max digest entries
+RECENT_GIST_CHARS = 140           # per-entry one-line gist cap
+RECENT_DIGEST_CHAR_BUDGET = 4000  # total prompt chars the digest may consume
+
+# The three L0/L2 knowledge classes CAPTURE tags each observation with. Kept in
+# sync with decay.py::L2_CATEGORIES so the promoter routes a promoted memory to
+# L2-cold/<category>/. Default is the historical class when the model omits it.
+CATEGORIES = ("profile", "projects", "preferences")
+DEFAULT_CATEGORY = "preferences"
+
+
+def _norm_category(value):
+    """Map a model-supplied category onto {profile, projects, preferences}.
+
+    Tolerant of singular/spacing/case ('Project' -> 'projects'); anything
+    unrecognised (or missing) falls back to the safe default, preferences.
+    """
+    v = str(value or "").strip().lower()
+    if v in CATEGORIES:
+        return v
+    if v in ("project", "profiles", "preference", "prefs", "pref"):
+        return {"project": "projects", "profiles": "profile",
+                "preference": "preferences", "prefs": "preferences",
+                "pref": "preferences"}[v]
+    return DEFAULT_CATEGORY
 
 # A2 backstop: quarantine observations that are clearly operational noise (the
 # company's own malfunctions) rather than durable facts about the Chairman.
@@ -87,8 +137,17 @@ def extract_chairman_lines(transcript_path):
     return out
 
 
-def build_capture_prompt(chairman_lines, existing_ids):
-    """Construct the Haiku CAPTURE instruction. Pure string, easy to test."""
+def build_capture_prompt(chairman_lines, existing_ids, today=None,
+                         recent_memories=None):
+    """Construct the Haiku CAPTURE instruction. Pure string, easy to test.
+
+    `today` (ISO run date) is injected so the model can resolve relative
+    project dates ("by Friday", "next week") to absolute calendar dates.
+    `recent_memories` is an [(id, gist)] digest (see recent_l0_digest); when
+    present, the model is told to `reinforce` those ids instead of restating
+    the same fact under a fresh slug.
+    """
+    today = today or date.today().isoformat()
     convo, total = [], 0
     for idx, text in chairman_lines:
         chunk = f"[#{idx}] {text}"
@@ -98,11 +157,48 @@ def build_capture_prompt(chairman_lines, existing_ids):
         convo.append(chunk)
     convo_text = "\n".join(convo)
     existing = ", ".join(sorted(existing_ids)) if existing_ids else "(none)"
+    recent_block = ""
+    if recent_memories:
+        entries, used = [], 0
+        for mid, gist in list(recent_memories)[:RECENT_DIGEST_MAX]:
+            entry = f"- {mid}: {gist}"
+            used += len(entry) + 1
+            if used > RECENT_DIGEST_CHAR_BUDGET:
+                break
+            entries.append(entry)
+        if entries:
+            recent_block = (
+                "=== Recently captured memories (last 48h) ===\n"
+                "These facts are ALREADY captured. Do NOT restate any of them "
+                "under a new id. If an observation is the same fact as one of "
+                'these, return it with "reinforce": "<that-id>" instead of a '
+                "new id.\n" + "\n".join(entries) + "\n\n"
+            )
     return (
         "You are the CAPTURE stage of a personal-memory pipeline. From the "
         "Chairman's messages below, extract durable facts about the *person* (the "
-        "Chairman): preferences, habits, identity/background, ongoing goals, "
-        "decisions, working style. Each observation MUST cite the message index.\n\n"
+        "Chairman) and classify each into exactly ONE of three equally-important "
+        "categories. Weight them evenly — do NOT default to preferences. Aim for a "
+        "balanced mix; the memory is currently rich in preferences but empty of "
+        "profile and projects, so actively hunt for profile and project facts, "
+        "including ones stated only in passing.\n\n"
+        "1. profile — durable facts about WHO the Chairman is: role, background, "
+        "domain expertise, the tools/stack he uses, his environment/setup. "
+        "e.g. 'Trades TWSE futures via the Shioaji API', 'Works primarily in "
+        "Python on Linux', 'Background in quantitative finance'.\n"
+        "2. projects — WHAT he is actively building: current work, goals, "
+        "deadlines, constraints. Convert every relative date to an absolute one "
+        f"using the run date {today} (e.g. if he says 'ship by Friday', write the "
+        "actual YYYY-MM-DD of that Friday). "
+        "e.g. 'Shipping the Phase-2 memory rebalance by 2026-07-10', 'Building a "
+        "backtesting harness, constrained to stdlib only'.\n"
+        "3. preferences — HOW he likes to be served or work: habits, working "
+        "style, likes/dislikes. "
+        "e.g. 'Wants push notifications, not Discord', 'Prefers async/await over "
+        "sync in Python', 'Reviews diffs before every commit'.\n\n"
+        "Prefer substance over restating style: a profile or project fact is more "
+        "valuable than another phrasing of a known preference. Each observation "
+        "MUST cite the message index and carry its category.\n\n"
         "DO NOT capture transient system/tool state or operational noise — this is "
         "a person's memory, not a bug tracker. Specifically EXCLUDE: reports that "
         "the skill/script/cron/agent failed or misbehaved, error messages, status "
@@ -111,9 +207,15 @@ def build_capture_prompt(chairman_lines, existing_ids):
         "*preference* the Chairman states (e.g. 'I want push notifications, not "
         "Discord') IS valid; a one-off system glitch is NOT.\n\n"
         f"Existing memory ids (do not duplicate): {existing}\n\n"
+        f"{recent_block}"
         "Return ONLY a JSON array (no prose), each item:\n"
-        '  {"id": "kebab-slug", "body": "1-2 sentence observation", '
+        '  {"id": "kebab-slug", "category": "profile|projects|preferences", '
+        '"body": "1-2 sentence observation", '
         '"source_lines": [<int message index>, ...]}\n'
+        "If an observation is the SAME fact as one of the recently captured "
+        'memories listed above, add "reinforce": "<existing-id>" to that item '
+        '(keep "body" and "source_lines") instead of minting a new id for an '
+        "already-captured fact.\n"
         f"Return at most {MAX_OBSERVATIONS} items. If nothing durable, return [].\n\n"
         "=== Chairman messages ===\n"
         f"{convo_text}\n"
@@ -162,7 +264,20 @@ def _parse_observations(text):
         except ValueError:
             continue
         if isinstance(data, list):
-            return [o for o in data if isinstance(o, dict) and o.get("id") and o.get("body")]
+            out = []
+            for o in data:
+                if not isinstance(o, dict):
+                    continue
+                # A valid item is a NEW observation (id + body) or a REINFORCE
+                # reference to an already-captured memory. A reinforce item
+                # should still carry body/source_lines so an unknown target can
+                # fall back to the normal new-observation path (fail-safe).
+                if (o.get("id") and o.get("body")) or o.get("reinforce"):
+                    # Normalise category onto the allowed set (default preferences)
+                    # so every downstream observation carries a routable class.
+                    o["category"] = _norm_category(o.get("category"))
+                    out.append(o)
+            return out
     return []
 
 
@@ -180,30 +295,164 @@ def _slug(s):
     return s or "obs"
 
 
-def existing_memory_ids(company_dir):
-    ids = set()
+# Session id is embedded verbatim into the L0 `sources:` frontmatter line. A
+# session id carrying YAML-breaking chars (newline, `"`, `[`/`]`, `#`) could
+# forge a frontmatter field or prematurely close the block. Real Claude Code
+# session ids are UUIDs, but sanitise defensively so write_l0 can NEVER emit
+# malformed YAML regardless of caller. UUID chars pass through unchanged.
+_SAFE_SOURCE_TOKEN_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_source_token(s):
+    return _SAFE_SOURCE_TOKEN_RE.sub("-", str(s)) or "unknown-session"
+
+
+def _parse_frontmatter(text):
+    """Minimal frontmatter parse -> ({key: value}, closing-line index), or
+    (None, -1). Same shape as reinforce_memory.py::parse_frontmatter."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None, -1
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            fm = {}
+            for ln in lines[1:i]:
+                s = ln.strip()
+                if s and not s.startswith("#") and ":" in s:
+                    k, v = s.split(":", 1)
+                    fm[k.strip()] = v.strip()
+            return fm, i
+    return None, -1
+
+
+# Source items are the quoted strings in a `sources: ["[s#1]", "[s#2]"]` list —
+# same pattern as reinforce_memory.py (never reintroduce a `|[...]` bracket
+# alternative; it matches the outer bracket and corrupts the merged line).
+SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
+
+
+def _memory_id_paths(company_dir):
+    """Map {memory id: Path} across all tiers. Tolerates unreadable files.
+    Reinforce targets are resolved against these scanned ids — never by
+    building a filesystem path from model output (no traversal surface)."""
+    out = {}
     mem = Path(company_dir) / "memory"
     if not mem.exists():
-        return ids
+        return out
     for p in mem.rglob("*.md"):
-        m = re.search(r"^id:\s*(.+)$", p.read_text(encoding="utf-8"), re.MULTILINE)
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = re.search(r"^id:\s*(.+)$", text, re.MULTILINE)
         if m:
-            ids.add(m.group(1).strip())
-    return ids
+            out.setdefault(m.group(1).strip(), p)
+    return out
+
+
+def existing_memory_ids(company_dir):
+    return set(_memory_id_paths(company_dir))
+
+
+def _bump_reinforce(path, source_lines, safe_sid, today):
+    """Reinforce an existing memory in place: reinforce_count+1,
+    last_reinforced=today, new source tokens appended (deduped) — mirrors
+    reinforce_memory.py::apply_reinforcement's field updates, minus the
+    absorb/delete (CAPTURE never deletes). Returns True on success; any
+    failure returns False so the caller can fall back fail-safe."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+        lines = text.split("\n")
+        fm, close = _parse_frontmatter(text)
+        if not fm or close < 0:
+            return False
+        items = SOURCE_ITEM_RE.findall(fm.get("sources", ""))
+        for s in source_lines or []:
+            if str(s).lstrip("-").isdigit():
+                tok = f'"[{safe_sid}#{int(s)}]"'
+                if tok not in items:
+                    items.append(tok)
+        try:
+            rc = int(fm.get("reinforce_count", "1")) + 1
+        except ValueError:
+            rc = 2
+        for i in range(1, close):
+            key = lines[i].split(":", 1)[0].strip() if ":" in lines[i] else ""
+            if key == "reinforce_count":
+                lines[i] = f"reinforce_count: {rc}"
+            elif key == "last_reinforced":
+                lines[i] = f"last_reinforced: {today}"
+            elif key == "sources" and items:
+                lines[i] = "sources: [" + ", ".join(items) + "]"
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def recent_l0_digest(company_dir, now=None, window_hours=RECENT_WINDOW_HOURS,
+                     cap=RECENT_DIGEST_MAX):
+    """[(id, one-line gist)] of active L0 memories created inside the window,
+    newest first, capped. Fed to the prompt so the model reinforces an
+    already-captured fact instead of minting a fresh slug for it. Never raises."""
+    l0 = Path(company_dir) / "memory" / "L0-working"
+    if not l0.exists():
+        return []
+    cutoff = ((now or datetime.now()) - timedelta(hours=window_hours)).date()
+    entries = []
+    for p in sorted(l0.glob("*.md")):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm, close = _parse_frontmatter(text)
+        if not fm or not fm.get("id"):
+            continue
+        if fm.get("status") in ("archived", "defunct"):
+            continue
+        try:
+            created = date.fromisoformat(fm.get("created", ""))
+        except ValueError:
+            continue
+        if created < cutoff:
+            continue
+        body = " ".join("\n".join(text.split("\n")[close + 1:]).split())
+        gist = body.split(". ")[0][:RECENT_GIST_CHARS]
+        entries.append((fm.get("created", ""), fm["id"], gist))
+    entries.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [(mid, gist) for _, mid, gist in entries[:cap]]
 
 
 def write_l0(observations, session_id, company_dir, today=None):
     """
-    Write each observation as an L0 draft. Skips entries without source_lines
-    (sources cannot be empty — VERIFY iron rule). Returns list of written ids.
-    Does not overwrite an existing id (appends nothing; CAPTURE is additive).
+    Write each NEW observation as an L0 draft; apply each `reinforce` entry to
+    its existing memory (rc+1, last_reinforced=today, source appended) — a
+    reinforce NEVER writes a new file. An unknown/missing reinforce target
+    falls back to the normal new-observation path (fail-safe). Skips new
+    entries without source_lines (sources cannot be empty — VERIFY iron rule).
+    Returns (written_ids, reinforced_ids). Does not overwrite an existing id
+    (appends nothing; CAPTURE is additive).
     """
     today = today or date.today().isoformat()
     l0 = Path(company_dir) / "memory" / "L0-working"
     l0.mkdir(parents=True, exist_ok=True)
-    written = []
+    written, reinforced = [], []
+    id_paths = None  # lazy: only scanned when a reinforce entry appears
     for obs in observations[:MAX_OBSERVATIONS]:
+        safe_sid = _safe_source_token(session_id)
         srcs = obs.get("source_lines") or []
+        target = str(obs.get("reinforce") or "").strip()
+        if target:
+            if id_paths is None:
+                id_paths = _memory_id_paths(company_dir)
+            tpath = id_paths.get(target)
+            if tpath is not None and _bump_reinforce(tpath, srcs, safe_sid, today):
+                reinforced.append(target)
+                continue
+            # Unknown target (or bump failed): treat as a normal NEW
+            # observation below — but only if it actually carries one.
+            if not obs.get("id") or not obs.get("body"):
+                continue
         if not srcs:
             continue  # no provenance -> never write (Gibby would reject)
         oid = _slug(obs["id"])
@@ -211,7 +460,7 @@ def write_l0(observations, session_id, company_dir, today=None):
         if path.exists():
             continue
         sources = "[" + ", ".join(
-            f'"[{session_id}#{int(s)}]"' for s in srcs if str(s).lstrip("-").isdigit()
+            f'"[{safe_sid}#{int(s)}]"' for s in srcs if str(s).lstrip("-").isdigit()
         ) + "]"
         if sources == "[]":
             continue
@@ -219,11 +468,17 @@ def write_l0(observations, session_id, company_dir, today=None):
         if SYSTEM_NOISE_RE.search(body):
             continue  # A2: operational noise, not a Chairman memory — don't write
 
+        # Knowledge class {profile|projects|preferences}; safe default preferences
+        # if the model omitted or mis-tagged it. The promoter routes on this to
+        # L2-cold/<category>/ (see decay.py::L2_CATEGORIES).
+        category = _norm_category(obs.get("category"))
+
         path.write_text(
             "---\n"
             f"id: {oid}\n"
             "tier: L0\n"
             "owner: Tony\n"
+            f"category: {category}\n"
             f"sources: {sources}\n"
             f"created: {today}\n"
             f"last_reinforced: {today}\n"
@@ -235,7 +490,100 @@ def write_l0(observations, session_id, company_dir, today=None):
             encoding="utf-8",
         )
         written.append(oid)
-    return written
+    return written, reinforced
+
+
+# ----------------------------------------------------------------------------
+# Per-session cooldown gate (survey F3: Stop fires on every reply-stop)
+# ----------------------------------------------------------------------------
+
+def cooldown_minutes(company_dir):
+    """Effective CAPTURE_COOLDOWN_MINUTES: policy.md §7.7 overrides the
+    built-in default. Never raises — any trouble means the default (the Stop
+    hook must stay quiet and crash-proof)."""
+    defaults = {"CAPTURE_COOLDOWN_MINUTES": DEFAULT_CAPTURE_COOLDOWN_MINUTES}
+    if _resolve_config is None:
+        return DEFAULT_CAPTURE_COOLDOWN_MINUTES
+    try:
+        values, _ = _resolve_config(
+            defaults, str(Path(company_dir) / "org" / "policy.md"))
+        return int(values["CAPTURE_COOLDOWN_MINUTES"])
+    except Exception:
+        return DEFAULT_CAPTURE_COOLDOWN_MINUTES
+
+
+def _load_cooldown_map(company_dir):
+    """Read the {safe-session-id: iso-timestamp} marker map. Missing/corrupt
+    file -> {} — FAIL-OPEN: a broken marker must never suppress a capture
+    (worst case is one extra capture, vs. silently losing memories)."""
+    try:
+        raw = (Path(company_dir) / "ops" / COOLDOWN_MARKER).read_text(
+            encoding="utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def cooldown_active(company_dir, session_id, minutes=None, now=None):
+    """True iff the last capture attempt for THIS session id is younger than
+    the cooldown. Unknown session / unparsable or future timestamp -> False
+    (fail-open, incl. clock skew: a far-future timestamp must not suppress
+    captures indefinitely)."""
+    if minutes is None:
+        minutes = cooldown_minutes(company_dir)
+    if minutes <= 0:
+        return False
+    ts = _load_cooldown_map(company_dir).get(_safe_source_token(session_id))
+    if not ts:
+        return False
+    try:
+        last = datetime.fromisoformat(str(ts))
+    except (ValueError, TypeError):
+        return False  # corrupt entry -> fail-open
+    age = (now or datetime.now()) - last
+    return timedelta(0) <= age < timedelta(minutes=minutes)
+
+
+def mark_capture(company_dir, session_id, minutes=None, now=None):
+    """Record a capture ATTEMPT for this session — set BEFORE the model call,
+    because the throttle protects the model spend (a failed call still cools
+    down). Prunes entries older than max(24h, cooldown) so the map never grows
+    unbounded; corrupt entries are dropped on rewrite. Never raises."""
+    try:
+        now = now or datetime.now()
+        if minutes is None:
+            minutes = cooldown_minutes(company_dir)
+        ops = Path(company_dir) / "ops"
+        ops.mkdir(parents=True, exist_ok=True)
+        data = _load_cooldown_map(company_dir)
+        data[_safe_source_token(session_id)] = now.isoformat(timespec="seconds")
+        cutoff = now - max(timedelta(hours=24), timedelta(minutes=minutes))
+        keep = {}
+        for k, v in data.items():
+            try:
+                if datetime.fromisoformat(str(v)) >= cutoff:
+                    keep[k] = v
+            except (ValueError, TypeError):
+                continue
+        (ops / COOLDOWN_MARKER).write_text(
+            json.dumps(keep, sort_keys=True) + "\n", encoding="utf-8")
+    except Exception:
+        pass  # marker trouble must never break the hook
+
+
+def _log_throttle(company_dir, session_id, minutes):
+    """One-line skip log to ops/logs/capture.log (no silent failure — but also
+    no daily-log noise; 19 fires/session would drown it). Never raises."""
+    try:
+        logdir = Path(company_dir) / "ops" / "logs"
+        logdir.mkdir(parents=True, exist_ok=True)
+        with open(logdir / "capture.log", "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat(timespec='seconds')} "
+                    f"CAPTURE throttled session={_safe_source_token(session_id)} "
+                    f"cooldown={minutes}m\n")
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------------------
@@ -282,32 +630,52 @@ def main(argv=None):
     if not Path(company).exists():
         return 0  # company not installed here; no-op
 
+    # F3 cooldown gate — BEFORE any transcript read or model call. A throttled
+    # fire is a one-line-logged no-op with exit 0 (the Stop hook must never
+    # block a session). --dry-run bypasses enforcement (it is a diagnostic
+    # tool and makes no model call anyway) but reports the state.
+    minutes = cooldown_minutes(company)
+    throttled = cooldown_active(company, session, minutes=minutes)
+    if throttled and not args.dry_run:
+        _log_throttle(company, session, minutes)
+        return 0
+
     chairman = extract_chairman_lines(transcript)
     if not chairman:
         return 0
 
     existing = existing_memory_ids(company)
-    prompt = build_capture_prompt(chairman, existing)
+    recent = recent_l0_digest(company)
+    prompt = build_capture_prompt(chairman, existing, recent_memories=recent)
 
     if args.dry_run:
         print(json.dumps({
             "session": session, "chairman_lines": len(chairman),
-            "existing_ids": len(existing), "prompt_chars": len(prompt),
+            "existing_ids": len(existing), "recent_memories": len(recent),
+            "cooldown_minutes": minutes, "cooldown_active": throttled,
+            "prompt_chars": len(prompt),
             "would_call_model": _which("claude"),
+            "prompt": prompt,
         }, ensure_ascii=False))
         return 0
 
+    # Mark the ATTEMPT before the call: the throttle protects the model spend,
+    # so even an empty/failed extraction cools this session down.
+    mark_capture(company, session, minutes=minutes)
     observations = run_capture_model(prompt, model=args.model)
-    written = write_l0(observations, session, company)
+    written, reinforced = write_l0(observations, session, company)
 
-    if written:
+    if written or reinforced:
         log = Path(company) / "ops" / "logs" / f"daily-{date.today().isoformat()}.md"
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:
             f.write(f"\n## CAPTURE ({session})\n")
             for oid in written:
                 f.write(f"- {oid} (L0) — pending_verify\n")
-    print(json.dumps({"session": session, "written": written}, ensure_ascii=False))
+            for oid in reinforced:
+                f.write(f"- {oid} — reinforced (rc+1, no new file)\n")
+    print(json.dumps({"session": session, "written": written,
+                      "reinforced": reinforced}, ensure_ascii=False))
     return 0
 
 
