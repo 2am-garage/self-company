@@ -28,6 +28,33 @@ try:
 except Exception:  # pragma: no cover - defensive
     _resolve_config = None
 
+# Blessed charter seed set — shared single source (charter_ids.py), same
+# best-effort import pattern as the policy loader. The fallback below is a
+# VERBATIM copy kept only for crash-safety: the charter guard protects against
+# permanent data loss (unlink of the 8 axioms) and must never be disabled by a
+# missing sibling module. Authoritative copy lives in charter_ids.py.
+try:
+    from charter_ids import CHARTER_SEED_IDS, is_blessed_charter
+except Exception:  # pragma: no cover - defensive fallback
+    CHARTER_SEED_IDS = frozenset({
+        "elon-as-manager",
+        "org-hierarchy",
+        "merge-gate",
+        "repo-scoped-skill",
+        "sub-agent-isolation",
+        "verify-before-commit",
+        "four-daily-runs",
+        "minimal-permission-overhead",
+    })
+
+    def is_blessed_charter(fm):
+        if fm.get("id") not in CHARTER_SEED_IDS:
+            return False
+        if str(fm.get("provenance") or "").strip().lower() == "charter":
+            return True
+        return any(str(s).strip().strip('"\'').startswith("charter:")
+                   for s in (fm.get("sources") or []))
+
 
 # ============================================================================
 # BUILT-IN DEFAULTS (== manifest §1, tunable via --config / policy.md)
@@ -40,6 +67,16 @@ DEFAULT_L1_ARCHIVE_THRESHOLD = 0.15
 DEFAULT_L1_DEMOTE_RC = 2
 DEFAULT_L0_TO_L1_RC = 2
 DEFAULT_L1_TO_L2_RC = 4
+# Reap grace window: an archived/defunct file untouched for this many days
+# (since last_reinforced) is physically dropped in the --apply pass.
+DEFAULT_REAP_GRACE_DAYS = 7
+
+# Tier directory layout (siblings under memory_dir).
+TIER_DIRS = {"L0": "L0-working", "L1": "L1-warm", "L2": "L2-cold"}
+# L2 category subdirs; a promoted file lands in one of these under L2-cold/.
+L2_CATEGORIES = ("preferences", "profile", "projects")
+# Default L2 category when a promoted file doesn't already live under one.
+DEFAULT_L2_CATEGORY = "preferences"
 
 
 # ============================================================================
@@ -62,7 +99,9 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
     result = {
         "id": None,
         "tier": None,
+        "category": None,
         "owner": None,
+        "provenance": None,
         "sources": [],
         "created": None,
         "last_reinforced": None,
@@ -113,10 +152,29 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                     result["tier"] = val_str
                 else:
                     result["_parse_errors"].append(f"Invalid tier: {val_str}")
+            elif key == "category":
+                # CAPTURE tags each L0 memory with category ∈ L2_CATEGORIES so
+                # profile/project memories promote into the right L2-cold subdir.
+                # Unknown/missing -> None (promote falls back to path-carry/default).
+                if val_str in L2_CATEGORIES:
+                    result["category"] = val_str
+                elif val_str:
+                    result["_parse_errors"].append(f"Invalid category: {val_str}")
             elif key == "owner":
                 result["owner"] = val_str if val_str else None
+            elif key == "provenance":
+                # Charter-class marker (`provenance: charter`). Parsed AND
+                # round-tripped so rewrites (keep/promote/demote/archive) never
+                # strip the charter marker the blessed-seed guard depends on.
+                result["provenance"] = val_str if val_str else None
             elif key == "status":
-                if val_str in ("active", "archived"):
+                # `defunct` is a legacy alias for `archived` (the daily agent
+                # writes it when its sandboxed `rm` can't delete). Migrate it to
+                # `archived` on read so it enters the lifecycle instead of being
+                # silently ignored (which let those stubs accumulate forever).
+                if val_str == "defunct":
+                    result["status"] = "archived"
+                elif val_str in ("active", "archived"):
                     result["status"] = val_str
                 else:
                     result["_parse_errors"].append(f"Invalid status: {val_str}")
@@ -170,7 +228,7 @@ def serialize_frontmatter(meta: Dict[str, Any]) -> str:
             return "[" + ", ".join(str(x) for x in v) + "]"
         return str(v) if v is not None else ""
 
-    for key in ["id", "tier", "owner", "sources", "created", "last_reinforced",
+    for key in ["id", "tier", "category", "owner", "provenance", "sources", "created", "last_reinforced",
                 "reinforce_count", "decay_score", "status", "verified_date", "verified_by"]:
         if key in meta and meta[key] is not None:
             lines.append(f"{key}: {format_value(meta[key])}")
@@ -320,7 +378,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             mem["tier"] = "L0"
             if info.get("decay_score") is not None:
                 mem["decay_score"] = info["decay_score"]
-            meta = {k: mem[k] for k in ["id", "tier", "owner", "sources",
+            meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
                                          "created", "last_reinforced", "reinforce_count",
                                          "decay_score", "status", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
@@ -329,7 +387,68 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             new_path.parent.mkdir(parents=True, exist_ok=True)
             new_path.write_text(new_content)
 
-            path.unlink()
+            # Same-path guard (mirrors the promote branch): if the file is
+            # physically already in L0-working but its frontmatter said tier: L1
+            # (a dir/frontmatter mismatch that exists in live data), new_path
+            # resolves to THIS path — we just rewrote it above, so unlinking it
+            # would permanently destroy the memory. Only unlink when the file
+            # actually moves to a genuinely different path.
+            if new_path.resolve() != path.resolve():
+                path.unlink()
+            return True
+
+        elif action == "promote":
+            # Retire-on-promote: physically MOVE the file up one tier
+            # (L0-working->L1-warm->L2-cold/<category>), rewrite tier: in
+            # frontmatter, and leave NO file at the old tier (move, never copy).
+            # Deterministic + idempotent — this replaces Tony's hand-moving.
+            body = mem.get("_body", "")
+            from_tier = mem["tier"]
+            to_tier = "L1" if from_tier == "L0" else "L2"
+            mem["tier"] = to_tier
+            if info.get("decay_score") is not None:
+                mem["decay_score"] = info["decay_score"]
+            meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
+                                         "created", "last_reinforced", "reinforce_count",
+                                         "decay_score", "status", "verified_date", "verified_by"]}
+            new_content = serialize_frontmatter(meta) + '\n' + body
+
+            # Derive the memory root robustly as the ancestor directly containing
+            # the tier dir the file physically lives under. A source file normally
+            # sits one level under memory_dir (L0-working/ or L1-warm/), so
+            # parent.parent is the root — but a file already 3-deep in an L2 subdir
+            # (memory/L2-cold/<cat>/file, the carry case) would nest wrongly under
+            # a naive parent.parent. Fall back to parent.parent if no tier dir is
+            # found in the path (unchanged behaviour for the normal 2-deep layout).
+            tier_dir_names = set(TIER_DIRS.values())
+            memory_root = path.parent.parent
+            for i, part in enumerate(path.parts):
+                if part in tier_dir_names:
+                    memory_root = Path(*path.parts[:i]) if i > 0 else Path(".")
+                    break
+            if to_tier == "L2":
+                # Land in L2-cold/<category>/. Resolution order:
+                #   (a) frontmatter category: (set by CAPTURE, ∈ L2_CATEGORIES) —
+                #       so profile/project memories route to the right subdir;
+                #   (b) else the file's existing category subdir carried from
+                #       path.parts (a file already under an L2 subdir keeps it);
+                #   (c) else DEFAULT_L2_CATEGORY ("preferences").
+                fm_category = mem.get("category")
+                if fm_category in L2_CATEGORIES:
+                    category = fm_category
+                else:
+                    category = next((p for p in path.parts if p in L2_CATEGORIES),
+                                    DEFAULT_L2_CATEGORY)
+                new_path = memory_root / TIER_DIRS["L2"] / category / path.name
+            else:
+                new_path = memory_root / TIER_DIRS["L1"] / path.name
+
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            new_path.write_text(new_content)
+            # Guard idempotency: only unlink the old file if it's a different path
+            # (never delete the file we just wrote).
+            if new_path.resolve() != path.resolve():
+                path.unlink()
             return True
 
         elif action == "archive":
@@ -337,7 +456,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             body = mem.get("_body", "")
             mem["status"] = "archived"
             mem["decay_score"] = info["decay_score"]
-            meta = {k: mem[k] for k in ["id", "tier", "owner", "sources",
+            meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
                                          "created", "last_reinforced", "reinforce_count",
                                          "decay_score", "status", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
@@ -351,7 +470,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             body = mem.get("_body", "")
             if info.get("decay_score") is not None:
                 mem["decay_score"] = info["decay_score"]
-            meta = {k: mem[k] for k in ["id", "tier", "owner", "sources",
+            meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
                                          "created", "last_reinforced", "reinforce_count",
                                          "decay_score", "status", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
@@ -376,6 +495,7 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                    l1_demote_rc: int,
                    l0_to_l1_rc: int,
                    l1_to_l2_rc: int,
+                   reap_grace_days: int,
                    apply: bool) -> Dict[str, Any]:
     """
     Scan memory_dir recursively for .md files, compute decay, optionally apply actions.
@@ -391,6 +511,7 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             "archive": [],
             "demote": [],
             "upgrade_candidates": [],
+            "reaped": [],
             "keep": 0,
             "l2_keep": 0
         },
@@ -403,6 +524,14 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
 
     # Recursively find all .md files
     md_files = sorted(memory_dir.rglob("*.md"))
+
+    # D5: cap one tier-move per file (by id) per --apply run. Records every id
+    # that has been (or would be) promoted this pass so a memory can advance at
+    # most ONE tier per invocation. Without this, a memory that exists both as
+    # an L0 shadow and at L1 promotes L0->L1 (overwriting the L1) AND then the
+    # already-listed L1 advances L1->L2 in the SAME run — reaching the permanent
+    # L2 tier same-day with no review.
+    promoted_ids = set()
 
     for path in md_files:
         try:
@@ -422,6 +551,46 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             report["scanned"] += 1
             report["by_tier"][mem["tier"]] += 1
 
+            # Reap: an archived/defunct file untouched past the grace window is
+            # physically dropped here in the deterministic --apply pass (the
+            # daily agent's shell `rm` is sandbox-blocked, so these stubs would
+            # otherwise accumulate on disk forever). NEVER reap active; NEVER
+            # reap L2 (asserted — L2 is never archived per policy).
+            if mem["status"] == "archived":
+                # L2 reap-safety: L2 is a permanent tier and must NEVER be
+                # reaped. Use an EXPLICIT guard, not `assert` — `python3 -O`
+                # strips asserts, which would let an archived L2 file be
+                # physically deleted (permanent-tier data loss).
+                if mem["tier"] == "L2":
+                    report["warnings"].append(
+                        f"{path}: refusing to reap L2 (archived); L2 is permanent")
+                    continue
+                # Blessed-charter reap guard: charter axioms are permanent by
+                # definition — treat like L2 regardless of the tier field.
+                # Explicit `if`, NOT assert (python3 -O strips asserts — the
+                # Phase-1 D2 lesson — which would silently re-arm this
+                # data-loss path in optimized runs).
+                if is_blessed_charter(mem):
+                    report["warnings"].append(
+                        f"{path}: charter-guard: refusing to reap blessed "
+                        f"charter seed id={mem['id']}; charter seed found "
+                        f"below L2 — migrate it to L2-cold/profile/ "
+                        f"(scripts/migrate_charter_seeds.py)")
+                    continue
+                reap_last = parse_date(mem.get("last_reinforced"))
+                if reap_last is not None:
+                    reap_age = (now - reap_last).total_seconds() / (24 * 3600)
+                    if reap_age > reap_grace_days:
+                        if apply:
+                            path.unlink()
+                        report["actions"]["reaped"].append({
+                            "id": mem["id"],
+                            "tier": mem["tier"],
+                            "age_days": reap_age,
+                            "last_reinforced": mem.get("last_reinforced"),
+                        })
+                        continue  # reaped: skip classification/apply
+
             # Classify
             action, info = classify_record(
                 mem, now,
@@ -433,6 +602,36 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                 l1_to_l2_rc
             )
 
+            # Blessed-charter guard (Phase 4, Item 1): a charter-class memory
+            # (self-declared charter provenance AND id in the blessed seed set,
+            # via charter_ids.is_blessed_charter) is an architectural axiom —
+            # permanent by definition. It must NEVER be dropped, demoted, or
+            # archived by decay, regardless of its current tier field. Explicit
+            # `if`, NOT assert: python3 -O strips asserts (Phase-1 D2 lesson),
+            # which would silently re-arm the deletion path in optimized runs.
+            # Non-blessed memories that merely self-declare charter fall
+            # through and decay normally (anti-abuse preserved).
+            # The warning fires only while a seed still sits below L2 — it
+            # signals the one-time L2-cold/profile/ migration hasn't run yet.
+            if action in ("drop", "demote", "archive") and is_blessed_charter(mem):
+                report["warnings"].append(
+                    f"{path}: charter-guard: refusing to {action} blessed "
+                    f"charter seed id={mem['id']} (tier {mem['tier']}); "
+                    f"charter seed found below L2 — migrate it to "
+                    f"L2-cold/profile/ (scripts/migrate_charter_seeds.py)")
+                action = "keep"
+
+            # D5: enforce one tier-move per file (by id) per run. If this id was
+            # already promoted earlier this pass, downgrade the action to keep so
+            # it advances at most one tier this run (the next run advances it one
+            # more step). Deterministic; applies identically in dry-run so the
+            # report matches what --apply would do.
+            if action == "upgrade-candidate" and mem["id"] in promoted_ids:
+                report["warnings"].append(
+                    f"{path}: id={mem['id']} already promoted this run; "
+                    f"capping at one tier-move per --apply run")
+                action = "keep"
+
             # Apply if requested.
             # drop / archive / demote mutate the file (delete / move / status).
             if apply and action in ("drop", "archive", "demote"):
@@ -440,14 +639,21 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                     report["warnings"].append(f"{path}: failed to apply {action}")
                     continue
 
-            # keep / l2-keep / upgrade-candidate don't change tier or status, but
-            # we still persist the freshly-computed decay_score. upgrade-candidate
-            # reuses the 'keep' write path (decay_score update only); the actual
-            # tier move is executed later by Tony in WRITE, not here.
-            if apply and action in ("keep", "l2-keep"):
-                apply_action(path, action, mem, info)
+            # upgrade-candidate now retires-on-promote: physically MOVE the file
+            # up one tier (deterministic applier) instead of leaving an L0 shadow
+            # for Tony to hand-move. Idempotent; leaves no file at the old tier.
+            # Acceptance intent: re-running --apply advances at most one tier per
+            # file per run (the D5 cap above downgrades a same-id second promote
+            # to keep), so a memory cannot cross two tiers in a single run.
             elif apply and action == "upgrade-candidate":
-                apply_action(path, "keep", mem, info)
+                if not apply_action(path, "promote", mem, info):
+                    report["warnings"].append(f"{path}: failed to apply promote")
+                    continue
+
+            # keep / l2-keep don't change tier or status, but we still persist the
+            # freshly-computed decay_score.
+            elif apply and action in ("keep", "l2-keep"):
+                apply_action(path, action, mem, info)
 
             # Record action
             if action == "drop":
@@ -457,6 +663,10 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             elif action == "demote":
                 report["actions"]["demote"].append(info)
             elif action == "upgrade-candidate":
+                # D5: mark this id as promoted this run so a later file with the
+                # same id (e.g. an L0 shadow vs its L1 copy) is capped to keep
+                # rather than advancing a second tier in the same run.
+                promoted_ids.add(info["id"])
                 report["actions"]["upgrade_candidates"].append({
                     "id": info["id"],
                     "from": info["tier"],
@@ -525,6 +735,7 @@ def main():
         "L1_DEMOTE_RC": DEFAULT_L1_DEMOTE_RC,
         "L0_TO_L1_RC": DEFAULT_L0_TO_L1_RC,
         "L1_TO_L2_RC": DEFAULT_L1_TO_L2_RC,
+        "REAP_GRACE_DAYS": DEFAULT_REAP_GRACE_DAYS,
     }
     if _resolve_config is not None:
         values, sources = _resolve_config(defaults, args.config)
@@ -539,6 +750,7 @@ def main():
     l1_demote_rc = values["L1_DEMOTE_RC"]
     l0_to_l1_rc = values["L0_TO_L1_RC"]
     l1_to_l2_rc = values["L1_TO_L2_RC"]
+    reap_grace_days = values["REAP_GRACE_DAYS"]
 
     # P3: if a policy file was given and exists but some constant fell back to a
     # default, say so on stderr so tuning is observable instead of silent.
@@ -559,6 +771,7 @@ def main():
         l1_demote_rc,
         l0_to_l1_rc,
         l1_to_l2_rc,
+        reap_grace_days,
         apply=args.apply
     )
 

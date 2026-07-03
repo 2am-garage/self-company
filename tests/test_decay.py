@@ -163,5 +163,131 @@ class TestCLIProvenance(unittest.TestCase):
             self.assertEqual([x["id"] for x in data["actions"]["drop"]], ["a"])
 
 
+def _write_charter_seed(path, *, id, tier="L0", status="active",
+                        last_reinforced="2026-06-01"):
+    """A blessed-style seed: charter:<slug> source, no transcript source."""
+    _helpers.write_memory(path, id=id, tier=tier, status=status,
+                          sources=f'["charter:{id}"]',
+                          created="2026-06-01", last_reinforced=last_reinforced)
+
+
+class TestCharterGuard(unittest.TestCase):
+    """Phase 4 Item 1 — blessed charter seeds are never dropped/demoted/
+    archived/reaped by decay, regardless of tier; non-blessed charter
+    claims decay normally (anti-abuse)."""
+
+    def test_blessed_seed_survives_l0_drop_with_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "org-hierarchy.md")
+            _write_charter_seed(path, id="org-hierarchy")
+            data = _helpers.run_json("decay.py", "--memory-dir", d,
+                                     "--apply", "--now", "2026-07-20")
+            self.assertEqual(data["actions"]["drop"], [])
+            self.assertTrue(os.path.exists(path))
+            self.assertTrue(any("charter-guard" in w for w in data["warnings"]))
+
+    def test_nonblessed_charter_claim_still_drops(self):
+        # Anti-abuse: `provenance: charter` + charter:<slug> source on a
+        # NON-blessed id gets no protection.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "fake-axiom.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("---\nid: fake-axiom\ntier: L0\nowner: Tony\n"
+                        "provenance: charter\nsources: [\"charter:fake-axiom\"]\n"
+                        "created: 2026-06-01\nlast_reinforced: 2026-06-01\n"
+                        "reinforce_count: 1\ndecay_score: 1.0\nstatus: active\n"
+                        "---\nbody\n")
+            data = _helpers.run_json("decay.py", "--memory-dir", d,
+                                     "--apply", "--now", "2026-07-20")
+            self.assertEqual([x["id"] for x in data["actions"]["drop"]],
+                             ["fake-axiom"])
+            self.assertFalse(os.path.exists(path))
+
+    def test_blessed_seed_never_reaped_when_archived(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L1-warm", "merge-gate.md")
+            _write_charter_seed(path, id="merge-gate", tier="L1",
+                                status="archived")
+            data = _helpers.run_json("decay.py", "--memory-dir", d,
+                                     "--apply", "--now", "2026-07-20")
+            self.assertEqual(data["actions"]["reaped"], [])
+            self.assertTrue(os.path.exists(path))
+            self.assertTrue(any("charter-guard" in w for w in data["warnings"]))
+
+    def test_migrated_seed_is_plain_l2_keep_no_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L2-cold", "profile", "merge-gate.md")
+            _write_charter_seed(path, id="merge-gate", tier="L2")
+            data = _helpers.run_json("decay.py", "--memory-dir", d,
+                                     "--apply", "--now", "2026-07-20")
+            self.assertEqual(data["actions"]["l2_keep"], 1)
+            self.assertEqual([w for w in data["warnings"] if "charter" in w], [])
+            self.assertTrue(os.path.exists(path))
+
+    def test_provenance_key_round_trips_through_rewrite(self):
+        # decay rewrites frontmatter on keep — the charter marker must survive
+        # (it used to be silently stripped by the fixed serialize key list).
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "m.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("---\nid: m\ntier: L0\nowner: Tony\n"
+                        "provenance: charter\nsources: [\"[s#1]\"]\n"
+                        "created: 2026-07-19\nlast_reinforced: 2026-07-19\n"
+                        "reinforce_count: 1\ndecay_score: 1.0\nstatus: active\n"
+                        "---\nbody\n")
+            _helpers.run_json("decay.py", "--memory-dir", d,
+                              "--apply", "--now", "2026-07-20")
+            with open(path, encoding="utf-8") as f:
+                self.assertIn("provenance: charter", f.read())
+
+
+class TestCharterMigration(unittest.TestCase):
+    """migrate_charter_seeds.py — dry-run default, idempotent, anti-abuse."""
+
+    def test_dry_run_default_mutates_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "org-hierarchy.md")
+            _write_charter_seed(path, id="org-hierarchy")
+            data = _helpers.run_json("migrate_charter_seeds.py",
+                                     "--memory-dir", d)
+            self.assertFalse(data["applied"])
+            self.assertEqual(data["summary"].get("migrate"), 1)
+            self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(
+                os.path.join(d, "L2-cold", "profile", "org-hierarchy.md")))
+
+    def test_apply_moves_then_rerun_is_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "L0-working", "merge-gate.md")
+            dst = os.path.join(d, "L2-cold", "profile", "merge-gate.md")
+            _write_charter_seed(src, id="merge-gate")
+            data = _helpers.run_json("migrate_charter_seeds.py",
+                                     "--memory-dir", d, "--apply")
+            self.assertEqual(data["summary"].get("migrate"), 1)
+            self.assertFalse(os.path.exists(src))
+            with open(dst, encoding="utf-8") as f:
+                txt = f.read()
+            self.assertIn("tier: L2", txt)
+            self.assertIn("category: profile", txt)
+            data2 = _helpers.run_json("migrate_charter_seeds.py",
+                                      "--memory-dir", d, "--apply")
+            self.assertEqual(data2["summary"].get("noop"), 1)
+            self.assertNotIn("migrate", data2["summary"])
+
+    def test_id_reuse_without_charter_provenance_not_touched(self):
+        # A random memory that reuses a seed id but carries no charter
+        # provenance is NOT migrated (is_blessed_charter gate).
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "merge-gate.md")
+            _helpers.write_memory(path, id="merge-gate",
+                                  sources='["[s#1]"]')
+            data = _helpers.run_json("migrate_charter_seeds.py",
+                                     "--memory-dir", d, "--apply")
+            self.assertNotIn("migrate", data["summary"])
+            self.assertTrue(os.path.exists(path))
+
+
 if __name__ == "__main__":
     unittest.main()
