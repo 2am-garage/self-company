@@ -142,6 +142,69 @@ class TestNotify(unittest.TestCase):
                 ns.main(["--company", c, "--delta"])
             self.assertEqual(b2.getvalue().strip(), "")
 
+    def test_agent_outcome_classes_match_report(self):
+        # B3 parity lock: notify-status's standalone classifier must agree
+        # with report.py's collect() on every writer line shape (and both must
+        # ignore CAPTURE lines whose memory slug starts with "agent").
+        _rspec = importlib.util.spec_from_file_location(
+            "report_for_parity", os.path.join(_helpers.SCRIPTS_DIR, "report.py"))
+        rp = importlib.util.module_from_spec(_rspec)
+        _rspec.loader.exec_module(rp)
+        shapes = {
+            "- agent (consolidate/verify): ok [run 1/4; stdout in agent-x.log]": "ok",
+            "- agent: skipped — daily agent-run cap reached (4/4, token breaker)": "skipped",
+            "- agent: claude CLI not found — skipped (deterministic maintenance applied)": "skipped",
+            "- agent: skipped — auth pre-flight: NOT logged in (AUTH_FAIL x1) — run /login; deterministic maintenance applied": "auth-fail",
+            "- agent: TIMEOUT after 600s (rc 124) [run 1/4; streak 1] — partial output in agent-x.log; deterministic maintenance still applied": "timeout",
+            "- agent: failed (rc 7) [run 1/4; streak 1] — deterministic maintenance still applied": "failed",
+            "- agent-model-optimization-iterative-cycle (L0) — pending_verify": None,
+        }
+        for ln, expected in shapes.items():
+            self.assertEqual(ns._classify_agent_line(ln), expected, ln)
+            # report.py parity: run the line through a one-block fixture
+            with tempfile.TemporaryDirectory() as d:
+                logs = os.path.join(d, "ops", "logs")
+                os.makedirs(logs)
+                with open(os.path.join(logs, "daily-2026-06-28.md"), "w") as f:
+                    f.write("## Daily run 2026-06-28T06:07:01\n" + ln + "\n")
+                rows = rp.collect(d)
+                self.assertEqual(rows[0]["agent"], expected, ln)
+        # breadcrumb + silent death: prompt with no outcome -> failed, both sides
+        self.assertEqual(ns._classify_agent_line("- agent prompt: generic"), "prompt")
+        with tempfile.TemporaryDirectory() as d:
+            logs = os.path.join(d, "ops", "logs")
+            os.makedirs(logs)
+            with open(os.path.join(logs, "daily-2026-06-28.md"), "w") as f:
+                f.write("## Daily run 2026-06-28T06:07:01\n- agent prompt: generic\n")
+            self.assertEqual(rp.collect(d)[0]["agent"], "failed")
+            self.assertEqual(ns.collect_runs(d, None)[0]["agent"], "failed")
+
+    def test_summary_surfaces_fail_count(self):
+        # B3: failed/timeout/auth-fail runs are never summarized as benign —
+        # the catch-up line carries an explicit agent-fail count.
+        log = (
+            "## Daily run 2026-06-26T06:07:01\n"
+            "- decay --apply: scanned 10 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+            "- entropy 0.1 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.1) over 10 memories\n"
+            "- agent: failed (rc 7) [run 1/4; streak 1] — deterministic maintenance still applied\n"
+            "\n## Daily run 2026-06-26T12:07:01\n"
+            "- decay --apply: scanned 10 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+            "- entropy 0.1 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.1) over 10 memories\n"
+            "- agent: TIMEOUT after 600s (rc 124) [run 2/4; streak 2] — partial output in agent-x.log; deterministic maintenance still applied\n"
+            "\n## Daily run 2026-06-26T18:07:01\n"
+            "- decay --apply: scanned 10 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+            "- entropy 0.1 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.1) over 10 memories\n"
+            "- agent (consolidate/verify): ok [run 3/4; stdout in agent-x.log]\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, log)
+            runs = ns.collect_runs(c, None)
+            self.assertEqual([b["agent"] for b in runs],
+                             ["failed", "timeout", "ok"])
+            s = ns.summarize(runs)
+            self.assertIn("agent ok 1/3", s)
+            self.assertIn("2 agent-fail", s)
+
     def test_emit_hook_silent_when_no_runs(self):
         with tempfile.TemporaryDirectory() as d:
             logs = os.path.join(d, ".company", "ops", "logs")

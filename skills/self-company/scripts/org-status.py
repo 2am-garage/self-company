@@ -11,7 +11,7 @@ deterministic view from real logs:
   * each employee's own log.md            -> anything they recorded
   * live `claude -p` processes            -> who is running RIGHT NOW
 
-It does not pretend seven daemons are bustling. Interactive chat is Elon-fronted;
+It does not pretend eight daemons are bustling. Interactive chat is Elon-fronted;
 the genuinely-separate work is the cron/dispatch/trigger agents. This shows that
 split. Read-only, pure stdlib.
 
@@ -36,6 +36,7 @@ EMPLOYEES = [
     ("bob",    "Bob",    "Engineer · builds",    []),   # from dispatch mentions
     ("july",   "July",   "People · personas",    []),
     ("tom",    "Tom",    "Infra · scheduling",   [r"ledger: refreshed", r"agent \(consolidate"]),
+    ("mike",   "Mike",   "R&D · research",       []),   # from dispatch / own log
 ]
 
 

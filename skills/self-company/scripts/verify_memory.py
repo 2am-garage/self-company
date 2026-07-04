@@ -168,7 +168,7 @@ def verify_dir(memory_dir, transcripts_dir, today, apply):
         fm, body = parse_frontmatter(text)
         if not fm or not fm.get("id"):
             continue
-        if fm.get("status") == "archived":
+        if fm.get("status") in ("archived", "defunct"):  # tombstones (defunct = legacy alias)
             continue
         report["scanned"] += 1
         if fm.get("verified_date"):

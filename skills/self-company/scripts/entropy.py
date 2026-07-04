@@ -41,6 +41,21 @@ except Exception:  # pragma: no cover - defensive
 # model (rag_embed / bge-small-en-v1.5, 384-dim). When it is absent we fall back
 # to Jaccard-only — never a hard fail, never a network call. Set SC_NO_RAG=1 to
 # force Jaccard-only (used by tests to exercise the fallback path).
+def _memory_dir_from_argv(argv):
+    """Peek --memory-dir out of argv without argparse (the re-exec runs first).
+
+    Handles both `--memory-dir PATH` and `--memory-dir=PATH`. Falls back to the
+    argparse default (.company/memory) when the flag is absent, so the derived
+    venv path degenerates to the old cwd-based fallback in that case.
+    """
+    for i, arg in enumerate(argv):
+        if arg == "--memory-dir" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--memory-dir="):
+            return arg.split("=", 1)[1]
+    return ".company/memory"
+
+
 def _reexec_into_rag_venv():
     if os.environ.get("SC_NO_RAG") or os.environ.get("SC_RAG_REEXEC"):
         return
@@ -51,8 +66,14 @@ def _reexec_into_rag_venv():
     except Exception:
         pass
     here = Path(__file__).resolve().parent
+    # C2 (Phase 5): resolve the project venv from --memory-dir, whose parent is
+    # that project's .company — NOT from whatever cwd happens to hold. An
+    # off-cwd invocation with a foreign .company under cwd must never exec the
+    # wrong project's interpreter. With no --memory-dir the default resolves
+    # against cwd, preserving the previous cwd fallback behavior.
+    mem_company = Path(_memory_dir_from_argv(sys.argv)).resolve().parent
     for cand in (here.parent / ".rag-venv" / "bin" / "python",
-                 Path.cwd() / ".company" / ".rag-venv" / "bin" / "python"):
+                 mem_company / ".rag-venv" / "bin" / "python"):
         if cand.exists():
             os.environ["SC_RAG_REEXEC"] = "1"
             os.execv(str(cand), [str(cand)] + sys.argv)

@@ -126,6 +126,81 @@ class TestWriteL0(unittest.TestCase):
             self.assertIn("pref", written)
             self.assertNotIn("bug", written)
 
+    def test_meta_pollution_is_quarantined_real_preference_captures(self):
+        # B4 (Phase 5 Item 4, N5) acceptance: a "phase merged, entropy
+        # dropped"-style transcript yields ZERO written observations, while a
+        # real preference from the same transcript still captures.
+        with tempfile.TemporaryDirectory() as d:
+            self._company(d)
+            obs = [
+                {"id": "phase-merge", "body": "Phase 4 merged and entropy "
+                 "dropped to 0.05 after consolidation.", "source_lines": [1]},
+                {"id": "survey-state", "body": "The survey found 21 upgrade "
+                 "candidates in the backlog.", "source_lines": [2]},
+                {"id": "improvement-phase", "body": "He is working on the "
+                 "self-company skill improvement survey phase.",
+                 "source_lines": [3]},
+                {"id": "pref", "body": "Chairman prefers dark terminal themes "
+                 "for late-night garage work.", "source_lines": [4]},
+            ]
+            written, _ = ct.write_l0(obs, "s", d)
+            self.assertEqual(written, ["pref"])
+
+    def test_meta_noise_regex_spares_durable_facts(self):
+        # The filter must stay NARROW: durable Chairman facts that merely
+        # brush company-adjacent vocabulary must not match.
+        for body in (
+            "Chairman wants push notifications, not Discord.",
+            "Trades TWSE futures via the Shioaji API.",
+            "Reviews diffs before every commit.",
+            "Prefers entropy-based sampling in his ML experiments.",
+        ):
+            self.assertIsNone(ct.META_NOISE_RE.search(body), body)
+        for body in (
+            "Phase 4 merged and entropy dropped.",
+            "PR #28 was merged at 19:51.",
+            "The decay run produced 21 upgrade candidates.",
+        ):
+            self.assertIsNotNone(ct.META_NOISE_RE.search(body), body)
+
+    def test_meta_noise_entropy_ml_chairman_facts_survive(self):
+        # Gibby (Phase 5 red-team): the Chairman genuinely works on entropy/ML/
+        # trading/repos — bare information-theory nouns and numberless workflow
+        # preferences must NOT be eaten (these five were false positives before
+        # the tightening).
+        for body in (
+            "Estimates the entropy rate of TWSE order flow for his trading models.",
+            "Uses a maximum-entropy score function in his classifier research.",
+            "Background in information theory; wrote his thesis on entropy rates of Markov chains.",
+            "Studies how entropy went from thermodynamics into information theory.",
+            "Wants PRs merged via squash, never rebase.",
+            "His CI requires all PRs are merged with green tests.",
+            "Prefers small PRs that are merged quickly.",
+            "Uses cross-entropy loss for his neural nets.",
+            "Applies weight decay schedules of 0.01 in training runs.",
+        ):
+            self.assertIsNone(ct.META_NOISE_RE.search(body), body)
+            self.assertIsNone(ct.SYSTEM_NOISE_RE.search(body), body)
+        # …while genuine company work-state phrasings still filter:
+        for body in (
+            "Entropy dropped to 0.03 after the consolidation pass.",
+            "The entropy score dropped from 0.05 to 0.02 today.",
+            "Entropy went to 0.0152 after the fix.",
+            "The entropy rate is 0.03 now.",
+            "PR #28 was merged at 19:51.",
+            "Merged PR #29 for the self-sustaining loop.",
+            "Sprint 3 was completed and PR #30 landed.",
+            "The survey identified 21 upgrade candidates.",
+            "Moved six records from L0-working to L1-warm.",
+        ):
+            self.assertIsNotNone(ct.META_NOISE_RE.search(body), body)
+
+    def test_prompt_excludes_company_work_state(self):
+        prompt = ct.build_capture_prompt([(0, "hello")], set())
+        self.assertIn("ALSO EXCLUDE this company's OWN work-state", prompt)
+        self.assertIn("phase 4 merged", prompt)
+        self.assertIn("NOT a Chairman fact", prompt)
+
     def test_respects_max_observations(self):
         with tempfile.TemporaryDirectory() as d:
             self._company(d)
@@ -352,6 +427,10 @@ class TestReinforcePath(unittest.TestCase):
             self.assertIn('sources: ["[old#1]"]', txt)  # unchanged
 
     def test_duplicate_source_token_not_appended_twice(self):
+        # Phase 5 Item 1 (N1): this test previously asserted rc=3 ("both bumps
+        # counted") — that WAS the bug: same-session restatements inflated the
+        # cross-session recurrence signal. Now the second same-session bump
+        # merges sources but does NOT increment rc.
         with tempfile.TemporaryDirectory() as d:
             c = self._company(d)
             ct.write_l0([{"reinforce": "canonical-fact", "source_lines": [7]}],
@@ -361,7 +440,35 @@ class TestReinforcePath(unittest.TestCase):
             with open(os.path.join(c, "memory", "L0-working", "canonical-fact.md")) as f:
                 txt = f.read()
             self.assertEqual(txt.count('"[sess-1#7]"'), 1)
-            self.assertIn("reinforce_count: 3", txt)  # both bumps counted
+            self.assertIn("reinforce_count: 2", txt)  # rc bumps once per session
+
+    def test_same_session_restatement_bumps_rc_once(self):
+        # Phase 5 Item 1 acceptance: same-session double-restatement -> rc +1
+        # TOTAL (the new source token merges; rc does not double-count).
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            ct.write_l0([{"reinforce": "canonical-fact", "source_lines": [7]}],
+                        "sess-1", c, today="2026-07-03")
+            ct.write_l0([{"reinforce": "canonical-fact", "source_lines": [9]}],
+                        "sess-1", c, today="2026-07-03")
+            with open(os.path.join(c, "memory", "L0-working", "canonical-fact.md")) as f:
+                txt = f.read()
+            self.assertIn("reinforce_count: 2", txt)               # +1 total
+            self.assertIn('"[sess-1#7]"', txt)                     # both tokens
+            self.assertIn('"[sess-1#9]"', txt)                     # merged
+            self.assertIn("last_reinforced: 2026-07-03", txt)      # still updated
+
+    def test_cross_session_reobservation_bumps_each(self):
+        # Phase 5 Item 1 acceptance: cross-session re-observation -> +1 each.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            ct.write_l0([{"reinforce": "canonical-fact", "source_lines": [7]}],
+                        "sess-1", c, today="2026-07-03")
+            ct.write_l0([{"reinforce": "canonical-fact", "source_lines": [3]}],
+                        "sess-2", c, today="2026-07-04")
+            with open(os.path.join(c, "memory", "L0-working", "canonical-fact.md")) as f:
+                txt = f.read()
+            self.assertIn("reinforce_count: 3", txt)  # 1 + sess-1 + sess-2
 
     def test_unknown_target_falls_back_to_new_observation(self):
         with tempfile.TemporaryDirectory() as d:

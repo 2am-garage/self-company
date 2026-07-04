@@ -66,7 +66,9 @@ to spec on their own but touched files the big items already owned.
 
 Elon sets direction (*is this worth doing, what's the priority, what's out of scope*);
 Phoebe turns it into a written spec before any worker is dispatched. No spec, no dispatch —
-this is the gate.
+this is the gate. When the spec needs external grounding — literature, comparable systems,
+what others tried and measured — Phoebe dispatches **Mike (R&D)** first for a cited
+evidence pack; his findings feed the spec's *Live evidence*, not the later stages.
 
 Each work item is written in one fixed shape (start from
 **[../assets/spec-template.md](../assets/spec-template.md)**):

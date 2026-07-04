@@ -11,7 +11,7 @@
 
 ## How employees use tools
 
-Per `references/execution-model.md`, the four workers run as **isolated
+Per `references/execution-model.md`, the five workers run as **isolated
 sub-agents**. When Phoebe dispatches a task, the worker is granted ONLY the tools
 its role needs (least privilege) — its built-in tools (Read/Edit/Bash/…) **plus**
 any MCP tools or skills listed for it below. A worker does not get the whole tool

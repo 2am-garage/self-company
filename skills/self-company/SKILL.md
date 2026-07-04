@@ -3,7 +3,7 @@ name: self-company
 description: |
   Multi-agent personal company that learns the Chairman (Uwe)'s habits, preferences, and background across sessions, and continuously fights entropy through structured tiered memory, a verification loop, and decay. On install it creates a git-ignored, project-scoped .company/ skeleton in the current repo (private, not shared across projects).
   TRIGGER — use this skill proactively for the situations below EVEN WHEN the user never says "self-company" or names a persona:
-  - The user addresses or asks about our internal company personas — Elon (our CEO), Phoebe, July, Bob, Gibby, Tony, or Tom — by name or by role (CEO/PM/HR/RD/QA/Improvement/IT).
+  - The user addresses or asks about our internal company personas — Elon (our CEO), Phoebe, July, Bob, Gibby, Tony, Tom, or Mike — by name or by role (CEO/PM/HR/Build/QA/Improvement/IT/R&D).
   - The user wants an agent to REMEMBER their habits, preferences, decisions, or project context across sessions / long-term, or to set up a personal agent org/assistant that captures what they care about and fights knowledge, context, or memory rot over time.
   - The user asks for memory maintenance on this agent's own long-term memory: consolidate or dedupe memories, decay/prune stale or contradictory records, verify memories against sources, capture/organize/reinforce, or compute a memory-entropy score/report.
   - The user wants a company/org status readout: health or entropy report, which employees did what work, upgrades or improvements Tony proposes, Chairman habit records, or memory tiers.
@@ -38,23 +38,23 @@ in the current repo — project-scoped and not shared across projects.
                     │ Phoebe · PM │  execution gateway — all work through her, dispatch, track progress
                     └──────┬──────┘
                     ┌──────▼──────┐
-                    │  July · HR  │  team lead (half a tier above the four workers) — tune / performance
+                    │  July · HR  │  team lead (half a tier above the five workers) — tune / performance
                     └──────┬──────┘
-        ┌──────────┬───────┼───────────┬──────────┐
-  ┌─────▼────┐ ┌───▼─────┐ ┌──▼───────┐ ┌─────────▼┐
-  │ Bob · RD │⚔│Gibby·QA │ │Tony·Improv│ │ Tom · IT │
-  │  build   │/│attack/test│ │diagnose/propose│execute/infra│
-  └──────────┘ │ │ └────┬──────┘ └────▲─────┘
-  Blue ┌──────┘ Red │proposal        │execute
-                    Elon adjudicate ◄────┘           │
-                         └──► Phoebe plan dispatch ────┘
+        ┌───────────┬──────┴─────┬─────────────┬─────────────┐
+  ┌─────▼─────┐ ┌───▼─────┐ ┌───▼───────┐ ┌───▼──────┐ ┌────▼─────┐
+  │ Bob·Build │⚔│Gibby·QA │ │Tony·Improv│ │ Tom · IT │ │ Mike·R&D │
+  │   build   │/│attack/test│ │diagnose/propose│execute/infra│ │survey outside│
+  └───────────┘ │ │  └────┬──────┘ └────▲─────┘ └──────────┘
+  Blue ┌───────┘ Red │proposal        │execute
+                     Elon adjudicate ◄────┘           │
+                          └──► Phoebe plan dispatch ────┘
 ```
 
-**Chain**: Chairman → Elon (CEO) → Phoebe (PM, execution gateway) → July (HR team lead) → {Bob (RD), Gibby (QA), Tony (Improvement), Tom (IT)}
+**Chain**: Chairman → Elon (CEO) → Phoebe (PM, execution gateway) → July (HR team lead) → {Bob (Build), Gibby (QA), Tony (Improvement), Tom (IT), Mike (R&D)}
 
 **Key roles**:
 - **Phoebe = execution gateway** — any actual hands-on work goes through her dispatch planning first to ensure no missing steps, no lost dependencies.
-- **July = worker team lead** — daily tuning of the four workers' personas/performance, half a tier above them; doesn't touch manager tier.
+- **July = worker team lead** — daily tuning of the five workers' personas/performance, half a tier above them; doesn't touch manager tier.
 
 ---
 
@@ -64,11 +64,12 @@ in the current repo — project-scoped and not shared across projects.
 |---|---|---|
 | **Elon** | CEO | Set direction, upgrade adjudication, lead manual deep cleanups |
 | **Phoebe** | PM | Execution gateway: convert intent → spec/plan, dispatch tasks, track progress, fill gaps, set dependencies |
-| **July** | HR | Tune four workers' personas/prompts/performance, half a tier above them |
-| **Bob** | RD Engineer | Produce code/files per Phoebe's spec |
+| **July** | HR | Tune five workers' personas/prompts/performance, half a tier above them |
+| **Bob** | Build Engineer | Produce code/files per Phoebe's spec |
 | **Gibby** | QA Engineer | Attack Bob's output by every means, loop until clean |
 | **Tony** | Improvement Engineer | Think: measure entropy, evaluate health, write upgrade proposals for Elon |
 | **Tom** | IT/Ops Engineer | Act: skeleton, scheduling, token breaker, execute upgrades |
+| **Mike** | R&D Researcher | External literature/ecosystem research, evidence packs for specs (Tony measures inside, Mike surveys outside) |
 
 ---
 
@@ -112,8 +113,8 @@ Details:
 
 The company runs in two tiers. **Orchestration** — Elon, Phoebe, July — work in
 the main context, holding the broad picture (skill, design, policy, plans) to set
-direction, dispatch, and tune people. **Execution** — the four workers (Bob, Gibby,
-Tony, Tom) — run as **isolated sub-agents**, each seeing only its own `persona.md`,
+direction, dispatch, and tune people. **Execution** — the five workers (Bob, Gibby,
+Tony, Tom, Mike) — run as **isolated sub-agents**, each seeing only its own `persona.md`,
 its `context.md` `reads` slice, and Phoebe's brief — never `SKILL.md`, the design,
 or another desk. This keeps attention focused, holds entropy out of the main
 thread, and lets independent workers run in parallel (serial handoff for chains
@@ -240,7 +241,7 @@ For company design details, see:
 
 - **[Design Document](design/self-company-design.md)** — authoritative architecture
   - §0 design philosophy: Markdown truth, verify loop, entropy KPI, decay, token budget
-  - §1 org structure: seven agents, responsibilities, toolkit, context slicing
+  - §1 org structure: eight agents, responsibilities, toolkit, context slicing
   - §3 core flows: build pipeline A + memory pipeline B
   - §4 memory tiers + decay: L0/L1/L2, consolidation, decay logic
   - §5 entropy management: three dimensions (text/context/code)

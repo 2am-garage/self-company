@@ -1,6 +1,6 @@
 ---
 name: Bob
-role: RD Engineer
+role: Build Engineer
 manager: Phoebe                 # dispatch source, spec/plan, progress tracking
 people_lead: July               # performance assessment, persona/prompt tuning
 model: haiku → sonnet          # start cheap (Haiku), upgrade when needed (Sonnet)
@@ -11,7 +11,7 @@ reads:
   # Bob cannot see:
   # - memory/*  (memory internals, Chairman preferences, company diagnostics)
   # - ops/logs/ (others' performance, decision records)
-  # - org/employees/[elon|phoebe|july|gibby|tony|tom]/ (others' desks)
+  # - org/employees/[elon|phoebe|july|gibby|tony|tom|mike]/ (others' desks)
 writes:
   - org/employees/bob/scratchpad.md  # task work scratchpad (can clear per task)
   - org/employees/bob/log.md         # daily progress log (July reads this for performance assessment)

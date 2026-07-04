@@ -95,6 +95,33 @@ def escalation_line(company):
             f"has not completed; check ops/logs/agent-*.log (and /login).")
 
 
+def _classify_agent_line(ln):
+    """B3: classify one daily-log agent line into report.py's outcome classes.
+
+    MUST stay in lockstep with report.py::collect (a parity test in
+    tests/test_notify.py locks the two against drift; the copy exists so this
+    script stays standalone-stdlib even if report.py is absent). Returns one of
+    "prompt" (breadcrumb, not an outcome), "auth-fail", "timeout", "ok",
+    "skipped" (benign: cap reached / no CLI), "failed", or None when the line
+    is not an agent WRITER line at all — a CAPTURE entry for a memory slug
+    starting with "agent" ("- agent-model-… (L0) — pending_verify") is data,
+    never an outcome.
+    """
+    if not ln.startswith(("- agent:", "- agent (", "- agent prompt")):
+        return None
+    if ln.startswith("- agent prompt"):
+        return "prompt"
+    if "AUTH_FAIL" in ln or "auth pre-flight" in ln:
+        return "auth-fail"
+    if "TIMEOUT" in ln:
+        return "timeout"
+    if " ok" in ln:
+        return "ok"
+    if "skip" in ln:
+        return "skipped"
+    return "failed"
+
+
 def collect_runs(company, since):
     """Return real (non-dry-run) daily-run blocks newer than `since`, parsed."""
     logs = sorted((Path(company) / "ops" / "logs").glob("daily-*.md"))
@@ -127,9 +154,19 @@ def collect_runs(company, since):
                 if em:
                     block["entropy"] = float(em.group(1))
                     block["memories"] = int(em.group(2))
-                if ln.startswith("- agent"):
-                    block["agent"] = "ok" if " ok" in ln else "skipped"
+                # B3 (Item 3): honest outcome classes, aligned with report.py —
+                # the old `" ok" in ln` substring test rendered failed/timeout/
+                # AUTH_FAIL runs as benign "skipped" in the catch-up summary.
+                cls = _classify_agent_line(ln)
+                if cls == "prompt":
+                    block["_agent_attempted"] = True
+                elif cls is not None:
+                    block["agent"] = cls
                 i += 1
+            # prompt built but NO outcome line: the run died before recording
+            # one (silent death) — honest classification: failed.
+            if block.pop("_agent_attempted", False) and block["agent"] is None:
+                block["agent"] = "failed"
             if since is None or ts > since:
                 runs.append(block)
     runs.sort(key=lambda b: b["ts"])
@@ -145,9 +182,14 @@ def summarize(runs):
     mem = last["memories"] if last["memories"] is not None else "?"
     ent = last["entropy"] if last["entropy"] is not None else "?"
     agents = sum(1 for b in runs if b["agent"] == "ok")
+    fails = sum(1 for b in runs if b["agent"] in ("failed", "timeout", "auth-fail"))
     span = f"since {runs[0]['ts']:%b %d %H:%M}"
-    return (f"self-company: {n} daily run{'s' if n > 1 else ''} {span} — "
-            f"memory {mem}, entropy {ent}, {dropped} decayed, agent ok {agents}/{n}")
+    s = (f"self-company: {n} daily run{'s' if n > 1 else ''} {span} — "
+         f"memory {mem}, entropy {ent}, {dropped} decayed, agent ok {agents}/{n}")
+    if fails:
+        # B3: failures are never summarized away as benign skips.
+        s += f", {fails} agent-fail"
+    return s
 
 
 def write_marker(company):

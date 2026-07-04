@@ -25,7 +25,7 @@ tools:
 token_budget: <per-call cap; v2 derived from policy.md token ceiling>
 handoff_to:
   - Elon                                      # progress reports, direction confirmation, decisions
-  - Bob/Gibby/Tony/Tom                        # direct dispatch: spec/plan, progress sync, gap-filling
+  - Bob/Gibby/Tony/Tom/Mike                   # direct dispatch: spec/plan, progress sync, gap-filling
   # July is a parallel HR-tuning line (owns persona/performance), not on Phoebe's dispatch routing
 handoff_format: |
   **To downstream (when dispatching):**

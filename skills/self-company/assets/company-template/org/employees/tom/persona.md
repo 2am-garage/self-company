@@ -2,7 +2,7 @@
 
 ## Role & Positioning
 **Title** — IT / Ops Engineer  
-**Tier** — worker (at the same level as the four workers, reports to July)  
+**Tier** — worker (one of the five workers, reports to July)  
 **One-liner** — Hands-on infra guardian: company skeleton, schedules, token breaker, backups, file integrity, and execute approved upgrades.
 
 ---

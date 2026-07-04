@@ -301,5 +301,101 @@ class TestNoRagReasonString(unittest.TestCase):
                 self.assertNotIn("SC_NO_RAG", meta["reason"])
 
 
+class TestVenvReexecResolution(unittest.TestCase):
+    """C2 — the RAG venv re-exec resolves against --memory-dir's project root
+    (memory-dir's parent is that project's .company), never against a foreign
+    .company that happens to sit under cwd."""
+
+    SCRIPT = os.path.join(_helpers.SCRIPTS_DIR, "entropy.py")
+
+    def setUp(self):
+        # The skill-local venv (scripts/../.rag-venv) is checked first by
+        # design; if it exists on this machine the project-root fallback is
+        # never consulted and this scenario is untestable here.
+        skill_venv = os.path.join(os.path.dirname(_helpers.SCRIPTS_DIR),
+                                  ".rag-venv", "bin", "python")
+        if os.path.exists(skill_venv):
+            self.skipTest("skill-local .rag-venv present; fallback not reached")
+        # The re-exec only fires when the base interpreter lacks the backend.
+        import importlib.util
+        if importlib.util.find_spec("fastembed") is not None:
+            self.skipTest("base interpreter has fastembed; no re-exec occurs")
+
+    def _fake_project(self, root, marker):
+        """Create <root>/.company/{.rag-venv/bin/python, memory/} with a fake
+        interpreter that prints a marker instead of running anything."""
+        bindir = os.path.join(root, ".company", ".rag-venv", "bin")
+        os.makedirs(bindir)
+        py = os.path.join(bindir, "python")
+        with open(py, "w", encoding="utf-8") as f:
+            f.write(f"#!/bin/sh\necho EXEC:{marker}\nexit 0\n")
+        os.chmod(py, 0o755)
+        memdir = os.path.join(root, ".company", "memory")
+        os.makedirs(memdir)
+        return memdir
+
+    def _run_from(self, cwd, *args):
+        import subprocess
+        import sys as _sys
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SC_NO_RAG", "SC_RAG_REEXEC")}
+        proc = subprocess.run([_sys.executable, self.SCRIPT, *args],
+                              capture_output=True, text=True, cwd=cwd, env=env)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def test_memory_dir_project_beats_foreign_cwd(self):
+        # cwd holds a DECOY .company/.rag-venv; --memory-dir points at REAL.
+        # The re-exec must pick REAL's interpreter, not the decoy's.
+        with tempfile.TemporaryDirectory() as decoy, \
+                tempfile.TemporaryDirectory() as real:
+            self._fake_project(decoy, "DECOY")
+            real_mem = self._fake_project(real, "REAL")
+            rc, out, err = self._run_from(decoy, "--memory-dir", real_mem)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("EXEC:REAL", out)
+            self.assertNotIn("DECOY", out)
+
+    def test_memory_dir_equals_form(self):
+        # --memory-dir=PATH must resolve identically to the two-token form.
+        with tempfile.TemporaryDirectory() as decoy, \
+                tempfile.TemporaryDirectory() as real:
+            self._fake_project(decoy, "DECOY")
+            real_mem = self._fake_project(real, "REAL")
+            rc, out, err = self._run_from(decoy, f"--memory-dir={real_mem}")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("EXEC:REAL", out)
+            self.assertNotIn("DECOY", out)
+
+    def test_default_still_resolves_cwd(self):
+        # No --memory-dir: the default (.company/memory) resolves against cwd,
+        # preserving the pre-C2 fallback for in-project invocations.
+        with tempfile.TemporaryDirectory() as proj:
+            self._fake_project(proj, "CWDPROJ")
+            rc, out, err = self._run_from(proj)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("EXEC:CWDPROJ", out)
+
+    def test_sc_no_rag_never_reexecs(self):
+        # SC_NO_RAG=1 must run the real entropy (jaccard-only), not the fake
+        # interpreter — clean degradation is untouched by C2.
+        import json
+        import subprocess
+        import sys as _sys
+        with tempfile.TemporaryDirectory() as proj:
+            memdir = self._fake_project(proj, "MUST-NOT-RUN")
+            _helpers.write_memory(os.path.join(memdir, "L0-working", "m.md"),
+                                  id="pref-x-1", body="Chairman prefers pytest.")
+            env = {**os.environ, "SC_NO_RAG": "1"}
+            env.pop("SC_RAG_REEXEC", None)
+            proc = subprocess.run(
+                [_sys.executable, self.SCRIPT, "--memory-dir", memdir,
+                 "--now", "2026-06-25", "--config", "/nonexistent.md"],
+                capture_output=True, text=True, cwd=proj, env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("MUST-NOT-RUN", proc.stdout)
+            data = json.loads(proc.stdout)
+            self.assertEqual(data["total_memories"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

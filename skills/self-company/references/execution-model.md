@@ -16,10 +16,10 @@ talk* to them; this says *how a worker is actually run*.
 | Tier | Members | Context | Runs as |
 |---|---|---|---|
 | **Orchestration** | Elon (CEO), Phoebe (PM), July (HR lead) | Broad: reads `SKILL.md`, `design/`, `references/`, `org/policy.md`, summaries, plans, and (July) worker desks | Main thread / main context |
-| **Execution** | Bob (RD), Gibby (QA), Tony (Improvement), Tom (IT/Ops) | Narrow: **only** its own `persona.md`, the `reads` slice in its own `context.md`, and the task brief Phoebe hands it | **Isolated sub-agent** (one per task) |
+| **Execution** | Bob (Build), Gibby (QA), Tony (Improvement), Tom (IT/Ops), Mike (R&D) | Narrow: **only** its own `persona.md`, the `reads` slice in its own `context.md`, and the task brief Phoebe hands it | **Isolated sub-agent** (one per task) |
 
 **Why July is orchestration, not a worker sub-agent:** July's job *is* to read the
-four workers' desks and logs to tune them. She needs cross-worker visibility, so
+five workers' desks and logs to tune them. She needs cross-worker visibility, so
 she sits on the orchestration side even though she is "half a tier above" the
 workers and not a manager. She still does not read code, memory internals, or
 infra — her least-privilege scope is unchanged.

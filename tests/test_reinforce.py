@@ -98,6 +98,37 @@ class TestApplyMergesSources(unittest.TestCase):
             self.assertIn("reinforce_count: 2", t)
             self.assertIn("last_reinforced: 2026-06-30", t)
 
+    def test_same_session_absorption_does_not_bump_rc(self):
+        # Phase 5 Item 1 (N1): if the absorbed memory's sources are all from
+        # sessions the canonical already has, the merge must NOT inflate rc
+        # (rc bumps at most once per distinct session id). Sources still merge
+        # and the absorbed duplicate is still removed.
+        with tempfile.TemporaryDirectory() as d:
+            import os
+            cp = os.path.join(d, "c.md")
+            ap = os.path.join(d, "a.md")
+            _write(cp, "c", '["[A#1]"]')
+            _write(ap, "a", '["[A#7]"]')     # same session A, different line
+            with open(cp) as f:
+                canon = {"id": "c", "path": cp, "text": f.read()}
+            with open(ap) as f:
+                absorbed = {"id": "a", "path": ap, "text": f.read()}
+            rm.apply_reinforcement(canon, absorbed, "2026-06-30")
+            self.assertFalse(os.path.exists(ap))           # still consolidated
+            with open(cp) as f:
+                t = f.read()
+            self.assertIn('"[A#1]"', t)
+            self.assertIn('"[A#7]"', t)                    # sources merged
+            self.assertIn("reinforce_count: 1", t)         # rc NOT double-counted
+            self.assertIn("last_reinforced: 2026-06-30", t)
+
+    def test_session_ids_helper(self):
+        self.assertEqual(rm._session_ids(['"[A#1]"', '"[A#9]"', '"[B#2]"']),
+                         {"A", "B"})
+        # non-bracket tokens count as one distinct id each (whole token)
+        self.assertEqual(rm._session_ids(['"charter:merge-gate"']),
+                         {"charter:merge-gate"})
+
 
 if __name__ == "__main__":
     unittest.main()

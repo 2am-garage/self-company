@@ -22,11 +22,12 @@
 | **Chairman (Uwe)** | Chairman | owner | Final decisions, taste, manual triggers | — |
 | **Elon** | CEO | manager | Set direction, upgrade adjudication, lead manual deep cleanups | Opus / Sonnet |
 | **Phoebe** | PM | manager (above July) | Execution gateway: intent → spec/plan, dispatch tasks, track progress, all work goes through her | Sonnet |
-| **July** | HR | team lead (half a tier above the four workers) | **Tune the four workers**: personality/prompt/performance review/enable/disable | Sonnet |
-| **Bob** | RD Engineer | worker | Per Phoebe's plan, **produce code / files** | Haiku → Sonnet |
+| **July** | HR | team lead (half a tier above the five workers) | **Tune the five workers**: personality/prompt/performance review/enable/disable | Sonnet |
+| **Bob** | Build Engineer | worker | Per Phoebe's plan, **produce code / files** | Haiku → Sonnet |
 | **Gibby** | QA Engineer | worker | **Red Team** — assume output is broken, rotate attack surfaces to hit Bob; 3 unbroken rounds to pass | Sonnet |
 | **Tony** | Improvement Engineer | worker | Think: measure entropy, evaluate company health, memory maintenance logic (decay/dedup/contradiction), RAG strategy, **write upgrade proposals to Elon** | Sonnet |
 | **Tom** | IT / Ops Engineer | worker | Execute: `./company/` skeleton, scheduling/hooks, **token breaker**, backups, file integrity, **execute Elon-approved upgrades** | Sonnet |
+| **Mike** | R&D Researcher | worker | Survey the external world (literature, comparable harnesses, ecosystem); return **cited, applicability-ranked briefs** — evidence packs for specs. Tony measures inside, Mike surveys outside | Sonnet |
 
 > RAG strategy owned by Tony; token monitoring and breaker owned by Tom (user-specified).
 
@@ -94,21 +95,21 @@ Tom executes (modify skeleton, adjust settings, add scheduling…)
                     │ Phoebe · PM │  execution gateway — all work goes through, dispatch, track progress
                     └──────┬──────┘
                     ┌──────▼──────┐
-                    │  July · HR  │  team lead (half a tier above the four workers) — tune / performance
+                    │  July · HR  │  team lead (half a tier above the five workers) — tune / performance
                     └──────┬──────┘
-        ┌──────────┬───────┼───────────┬──────────┐
-  ┌─────▼────┐ ┌───▼─────┐ ┌──▼───────┐ ┌─────────▼┐
-  │ Bob · RD │⚔│Gibby ·QA│ │Tony·Improv│ │ Tom · IT │
-  │   build  │ │ find bugs│ │ diagnose  │ │ execute  │
-  │          │ │  / test  │ │ / propose │ │ / infra  │
-  └──────────┘ └─────────┘ └────┬──────┘ └────▲─────┘
-                                 │ proposal    │ execute
-                    Elon adjudicate ◄────┘     │
-                         └──► Phoebe dispatch ────┘
+        ┌───────────┬──────┴─────┬─────────────┬─────────────┐
+  ┌─────▼─────┐ ┌───▼─────┐ ┌───▼───────┐ ┌───▼──────┐ ┌────▼─────┐
+  │ Bob·Build │⚔│Gibby ·QA│ │Tony·Improv│ │ Tom · IT │ │ Mike·R&D │
+  │   build   │ │ find bugs│ │ diagnose  │ │ execute  │ │  survey  │
+  │           │ │  / test  │ │ / propose │ │ / infra  │ │  outside │
+  └───────────┘ └─────────┘ └────┬──────┘ └────▲─────┘ └──────────┘
+                                  │ proposal    │ execute
+                     Elon adjudicate ◄────┘     │
+                          └──► Phoebe dispatch ────┘
 ```
 
-> Work chain: `Chairman → Elon → Phoebe → July → {Bob, Gibby, Tony, Tom}`.
-> Phoebe is the execution gateway (dispatch); July is the team lead of the four workers (manage people, tune), half a tier above them.
+> Work chain: `Chairman → Elon → Phoebe → July → {Bob, Gibby, Tony, Tom, Mike}`.
+> Phoebe is the execution gateway (dispatch); July is the team lead of the five workers (manage people, tune), half a tier above them.
 
 **Three main relationship lines:**
 
@@ -150,7 +151,7 @@ Example `context.md` (Bob):
 ```yaml
 ---
 name: Bob
-role: RD Engineer
+role: Build Engineer
 manager: Phoebe                 # dispatch source
 people_lead: July               # performance tuning
 model: sonnet
