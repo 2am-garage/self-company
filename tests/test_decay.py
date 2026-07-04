@@ -105,6 +105,16 @@ class TestClassify(unittest.TestCase):
                                  last_reinforced="2026-04-01"))
         self.assertEqual(action, "keep")
 
+    def test_absorbed_classifies_keep_like_archived(self):
+        # Phase 6 Item 1: `absorbed` (consolidation-agent merge tombstone) is
+        # out of the active lifecycle — never promoted, never re-dropped —
+        # exactly like `archived`, via the shared is_tombstoned vocabulary.
+        for tier, rc in (("L0", 2), ("L1", 4)):
+            action, _ = classify(mem(tier=tier, reinforce_count=rc,
+                                     status="absorbed",
+                                     last_reinforced="2026-04-01"))
+            self.assertEqual(action, "keep", f"{tier} rc={rc}")
+
     def test_missing_status_kept_but_not_promoted(self):
         # Promotion requires status == "active" exactly; ambiguous state
         # (missing status) is kept but never promoted.
@@ -168,6 +178,34 @@ class TestApplyDrop(unittest.TestCase):
                                      "/nonexistent.md", "--apply")
             self.assertEqual([x["id"] for x in data["actions"]["reaped"]],
                              ["old"])
+            self.assertFalse(os.path.exists(path))
+
+    def test_absorbed_tombstone_reaped_past_grace(self):
+        # Phase 6 Item 1: an `absorbed` file (agent merge tombstone with
+        # invalid_at) is physically reaped by decay past grace, exactly like
+        # `archived` — grace runs from the later of last_reinforced/invalid_at.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "dup.md")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w") as f:
+                f.write("---\nid: dup\ntier: L0\nowner: Tony\n"
+                        'sources: ["[s#1]"]\ncreated: 2026-05-01\n'
+                        "last_reinforced: 2026-05-01\nreinforce_count: 1\n"
+                        "decay_score: 1.0\nstatus: absorbed\n"
+                        "invalid_at: 2026-06-25\n---\nbody\n")
+            # inside grace (invalid_at + 7d): kept, status preserved verbatim
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-06-30", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual(data["actions"]["reaped"], [])
+            self.assertTrue(os.path.exists(path))
+            with open(path) as f:
+                self.assertIn("status: absorbed", f.read())  # not normalised away
+            # past grace: physically reaped just like archived
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-07-05", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual([x["id"] for x in data["actions"]["reaped"]], ["dup"])
             self.assertFalse(os.path.exists(path))
 
     def test_apply_preserves_verified_date(self):

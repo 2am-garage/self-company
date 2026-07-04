@@ -639,5 +639,31 @@ class TestHookStdinThrottle(unittest.TestCase):
                 os.path.join(d, ".company", "memory", "L0-working")), [])
 
 
+class TestRecentDigestSkipsTombstones(unittest.TestCase):
+    """Phase 6 Item 1: recent_l0_digest excludes ALL tombstones (archived /
+    defunct / absorbed) via the shared vocabulary, so the model is never nudged
+    to reinforce a merged-away memory."""
+
+    def _l0(self, company, id, status, created="2026-07-04"):
+        p = os.path.join(company, "memory", "L0-working", f"{id}.md")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(f"---\nid: {id}\ntier: L0\nowner: Tony\n"
+                    f'sources: ["[s#1]"]\ncreated: {created}\n'
+                    f"last_reinforced: {created}\nreinforce_count: 1\n"
+                    f"decay_score: 1.0\nstatus: {status}\n---\nfact {id}\n")
+
+    def test_only_active_l0_in_digest(self):
+        with tempfile.TemporaryDirectory() as d:
+            company = os.path.join(d, ".company")
+            self._l0(company, "live", "active")
+            self._l0(company, "arch", "archived")
+            self._l0(company, "def", "defunct")
+            self._l0(company, "abs", "absorbed")
+            now = datetime(2026, 7, 4, 12, 0, 0)
+            ids = {e[0] for e in ct.recent_l0_digest(company, now=now)}
+            self.assertEqual(ids, {"live"})
+
+
 if __name__ == "__main__":
     unittest.main()

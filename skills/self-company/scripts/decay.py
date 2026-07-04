@@ -56,6 +56,20 @@ except Exception:  # pragma: no cover - defensive fallback
                    for s in (fm.get("sources") or []))
 
 
+# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) lives in
+# ONE shared place (tombstone.py, same dir) so scanners can't drift. Same
+# best-effort import + verbatim fallback as the charter loader above. decay
+# treats `absorbed` exactly like `archived`: out of the active lifecycle
+# (keep-short-circuit) AND reapable past the grace window.
+try:
+    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: tombstone.py)
+    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+
+    def is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+
+
 # ============================================================================
 # BUILT-IN DEFAULTS (== manifest §1, tunable via --config / policy.md)
 # ============================================================================
@@ -184,7 +198,12 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                 # silently ignored (which let those stubs accumulate forever).
                 if val_str == "defunct":
                     result["status"] = "archived"
-                elif val_str in ("active", "archived"):
+                elif val_str in ("active", "archived", "absorbed"):
+                    # Phase 6 Item 1: `absorbed` (consolidation-agent merge
+                    # tombstone) is preserved verbatim — NOT normalised to
+                    # `archived` — so the merge provenance survives a round-trip.
+                    # decay treats it identically via is_tombstoned (out of the
+                    # active lifecycle, reapable past grace).
                     result["status"] = val_str
                 else:
                     result["_parse_errors"].append(f"Invalid status: {val_str}")
@@ -348,13 +367,14 @@ def classify_record(mem: Dict[str, Any], now: datetime,
     if mem["tier"] == "L2":
         return "l2-keep", info
 
-    # Phase 5 Item 1 + C1 (N6): an archived/tombstoned record is OUT of the
-    # active lifecycle. It is never a promotion candidate (archived stubs were
-    # polluting Tony's upgrade backlog — and Tony's earlier finding: archived
-    # files promoted to L1), and it is never re-dropped/demoted/archived
-    # either: the reap pass in scan_memory_dir is the ONLY thing that touches
-    # it once past the grace window.
-    if mem.get("status") == "archived":
+    # Phase 5 Item 1 + C1 (N6) + Phase 6 Item 1: a tombstoned record (archived /
+    # defunct / absorbed) is OUT of the active lifecycle. It is never a promotion
+    # candidate (archived stubs were polluting Tony's upgrade backlog — and
+    # Tony's earlier finding: archived files promoted to L1), and it is never
+    # re-dropped/demoted/archived either: the reap pass in scan_memory_dir is the
+    # ONLY thing that touches it once past the grace window. `absorbed`
+    # (consolidation-agent merge tombstone) is handled identically here.
+    if is_tombstoned(mem):
         return "keep", info
 
     # Promotion requires a live record: `status: active` exactly (a record
@@ -640,12 +660,14 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             report["scanned"] += 1
             report["by_tier"][mem["tier"]] += 1
 
-            # Reap: an archived/defunct file untouched past the grace window is
-            # physically dropped here in the deterministic --apply pass (the
-            # daily agent's shell `rm` is sandbox-blocked, so these stubs would
-            # otherwise accumulate on disk forever). NEVER reap active; NEVER
-            # reap L2 (asserted — L2 is never archived per policy).
-            if mem["status"] == "archived":
+            # Reap: a tombstoned file (archived / defunct / absorbed) untouched
+            # past the grace window is physically dropped here in the
+            # deterministic --apply pass (the daily agent's shell `rm` is
+            # sandbox-blocked, so these stubs would otherwise accumulate on disk
+            # forever). `absorbed` is the consolidation-agent merge tombstone —
+            # reaped exactly like `archived`. NEVER reap active; NEVER reap L2
+            # (guarded below — L2 is never tombstoned per policy).
+            if is_tombstoned(mem):
                 # L2 reap-safety: L2 is a permanent tier and must NEVER be
                 # reaped. Use an EXPLICIT guard, not `assert` — `python3 -O`
                 # strips asserts, which would let an archived L2 file be

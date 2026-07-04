@@ -43,6 +43,17 @@ try:
 except Exception:  # pragma: no cover - defensive
     _resolve_config = None
 
+# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) lives in
+# ONE shared place (tombstone.py, same dir) so scanners can't drift. Best-effort
+# import + verbatim fallback, mirroring the policy loader above.
+try:
+    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: tombstone.py)
+    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+
+    def is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+
 RECURSION_GUARD = "SELF_COMPANY_CAPTURE_ACTIVE"
 DEFAULT_MODEL = os.environ.get("SELF_COMPANY_CAPTURE_MODEL", "claude-haiku-4-5-20251001")
 MAX_CHAIRMAN_CHARS = 24000   # cap transcript size fed to the model
@@ -467,7 +478,7 @@ def recent_l0_digest(company_dir, now=None, window_hours=RECENT_WINDOW_HOURS,
         fm, close = _parse_frontmatter(text)
         if not fm or not fm.get("id"):
             continue
-        if fm.get("status") in ("archived", "defunct"):
+        if is_tombstoned(fm):  # archived / defunct (alias) / absorbed
             continue
         try:
             created = date.fromisoformat(fm.get("created", ""))

@@ -75,6 +75,18 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
         return bool(CHARTER_SOURCE_RE.search(str(fm.get("sources", "") or "")))
 
 
+# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) lives in
+# ONE shared place (tombstone.py, same dir) so scanners can't drift. Best-effort
+# import + verbatim fallback, mirroring the charter loader above.
+try:
+    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: tombstone.py)
+    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+
+    def is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+
+
 def is_charter_claim(fm):
     """True if the frontmatter SELF-DECLARES charter provenance (via
     `provenance: charter` or a `charter:<slug>` source). This says nothing about
@@ -168,7 +180,7 @@ def verify_dir(memory_dir, transcripts_dir, today, apply):
         fm, body = parse_frontmatter(text)
         if not fm or not fm.get("id"):
             continue
-        if fm.get("status") in ("archived", "defunct"):  # tombstones (defunct = legacy alias)
+        if is_tombstoned(fm):  # tombstones: archived / defunct (alias) / absorbed
             continue
         report["scanned"] += 1
         if fm.get("verified_date"):

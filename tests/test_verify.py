@@ -80,6 +80,27 @@ class TestVerify(unittest.TestCase):
             self.assertEqual(rep["already_verified"], 1)
             self.assertEqual(rep["verified"], [])
 
+    def test_tombstones_skipped(self):
+        # Phase 6 Item 1: VERIFY skips ALL tombstones (archived / defunct /
+        # absorbed) via the shared vocabulary — a merged-away dup must not be
+        # scanned or stamped.
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory")
+            for i, st in enumerate(("archived", "defunct", "absorbed")):
+                p = os.path.join(mem, "L0-working", f"t{i}.md")
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w") as f:
+                    f.write(f"---\nid: tomb{i}\ntier: L0\nowner: Tony\n"
+                            f'sources: ["[sessA#0]"]\ncreated: 2026-06-01\n'
+                            f"last_reinforced: 2026-06-01\nreinforce_count: 1\n"
+                            f"decay_score: 1.0\nstatus: {st}\n---\nbody\n")
+            _mem(os.path.join(mem, "L0-working", "live.md"), id="live",
+                 sources='["[sessA#0]"]')
+            tdir = _transcripts(d, "sessA", 3)
+            rep = vm.verify_dir(mem, tdir, "2026-06-30", apply=True)
+            self.assertEqual(rep["scanned"], 1)  # only the live one
+            self.assertEqual(rep["verified"], ["live"])
+
 
 class TestCharterClass(unittest.TestCase):
     """Item 6 — charter/axiom provenance class + anti-abuse."""

@@ -37,6 +37,36 @@ class TestDimensions(unittest.TestCase):
             self.assertGreater(data["dimensions"]["dup_rate"], 0.0)
             self.assertEqual(len(data["details"]["duplicate_pairs"]), 1)
 
+    def test_absorbed_excluded_from_totals_and_dups(self):
+        # Phase 6 Item 1: an `absorbed` tombstone (consolidation-agent merge)
+        # is excluded from active scans — it must not count in total_memories
+        # nor re-surface as a duplicate candidate against its canonical.
+        with tempfile.TemporaryDirectory() as d:
+            body = "The Chairman prefers async await patterns in Python design clearly."
+            _helpers.write_memory(os.path.join(d, "L0-working", "canon.md"),
+                                  id="pref-async-canon", body=body)
+            _helpers.write_memory(os.path.join(d, "L0-working", "dup.md"),
+                                  id="pref-async-dup", body=body, status="absorbed")
+            data = self._entropy(d)
+            self.assertEqual(data["total_memories"], 1)  # absorbed not counted
+            self.assertEqual(data["details"]["duplicate_pairs"], [])
+            self.assertEqual(data["dimensions"]["dup_rate"], 0.0)
+
+    def test_absorbed_included_under_include_archived(self):
+        # --include-archived brings the tombstone back into scope (and the
+        # dup pair re-appears), proving it was excluded by status, not lost.
+        with tempfile.TemporaryDirectory() as d:
+            body = "The Chairman prefers async await patterns in Python design clearly."
+            _helpers.write_memory(os.path.join(d, "L0-working", "canon.md"),
+                                  id="pref-async-canon", body=body)
+            _helpers.write_memory(os.path.join(d, "L0-working", "dup.md"),
+                                  id="pref-async-dup", body=body, status="absorbed")
+            data = _helpers.run_json("entropy.py", "--memory-dir", d, "--now",
+                                     "2026-06-25", "--config", "/nonexistent.md",
+                                     "--include-archived")
+            self.assertEqual(data["total_memories"], 2)
+            self.assertEqual(len(data["details"]["duplicate_pairs"]), 1)
+
     def test_contradiction_detected(self):
         # Same slug family (pref-*) with opposing keywords async/sync.
         with tempfile.TemporaryDirectory() as d:
@@ -202,6 +232,31 @@ class TestAdjudicationLedger(unittest.TestCase):
             adj = os.path.join(d, "adj.md")
             # one real id + one nonexistent id: entry is inert, no error
             self._ledger(adj, [("dup-a", "ghost-id", "distinct")])
+            out = self._dup(d, adj)
+            self.assertEqual(len(out["details"]["duplicate_pairs"]), 1)
+
+    def test_duplicate_verdict_also_dropped_and_uncounted(self):
+        # Phase 6 Item 3: a `duplicate`-adjudicated pair ("already judged, being
+        # resolved via tombstone/reap") is ALSO omitted from candidates and does
+        # not count toward dup_rate — not just `distinct`.
+        with tempfile.TemporaryDirectory() as d:
+            self._two_dups(d)
+            adj = os.path.join(d, "adj.md")
+            self._ledger(adj, [("dup-b", "dup-a", "duplicate")])  # unordered
+            out = self._dup(d, adj)
+            self.assertEqual(out["details"]["duplicate_pairs"], [])
+            self.assertEqual(out["dimensions"]["dup_rate"], 0.0)
+            # provenance surfaced (extend-not-break): distinct count stays 0,
+            # duplicate/suppressed counts reflect the new verdict.
+            self.assertEqual(out["adjudications"]["distinct_pairs"], 0)
+            self.assertEqual(out["adjudications"]["duplicate_pairs"], 1)
+            self.assertEqual(out["adjudications"]["suppressed_pairs"], 1)
+
+    def test_stale_guard_missing_id_duplicate_verdict_inert(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._two_dups(d)
+            adj = os.path.join(d, "adj.md")
+            self._ledger(adj, [("dup-a", "ghost-id", "duplicate")])
             out = self._dup(d, adj)
             self.assertEqual(len(out["details"]["duplicate_pairs"]), 1)
 

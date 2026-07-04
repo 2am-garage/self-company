@@ -301,6 +301,60 @@ both scripts), never by self-declaration.
 
 ---
 
-**Version**: v3 (memory pipeline + charter class)  
-**Last updated**: 2026-07-03  
-**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py / scripts/verify_memory.py
+## 9. Tombstone Vocabulary & Division of Labor (Phase 6)
+
+A **tombstone** is a memory retired from the ACTIVE set but kept on disk
+(recoverable) until the deterministic decay reap physically removes it past the
+grace window. Three `status` values are tombstones:
+
+| status | written by | meaning |
+|---|---|---|
+| `archived` | decay (L0 drop soft-delete / L1 archive) or a completed merge | retired from the active lifecycle |
+| `defunct` | *(legacy)* the daily agent, when its sandboxed `rm` couldn't delete a merged-away stub | alias for `archived` — **normalised to `archived` on read** |
+| `absorbed` | the consolidation agent, when it merges a duplicate's content INTO a canonical | this duplicate has been merged away |
+
+The vocabulary is declared in **ONE** place —
+`scripts/tombstone.py` (`TOMBSTONE_STATUSES = {"archived", "defunct", "absorbed"}`
+and `is_tombstoned(fm)`) — and imported by every frontmatter scanner
+(`entropy.py`, `reinforce_memory.py`, `verify_memory.py`, `capture-trigger.py`,
+`decay.py`) with the same best-effort import + verbatim fallback used for the
+charter seed set. Before Phase 6 the set was open-coded per scanner and drifted:
+`absorbed` was recognised by none of them, so the agent's `status: absorbed`
+tombstones stayed active and the same duplicate pairs re-surfaced every run.
+
+### Behaviour of a tombstone (all three statuses)
+
+- **Excluded from every active scan** — entropy totals + dup/contradiction
+  candidates, reinforce's candidate set (a tombstone can never become canonical
+  or re-surface as a dup), verify, and the capture recent-L0 digest.
+- **Included only under `--include-archived`** (entropy).
+- **Reapable by decay past the grace window** — physically removed in the
+  `--apply` reap pass once untouched for `REAP_GRACE_DAYS` from the LATER of
+  `last_reinforced` / `invalid_at`. L2 and blessed charter seeds are never reaped.
+
+`absorbed` is kept verbatim (NOT normalised to `archived`) so the merge
+provenance survives a round-trip; decay treats it identically via
+`is_tombstoned`.
+
+### `invalid_at` — the reap-grace anchor
+
+When a memory is tombstoned, `invalid_at: <date>` records WHEN it was
+invalidated. The reap grace window runs from the later of `last_reinforced` /
+`invalid_at`, so a freshly-tombstoned record stays recoverable for the full
+window even if its `last_reinforced` is much older.
+
+### Division of labor: **the agent tombstones, decay reaps**
+
+The headless daily consolidation agent must **never** call `rm` / `os.remove`
+(its shell `rm` is sandbox permission-blocked — attempting it just fails the
+run). When it merges a duplicate away it **tombstones** the absorbed file with
+an `Edit`: set `status: absorbed` and add `invalid_at: <today>`. **Physical
+removal is the deterministic decay reap's job**, not the agent's. This achieves
+convergence with no new destructive permission granted to an unsupervised agent
+(least-action-space).
+
+---
+
+**Version**: v4 (memory pipeline + charter class + tombstone convergence)  
+**Last updated**: 2026-07-04  
+**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py / scripts/verify_memory.py / scripts/tombstone.py

@@ -72,6 +72,28 @@ def _write(path, id, sources):
                 f"decay_score: 1.0\nstatus: active\n---\nbody {id}\n")
 
 
+class TestLoadSkipsTombstones(unittest.TestCase):
+    """Phase 6 Item 1: load_memories excludes ALL tombstones (archived /
+    defunct / absorbed) via the shared vocabulary — a tombstoned dup must not
+    become a reinforcement candidate or re-surface as a merge target."""
+
+    def _w(self, path, id, status):
+        with open(path, "w") as f:
+            f.write(f"---\nid: {id}\ntier: L0\nowner: Tony\nsources: [\"[s#1]\"]\n"
+                    f"created: 2026-06-01\nlast_reinforced: 2026-06-01\n"
+                    f"reinforce_count: 1\ndecay_score: 1.0\nstatus: {status}\n"
+                    f"---\nbody {id}\n")
+
+    def test_absorbed_defunct_archived_all_excluded(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._w(os.path.join(d, "live.md"), "live", "active")
+            self._w(os.path.join(d, "arch.md"), "arch", "archived")
+            self._w(os.path.join(d, "def.md"), "def", "defunct")
+            self._w(os.path.join(d, "abs.md"), "abs", "absorbed")
+            ids = {m["id"] for m in rm.load_memories(d)}
+            self.assertEqual(ids, {"live"})
+
+
 class TestApplyMergesSources(unittest.TestCase):
     def test_merge_produces_valid_balanced_sources(self):
         # Regression: the source merge must not corrupt the frontmatter (an earlier
