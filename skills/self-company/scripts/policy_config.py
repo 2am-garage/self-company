@@ -51,6 +51,8 @@ CONSTANT_SPECS = {
     "RAG_ENABLE_THRESHOLD": int,
     "DAILY_RUNS_PER_DAY": int,
     "CAPTURE_COOLDOWN_MINUTES": int,
+    "BACKUP_KEEP": int,
+    "OFFLINE_GAP_DAYS": int,
 }
 
 # Candidate numeric token. We deliberately capture an optional sign and any
