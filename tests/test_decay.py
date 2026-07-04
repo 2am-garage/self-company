@@ -88,6 +88,30 @@ class TestClassify(unittest.TestCase):
         action, _ = classify(mem(tier="L2", reinforce_count=5, last_reinforced="2020-01-01"))
         self.assertEqual(action, "l2-keep")
 
+    def test_archived_never_upgrade_candidate(self):
+        # Phase 5 Item 1 + C1 (N6): archived/tombstoned files are never
+        # promotion candidates, regardless of rc — closes "archived stubs in
+        # Tony's upgrade backlog" and "archived files promoted to L1".
+        for tier, rc in (("L0", 2), ("L1", 4)):
+            action, _ = classify(mem(tier=tier, reinforce_count=rc,
+                                     status="archived",
+                                     last_reinforced="2026-06-14"))
+            self.assertEqual(action, "keep", f"{tier} rc={rc}")
+
+    def test_archived_is_never_redropped(self):
+        # An archived record out of the active lifecycle: even fully decayed
+        # it classifies keep (only the reap pass touches it past grace).
+        action, _ = classify(mem(status="archived",
+                                 last_reinforced="2026-04-01"))
+        self.assertEqual(action, "keep")
+
+    def test_missing_status_kept_but_not_promoted(self):
+        # Promotion requires status == "active" exactly; ambiguous state
+        # (missing status) is kept but never promoted.
+        action, _ = classify(mem(reinforce_count=2, status=None,
+                                 last_reinforced="2026-06-14"))
+        self.assertEqual(action, "keep")
+
     def test_missing_date_is_kept_untouched(self):
         action, info = classify(mem(last_reinforced=None))
         self.assertEqual(action, "keep")
@@ -100,7 +124,11 @@ class TestClassify(unittest.TestCase):
 
 
 class TestApplyDrop(unittest.TestCase):
-    def test_apply_actually_deletes_stale_l0(self):
+    def test_apply_drop_is_soft_delete_tombstone(self):
+        # Phase 5 Item 2 (N2): this previously asserted the stale L0 was
+        # physically unlinked — that WAS the durability hole. Drop is now a
+        # soft-delete: the file remains as a recoverable tombstone
+        # (status: archived + invalid_at: <now>), excluded from active scans.
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "L0-working", "old.md")
             _helpers.write_memory(path, id="old", last_reinforced="2026-05-01")
@@ -108,7 +136,39 @@ class TestApplyDrop(unittest.TestCase):
                 "decay.py", "--memory-dir", d, "--now", "2026-06-25",
                 "--config", "/nonexistent.md", "--apply")
             self.assertEqual(rc, 0, err)
-            self.assertFalse(os.path.exists(path), "stale L0 memory should be deleted")
+            self.assertTrue(os.path.exists(path), "drop must tombstone, not unlink")
+            with open(path) as f:
+                txt = f.read()
+            self.assertIn("status: archived", txt)
+            self.assertIn("invalid_at: 2026-06-25", txt)
+            self.assertIn("body", txt)  # content recoverable
+
+    def test_tombstone_reaped_only_after_grace_from_invalid_at(self):
+        # Grace runs from the LATER of last_reinforced/invalid_at: a tombstone
+        # dropped today stays recoverable a full REAP_GRACE_DAYS even though
+        # last_reinforced is ancient; past the window the reap pass unlinks it.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "old.md")
+            _helpers.write_memory(path, id="old", last_reinforced="2026-05-01")
+            _helpers.run_script("decay.py", "--memory-dir", d, "--now",
+                                "2026-06-25", "--config", "/nonexistent.md",
+                                "--apply")
+            # inside grace (invalid_at 2026-06-25 + 7d): still present
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-06-30", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual(data["actions"]["reaped"], [])
+            self.assertTrue(os.path.exists(path))
+            # idempotent: the tombstone is not re-dropped (invalid_at stable)
+            with open(path) as f:
+                self.assertIn("invalid_at: 2026-06-25", f.read())
+            # past grace: physically reaped
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-07-03", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual([x["id"] for x in data["actions"]["reaped"]],
+                             ["old"])
+            self.assertFalse(os.path.exists(path))
 
     def test_apply_preserves_verified_date(self):
         # Regression: decay --apply rewrites frontmatter and must NOT drop the
@@ -129,6 +189,92 @@ class TestApplyDrop(unittest.TestCase):
                 txt = f.read()
             self.assertIn("verified_date: 2026-06-21", txt)
             self.assertIn("verified_by: Gibby", txt)
+
+
+class TestOfflineGapDamper(unittest.TestCase):
+    """Phase 5 Item 2 (N2): a long machine outage must not purge the store on
+    the first tick back — elapsed age is capped at marker + OFFLINE_GAP_DAYS
+    and physical reaps are deferred for that run."""
+
+    def _plant_marker(self, d, date_str):
+        with open(os.path.join(d, ".last-decay-run"), "w") as f:
+            f.write(date_str + "\n")
+
+    def test_15_day_gap_drops_nothing_and_logs_notice(self):
+        with tempfile.TemporaryDirectory() as d:
+            # fresh at last run (2026-07-01); 15-day outage follows
+            path = os.path.join(d, "L0-working", "fresh-at-shutdown.md")
+            _helpers.write_memory(path, id="fresh-at-shutdown",
+                                  last_reinforced="2026-07-01")
+            # an already-tombstoned file whose grace expires during the gap
+            arch = os.path.join(d, "L0-working", "tomb.md")
+            _helpers.write_memory(arch, id="tomb", status="archived",
+                                  last_reinforced="2026-06-20")
+            self._plant_marker(d, "2026-07-01")
+            rc, out, err = _helpers.run_script(
+                "decay.py", "--memory-dir", d, "--now", "2026-07-16",
+                "--config", "/nonexistent.md", "--apply")
+            self.assertEqual(rc, 0, err)
+            import json
+            data = json.loads(out)
+            # damper engaged + one gap notice (stderr AND warnings)
+            self.assertTrue(data["gap_damper"]["active"])
+            self.assertEqual(data["gap_damper"]["effective_now"], "2026-07-08")
+            self.assertIn("[GAP]", err)
+            self.assertTrue(any("offline-gap damper" in w
+                                for w in data["warnings"]))
+            # damped aging: effective age 7d -> decay 0.5 -> keep, no drop
+            self.assertEqual(data["actions"]["drop"], [])
+            self.assertTrue(os.path.exists(path))
+            # physical reap DEFERRED — nothing unlinked this run
+            self.assertEqual(data["actions"]["reaped"], [])
+            self.assertEqual([x["id"] for x in data["actions"]["reap_deferred"]],
+                             ["tomb"])
+            self.assertTrue(os.path.exists(arch))
+
+    def test_normal_gap_no_damper(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "m.md"),
+                                  id="m", last_reinforced="2026-07-01")
+            self._plant_marker(d, "2026-07-01")
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-07-05", "--config",
+                                     "/nonexistent.md")
+            self.assertFalse(data["gap_damper"]["active"])
+
+    def test_missing_marker_no_damper_and_apply_writes_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "m.md"),
+                                  id="m", last_reinforced="2026-07-01")
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-07-02", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertFalse(data["gap_damper"]["active"])
+            self.assertIsNone(data["gap_damper"]["last_run"])
+            marker = os.path.join(d, ".last-decay-run")
+            self.assertTrue(os.path.exists(marker))
+            with open(marker) as f:
+                self.assertEqual(f.read().strip(), "2026-07-02")
+
+    def test_dry_run_never_writes_marker(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "m.md"),
+                                  id="m", last_reinforced="2026-07-01")
+            _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                              "2026-07-02", "--config", "/nonexistent.md")
+            self.assertFalse(os.path.exists(os.path.join(d, ".last-decay-run")))
+
+    def test_memory_named_dir_uses_ops_marker(self):
+        # convention: .../memory -> sibling ops/.last-decay-run
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory")
+            _helpers.write_memory(os.path.join(mem, "L0-working", "m.md"),
+                                  id="m", last_reinforced="2026-07-01")
+            _helpers.run_json("decay.py", "--memory-dir", mem, "--now",
+                              "2026-07-02", "--config", "/nonexistent.md",
+                              "--apply")
+            self.assertTrue(os.path.exists(
+                os.path.join(d, "ops", ".last-decay-run")))
 
 
 class TestCLIProvenance(unittest.TestCase):
@@ -202,7 +348,14 @@ class TestCharterGuard(unittest.TestCase):
                                      "--apply", "--now", "2026-07-20")
             self.assertEqual([x["id"] for x in data["actions"]["drop"]],
                              ["fake-axiom"])
-            self.assertFalse(os.path.exists(path))
+            # Phase 5 Item 2: drop is a soft-delete — the non-blessed claim
+            # still gets NO charter protection (it is dropped), but the drop
+            # now tombstones instead of unlinking.
+            self.assertTrue(os.path.exists(path))
+            with open(path) as f:
+                txt = f.read()
+            self.assertIn("status: archived", txt)
+            self.assertIn("invalid_at: 2026-07-20", txt)
 
     def test_blessed_seed_never_reaped_when_archived(self):
         with tempfile.TemporaryDirectory() as d:

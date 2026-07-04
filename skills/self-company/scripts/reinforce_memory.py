@@ -145,19 +145,44 @@ def _source_items(sources_value):
     return SOURCE_ITEM_RE.findall(sources_value or "")
 
 
+def _session_ids(items):
+    """Distinct session ids from source tokens. A token looks like
+    '"[<session-id>#<line>]"'; the id is everything before the first '#'
+    (session ids are sanitised to [A-Za-z0-9._-], so '#' never appears in
+    one). Tokens without the [..#..] shape (e.g. "charter:foo") count as one
+    distinct id each, using the whole token."""
+    out = set()
+    for it in items:
+        inner = it.strip('"')
+        if inner.startswith("[") and inner.endswith("]") and "#" in inner:
+            out.add(inner[1:].split("#", 1)[0])
+        else:
+            out.add(inner)
+    return out
+
+
 def apply_reinforcement(canon_mem, absorbed_mem, today):
-    """Bump canonical rc + date, merge absorbed's sources, delete absorbed file."""
+    """Merge absorbed's sources into canonical, update last_reinforced, delete
+    the absorbed file. Phase 5 Item 1 (N1): rc bumps at most once per DISTINCT
+    session id — the merge increments reinforce_count only when the absorbed
+    memory contributes at least one session id the canonical didn't already
+    have (same-session near-duplicates consolidate without inflating the
+    cross-session recurrence signal the promotion gates trust)."""
     lines = canon_mem["text"].split("\n")
     fm, close = parse_frontmatter(canon_mem["text"])
     absorbed_fm, _ = parse_frontmatter(absorbed_mem["text"])
     new_sources = _source_items(fm.get("sources", ""))
+    canon_sessions = _session_ids(new_sources)
     for s in _source_items(absorbed_fm.get("sources", "")):
         if s not in new_sources:
             new_sources.append(s)
+    adds_new_session = bool(_session_ids(new_sources) - canon_sessions)
     try:
-        rc = int(fm.get("reinforce_count", "1")) + 1
+        rc = int(fm.get("reinforce_count", "1"))
     except ValueError:
-        rc = 2
+        rc = 1
+    if adds_new_session:
+        rc += 1
     for i in range(1, close):
         key = lines[i].split(":", 1)[0].strip() if ":" in lines[i] else ""
         if key == "reinforce_count":

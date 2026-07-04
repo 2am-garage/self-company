@@ -68,8 +68,17 @@ DEFAULT_L1_DEMOTE_RC = 2
 DEFAULT_L0_TO_L1_RC = 2
 DEFAULT_L1_TO_L2_RC = 4
 # Reap grace window: an archived/defunct file untouched for this many days
-# (since last_reinforced) is physically dropped in the --apply pass.
+# (since the LATER of last_reinforced / invalid_at — a tombstone stays
+# recoverable for the full grace window from the moment it was invalidated)
+# is physically dropped in the --apply pass.
 DEFAULT_REAP_GRACE_DAYS = 7
+# Phase 5 Item 2 (N2) offline-gap damper: if now − last successful --apply run
+# (marker ops/.last-decay-run) exceeds this many days, cap every file's
+# effective elapsed age at marker + threshold and defer physical reaps this
+# run — one missed fortnight must not purge the store in a single tick.
+DEFAULT_OFFLINE_GAP_DAYS = 7
+# Marker filename recording the date of the last successful --apply run.
+LAST_RUN_MARKER = ".last-decay-run"
 
 # Tier directory layout (siblings under memory_dir).
 TIER_DIRS = {"L0": "L0-working", "L1": "L1-warm", "L2": "L2-cold"}
@@ -108,6 +117,7 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
         "reinforce_count": None,
         "decay_score": None,
         "status": None,
+        "invalid_at": None,
         "verified_date": None,
         "verified_by": None,
         "_body": "",
@@ -202,6 +212,11 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                     result["decay_score"] = float(val_str)
                 except ValueError:
                     result["_parse_errors"].append(f"Non-float decay_score: {val_str}")
+            elif key == "invalid_at":
+                # Phase 5 Item 2 (N2): tombstone marker — the date a "drop"
+                # soft-deleted this record (status: archived + invalid_at).
+                # Round-tripped so rewrites never lose the reap-grace anchor.
+                result["invalid_at"] = val_str if val_str else None
             elif key == "verified_date":
                 result["verified_date"] = val_str if val_str else None
             elif key == "verified_by":
@@ -229,7 +244,7 @@ def serialize_frontmatter(meta: Dict[str, Any]) -> str:
         return str(v) if v is not None else ""
 
     for key in ["id", "tier", "category", "owner", "provenance", "sources", "created", "last_reinforced",
-                "reinforce_count", "decay_score", "status", "verified_date", "verified_by"]:
+                "reinforce_count", "decay_score", "status", "invalid_at", "verified_date", "verified_by"]:
         if key in meta and meta[key] is not None:
             lines.append(f"{key}: {format_value(meta[key])}")
 
@@ -333,12 +348,26 @@ def classify_record(mem: Dict[str, Any], now: datetime,
     if mem["tier"] == "L2":
         return "l2-keep", info
 
+    # Phase 5 Item 1 + C1 (N6): an archived/tombstoned record is OUT of the
+    # active lifecycle. It is never a promotion candidate (archived stubs were
+    # polluting Tony's upgrade backlog — and Tony's earlier finding: archived
+    # files promoted to L1), and it is never re-dropped/demoted/archived
+    # either: the reap pass in scan_memory_dir is the ONLY thing that touches
+    # it once past the grace window.
+    if mem.get("status") == "archived":
+        return "keep", info
+
+    # Promotion requires a live record: `status: active` exactly (a record
+    # with a missing/unknown status is kept but never promoted — promotion is
+    # the one action that must never fire on ambiguous state).
+    is_active = mem.get("status") == "active"
+
     # L0: drop if decay < threshold
     if mem["tier"] == "L0":
         if decay < l0_drop_threshold:
             return "drop", info
         # Check upgrade candidate
-        if rc >= l0_to_l1_rc:
+        if rc >= l0_to_l1_rc and is_active:
             return "upgrade-candidate", info
         return "keep", info
 
@@ -351,7 +380,7 @@ def classify_record(mem: Dict[str, Any], now: datetime,
             else:
                 return "archive", info
         # Check upgrade candidate
-        if rc >= l1_to_l2_rc:
+        if rc >= l1_to_l2_rc and is_active:
             return "upgrade-candidate", info
         return "keep", info
 
@@ -359,15 +388,32 @@ def classify_record(mem: Dict[str, Any], now: datetime,
 
 
 def apply_action(path: Path, action: str, mem: Dict[str, Any],
-                info: Dict[str, Any]) -> bool:
+                info: Dict[str, Any], now_str: Optional[str] = None) -> bool:
     """
     Apply action to file (only if --apply is set, but this gets called only then).
 
+    `now_str` (YYYY-MM-DD) stamps `invalid_at` on a drop tombstone.
     Returns True if successful, False if error.
     """
     try:
         if action == "drop":
-            path.unlink()
+            # Phase 5 Item 2 (N2): "drop" is a SOFT-DELETE, never an unlink.
+            # The record becomes a tombstone (status: archived +
+            # invalid_at: <now>) — recoverable and excluded from active scans
+            # (entropy/reinforce/verify all skip status: archived) — and is
+            # physically reaped only by the reap pass once the grace window
+            # has elapsed from the later of last_reinforced / invalid_at.
+            body = mem.get("_body", "")
+            mem["status"] = "archived"
+            if not mem.get("invalid_at"):     # idempotent: never reset the anchor
+                mem["invalid_at"] = now_str
+            if info.get("decay_score") is not None:
+                mem["decay_score"] = info["decay_score"]
+            meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
+                                         "created", "last_reinforced", "reinforce_count",
+                                         "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
+            new_content = serialize_frontmatter(meta) + '\n' + body
+            path.write_text(new_content)
             return True
 
         elif action == "demote":
@@ -380,7 +426,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                 mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
                                          "created", "last_reinforced", "reinforce_count",
-                                         "decay_score", "status", "verified_date", "verified_by"]}
+                                         "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
 
             new_path = path.parent.parent / "L0-working" / path.name
@@ -410,7 +456,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                 mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
                                          "created", "last_reinforced", "reinforce_count",
-                                         "decay_score", "status", "verified_date", "verified_by"]}
+                                         "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
 
             # Derive the memory root robustly as the ancestor directly containing
@@ -458,7 +504,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
                                          "created", "last_reinforced", "reinforce_count",
-                                         "decay_score", "status", "verified_date", "verified_by"]}
+                                         "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
             path.write_text(new_content)
             return True
@@ -472,7 +518,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                 mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
                                          "created", "last_reinforced", "reinforce_count",
-                                         "decay_score", "status", "verified_date", "verified_by"]}
+                                         "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
             path.write_text(new_content)
             return True
@@ -482,6 +528,42 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
         return False
 
     return False
+
+
+# ============================================================================
+# OFFLINE-GAP DAMPER (Phase 5 Item 2, N2)
+# ============================================================================
+
+def last_run_marker_path(memory_dir: Path) -> Path:
+    """Marker recording the last successful --apply run.
+
+    Convention: `.company/memory` -> `.company/ops/.last-decay-run`. If the
+    scanned dir isn't named `memory` (tests point at bare temp dirs), the
+    marker lives INSIDE the scanned dir so we never write outside it."""
+    if memory_dir.name == "memory":
+        return memory_dir.parent / "ops" / LAST_RUN_MARKER
+    return memory_dir / LAST_RUN_MARKER
+
+
+def read_last_run(memory_dir: Path) -> Optional[datetime]:
+    """Date of the last successful --apply, or None (missing/corrupt marker
+    -> None: the damper simply doesn't engage; never raises)."""
+    try:
+        return parse_date(last_run_marker_path(memory_dir)
+                          .read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+
+
+def write_last_run(memory_dir: Path, now: datetime) -> None:
+    """Record a successful --apply run. Best-effort — marker trouble must
+    never fail the batch."""
+    try:
+        marker = last_run_marker_path(memory_dir)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(now.strftime("%Y-%m-%d") + "\n", encoding="utf-8")
+    except Exception:
+        pass
 
 
 # ============================================================================
@@ -496,9 +578,15 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                    l0_to_l1_rc: int,
                    l1_to_l2_rc: int,
                    reap_grace_days: int,
-                   apply: bool) -> Dict[str, Any]:
+                   apply: bool,
+                   defer_reap: bool = False) -> Dict[str, Any]:
     """
     Scan memory_dir recursively for .md files, compute decay, optionally apply actions.
+
+    `now` is the EFFECTIVE reference time — when the offline-gap damper is
+    active (see main), the caller passes a clamped now so per-file elapsed
+    age is capped, and sets `defer_reap=True` so no physical unlink happens
+    on the first tick after a long outage.
     """
     report = {
         "now": now.strftime("%Y-%m-%d"),
@@ -512,6 +600,7 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             "demote": [],
             "upgrade_candidates": [],
             "reaped": [],
+            "reap_deferred": [],
             "keep": 0,
             "l2_keep": 0
         },
@@ -577,10 +666,27 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                         f"below L2 — migrate it to L2-cold/profile/ "
                         f"(scripts/migrate_charter_seeds.py)")
                     continue
-                reap_last = parse_date(mem.get("last_reinforced"))
+                # Phase 5 Item 2 (N2): the grace window runs from the LATER of
+                # last_reinforced / invalid_at — a tombstoned drop stays
+                # recoverable for the full grace window from the moment it was
+                # invalidated, even if last_reinforced is much older.
+                reap_candidates = [d for d in (parse_date(mem.get("last_reinforced")),
+                                               parse_date(mem.get("invalid_at"))) if d]
+                reap_last = max(reap_candidates) if reap_candidates else None
                 if reap_last is not None:
                     reap_age = (now - reap_last).total_seconds() / (24 * 3600)
                     if reap_age > reap_grace_days:
+                        # Offline-gap damper: on the first tick after a long
+                        # outage NO physical unlink happens — the reap is
+                        # deferred to the next (normal-gap) run. Deleting is
+                        # the one act we can't roll back.
+                        if defer_reap:
+                            report["actions"]["reap_deferred"].append({
+                                "id": mem["id"],
+                                "tier": mem["tier"],
+                                "age_days": reap_age,
+                            })
+                            continue  # keep the tombstone this run
                         if apply:
                             path.unlink()
                         report["actions"]["reaped"].append({
@@ -635,7 +741,8 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             # Apply if requested.
             # drop / archive / demote mutate the file (delete / move / status).
             if apply and action in ("drop", "archive", "demote"):
-                if not apply_action(path, action, mem, info):
+                if not apply_action(path, action, mem, info,
+                                    now_str=now.strftime("%Y-%m-%d")):
                     report["warnings"].append(f"{path}: failed to apply {action}")
                     continue
 
@@ -736,6 +843,7 @@ def main():
         "L0_TO_L1_RC": DEFAULT_L0_TO_L1_RC,
         "L1_TO_L2_RC": DEFAULT_L1_TO_L2_RC,
         "REAP_GRACE_DAYS": DEFAULT_REAP_GRACE_DAYS,
+        "OFFLINE_GAP_DAYS": DEFAULT_OFFLINE_GAP_DAYS,
     }
     if _resolve_config is not None:
         values, sources = _resolve_config(defaults, args.config)
@@ -751,6 +859,7 @@ def main():
     l0_to_l1_rc = values["L0_TO_L1_RC"]
     l1_to_l2_rc = values["L1_TO_L2_RC"]
     reap_grace_days = values["REAP_GRACE_DAYS"]
+    offline_gap_days = values["OFFLINE_GAP_DAYS"]
 
     # P3: if a policy file was given and exists but some constant fell back to a
     # default, say so on stderr so tuning is observable instead of silent.
@@ -761,10 +870,39 @@ def main():
               f"{', '.join(fell_back)} (not declared in policy)",
               file=sys.stderr)
 
-    # Scan and report
+    # Phase 5 Item 2 (N2) — offline-gap damper. If the gap since the last
+    # successful --apply run exceeds OFFLINE_GAP_DAYS, clamp the effective
+    # `now` to marker + OFFLINE_GAP_DAYS (capping every file's elapsed decay
+    # age at the threshold) and defer physical reaps this run: a two-week
+    # outage must not convert gradual forgetting into a one-tick purge.
+    # Deterministic and testable via --now + a planted marker.
     memory_dir = Path(args.memory_dir)
+    last_run = read_last_run(memory_dir)
+    effective_now, defer_reap = now, False
+    gap_damper = {
+        "active": False,
+        "last_run": last_run.strftime("%Y-%m-%d") if last_run else None,
+        "offline_gap_days": offline_gap_days,
+    }
+    if last_run is not None:
+        gap_days = (now - last_run).total_seconds() / (24 * 3600)
+        gap_damper["gap_days"] = round(gap_days, 2)
+        if gap_days > offline_gap_days:
+            effective_now = last_run + timedelta(days=offline_gap_days)
+            defer_reap = True
+            gap_damper["active"] = True
+            gap_damper["effective_now"] = effective_now.strftime("%Y-%m-%d")
+            # The one gap notice (also lands in report["warnings"] below);
+            # stderr so daily-run.sh surfaces it in the daily log.
+            print(f"[GAP] offline-gap damper active: {gap_days:.1f}d since "
+                  f"last successful run ({gap_damper['last_run']}) > "
+                  f"{offline_gap_days}d — capping elapsed decay age at "
+                  f"{gap_damper['effective_now']} and deferring physical "
+                  f"reaps this run", file=sys.stderr)
+
+    # Scan and report
     report = scan_memory_dir(
-        memory_dir, now,
+        memory_dir, effective_now,
         hl_base, hl_growth,
         l0_drop_threshold,
         l1_archive_threshold,
@@ -772,8 +910,21 @@ def main():
         l0_to_l1_rc,
         l1_to_l2_rc,
         reap_grace_days,
-        apply=args.apply
+        apply=args.apply,
+        defer_reap=defer_reap
     )
+    report["now"] = now.strftime("%Y-%m-%d")   # real now; effective in gap_damper
+    report["gap_damper"] = gap_damper
+    if gap_damper["active"]:
+        report["warnings"].append(
+            f"offline-gap damper: {gap_damper['gap_days']}d gap since "
+            f"{gap_damper['last_run']} — elapsed age capped at "
+            f"{gap_damper['effective_now']}, "
+            f"{len(report['actions']['reap_deferred'])} reap(s) deferred")
+
+    # Record the successful --apply so the next run can measure its gap.
+    if args.apply:
+        write_last_run(memory_dir, now)
 
     # P3: surface effective constants and their provenance (policy vs default).
     report["config"] = {
