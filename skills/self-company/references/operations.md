@@ -190,7 +190,7 @@ inline in your reply (don't just point at a file):
 the real logs (daily-run → Tony/Gibby/Elon/Tom, trigger ledger → Phoebe/Bob,
 employee `log.md`, and running `claude -p` processes). Interactive chat is
 Elon-fronted; the genuinely-separate work is the cron / dispatch / trigger agents
-— the view makes that split visible rather than pretending seven daemons are
+— the view makes that split visible rather than pretending eight daemons are
 always busy.
 
 ### Live supervisor (`supervisor.py`) — the skill's own live harness

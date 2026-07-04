@@ -2,7 +2,7 @@
 
 ### v1 Completed
 
-- ✅ Org structure (seven agents, responsibility boundaries, relationship diagram)
+- ✅ Org structure (eight agents, responsibility boundaries, relationship diagram)
 - ✅ Context engineering spec (each agent's context.md)
 - ✅ Addressing protocol + work chain
 - ✅ Installation script (idempotent)

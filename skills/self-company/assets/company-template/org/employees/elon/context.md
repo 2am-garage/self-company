@@ -11,10 +11,11 @@ reads:
   - org/employees/elon/
   
   # Department summaries (not raw details)
-  - org/employees/bob/log.md           # RD performance (performance tier)
+  - org/employees/bob/log.md           # Build performance (performance tier)
   - org/employees/gibby/log.md         # QA performance
   - org/employees/tony/log.md          # Improvement engineer diagnostics and proposals summary
   - org/employees/tom/log.md           # IT/Ops infrastructure status
+  - org/employees/mike/log.md          # R&D research briefs summary
   - org/employees/july/log.md          # HR people-tuning log
   - org/employees/phoebe/log.md        # PM dispatch and progress tracking summary
   

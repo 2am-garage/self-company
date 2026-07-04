@@ -136,7 +136,7 @@ Scheduled to run at a fixed day and time each week (default **Monday 02:00 local
 1. **Tony (Sonnet)**: Diagnose entropy, RAG rebuild, overall memory inventory.
 2. **Gibby (Sonnet)**: Full memory source verification, random sampling of build pipeline.
 3. **Phoebe (Sonnet)**: Final ORGANIZE memory decision, plan state review.
-4. **July (Sonnet)**: Four-staff performance review, recommend enable/disable adjustments.
+4. **July (Sonnet)**: Five-staff performance review, recommend enable/disable adjustments.
 5. **Tom (Sonnet)**: Infra state check, backup, completeness verification.
 
 ### Action Breakdown
