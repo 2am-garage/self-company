@@ -101,6 +101,45 @@ SYSTEM_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# B4 (Phase 5 Item 4, N5): quarantine observations about the COMPANY'S OWN
+# work-state — maintenance/phases/entropy/PR progress is transient session
+# state about this machinery, not durable Chairman knowledge (and via N1 such
+# records were racing toward permanent L2). Deliberately NARROW: every
+# alternative names the company's own machinery or a repo-workflow event
+# ("phase 4 merged", "entropy dropped"), so a genuine standing preference
+# ("wants push notifications, not Discord") never matches.
+# Gibby (Phase 5 red-team): a Chairman who genuinely works ON entropy/ML/repos
+# must not have real facts eaten, so (a) "entropy" only matches with a
+# movement/valued verb — bare information-theory nouns ("the entropy rate of
+# Markov chains", "a maximum-entropy score function") survive; (b) the PR
+# alternate requires a SPECIFIC numbered PR ("PR #28 merged") — numberless
+# workflow preferences ("wants PRs merged via squash") survive. Numberless
+# noise ("the pull request was merged") is accepted leakage: the capture
+# prompt's exclusion is the first line of defense and decay kills the residue;
+# a silently eaten preference is permanent.
+META_NOISE_RE = re.compile(
+    r"(?:\bself-company\b"
+    r"|\bentropy\s+(?:(?:score|rate)\s+)?"
+    r"(?:dropped|rose|jumped|tripled|doubled|fell|climbed"
+    r"|went\s+(?:up|down)\b|went\s+(?:from|to)\s+[0-9.]"
+    r"|(?:is|was)\s+(?:now\s+)?[0-9.]|hit\s+[0-9.]|reached\s+[0-9.])"
+    r"|\bupgrade[\s-]candidates?\b"
+    r"|\b(?:phase|sprint)\s*#?\d+\s+(?:was\s+|is\s+|got\s+)?"
+    r"(?:merged|landed|completed?|done|shipped|approved)"
+    r"|\b(?:pr|pull\s+request)s?\s*#?\s*\d+\s+(?:was\s+|is\s+|got\s+|are\s+)?"
+    r"(?:merged|landed|opened?|approved|closed)"
+    r"|\b(?:merged|landed|opened|approved|closed)\s+(?:the\s+)?"
+    r"(?:pr|pull\s+request)s?\s*#?\s*\d+\b"
+    r"|\bmemory\s+(?:pipeline|tiers?|entropy|consolidation)\b"
+    r"|\bconsolidation\s+(?:pass|run|agent|backlog)\b"
+    r"|\bdecay\s+(?:pass|sweep|run|score)\b"
+    r"|\bL[012][\s-](?:working|warm|cold)\b"
+    r"|\badjudications?\b"
+    r"|\bfail[\s-]streak\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 # ----------------------------------------------------------------------------
 # Transcript reading (deterministic, unit-tested)
@@ -206,6 +245,14 @@ def build_capture_prompt(chairman_lines, existing_ids, today=None,
         "failed at 2am', 'the cron didn't fire', 'RAG isn't installed'. A standing "
         "*preference* the Chairman states (e.g. 'I want push notifications, not "
         "Discord') IS valid; a one-off system glitch is NOT.\n\n"
+        "ALSO EXCLUDE this company's OWN work-state: transient session-state "
+        "about this memory system's maintenance, improvement phases, entropy "
+        "scores, PRs/merges, surveys, upgrade candidates, or consolidation/decay "
+        "runs is NOT a Chairman fact. Examples to REJECT: 'phase 4 merged and "
+        "entropy dropped', 'the survey found 21 upgrade candidates', 'we fixed "
+        "the reinforce semantics today'. Capture only DURABLE "
+        "preferences/profile/projects facts about the person — things that will "
+        "still be true and useful weeks from now.\n\n"
         f"Existing memory ids (do not duplicate): {existing}\n\n"
         f"{recent_block}"
         "Return ONLY a JSON array (no prose), each item:\n"
@@ -355,11 +402,17 @@ def existing_memory_ids(company_dir):
 
 
 def _bump_reinforce(path, source_lines, safe_sid, today):
-    """Reinforce an existing memory in place: reinforce_count+1,
-    last_reinforced=today, new source tokens appended (deduped) — mirrors
-    reinforce_memory.py::apply_reinforcement's field updates, minus the
-    absorb/delete (CAPTURE never deletes). Returns True on success; any
-    failure returns False so the caller can fall back fail-safe."""
+    """Reinforce an existing memory in place: reinforce_count bumps at most
+    ONCE per distinct session id, last_reinforced=today, new source tokens
+    appended (deduped) — mirrors reinforce_memory.py::apply_reinforcement's
+    field updates, minus the absorb/delete (CAPTURE never deletes).
+
+    Phase 5 Item 1 (N1): rc is a CROSS-SESSION recurrence signal (the rc>=2 /
+    rc>=4 promotion gates trust it). If the target's sources already carry a
+    token for THIS session id, a restatement merges the new source token but
+    does NOT increment rc — one session can add at most +1 no matter how many
+    times the model restates the fact. Returns True on success; any failure
+    returns False so the caller can fall back fail-safe."""
     try:
         text = Path(path).read_text(encoding="utf-8")
         lines = text.split("\n")
@@ -367,15 +420,21 @@ def _bump_reinforce(path, source_lines, safe_sid, today):
         if not fm or close < 0:
             return False
         items = SOURCE_ITEM_RE.findall(fm.get("sources", ""))
+        # Distinct-session check BEFORE merging: a token "[<sid>#<line>]" for
+        # this session id means this session already reinforced the memory.
+        session_prefix = f'"[{safe_sid}#'
+        already_this_session = any(it.startswith(session_prefix) for it in items)
         for s in source_lines or []:
             if str(s).lstrip("-").isdigit():
                 tok = f'"[{safe_sid}#{int(s)}]"'
                 if tok not in items:
                     items.append(tok)
         try:
-            rc = int(fm.get("reinforce_count", "1")) + 1
+            rc = int(fm.get("reinforce_count", "1"))
         except ValueError:
-            rc = 2
+            rc = 1
+        if not already_this_session:
+            rc += 1
         for i in range(1, close):
             key = lines[i].split(":", 1)[0].strip() if ":" in lines[i] else ""
             if key == "reinforce_count":
@@ -467,6 +526,9 @@ def write_l0(observations, session_id, company_dir, today=None):
         body = str(obs["body"]).strip().replace("\n", " ")
         if SYSTEM_NOISE_RE.search(body):
             continue  # A2: operational noise, not a Chairman memory — don't write
+        if META_NOISE_RE.search(body):
+            continue  # B4: company work-state (phases/entropy/PRs) — not a
+            #           Chairman fact; never write it as memory
 
         # Knowledge class {profile|projects|preferences}; safe default preferences
         # if the model omitted or mis-tagged it. The promoter routes on this to
