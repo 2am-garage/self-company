@@ -167,6 +167,20 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
     })
     _shared_self_declares_charter = None
 
+# --- Phase 6 Item 1: tombstone vocabulary --------------------------------------
+# The set of statuses that mark a memory as OUT of the active set lives in ONE
+# shared place (tombstone.py, same dir) so it can never drift across scanners
+# again. `absorbed` (written by the consolidation agent when it merges a dup into
+# a canonical) is a tombstone alongside `archived`/`defunct`. Best-effort import
+# with a verbatim fallback (same pattern as charter_ids / policy loader above).
+try:
+    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: tombstone.py)
+    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+
+    def is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+
 # Decay thresholds (must match decay.py)
 HL_BASE = 7.0
 HL_GROWTH = 0.5
@@ -344,10 +358,13 @@ def load_memories(memory_dir, include_archived=False):
 
             fm = parse_frontmatter(content)
 
-            # Skip archived unless requested. `defunct` is normalised to
-            # `archived` by parse_frontmatter (decay.py parity), so defunct
-            # stubs are excluded here too — and included by --include-archived.
-            if not include_archived and fm.get('status') == 'archived':
+            # Skip tombstones unless requested. The tombstone vocabulary
+            # (archived / defunct / absorbed) lives in the shared tombstone
+            # module so it can't drift: `defunct` is also normalised to
+            # `archived` by parse_frontmatter (decay.py parity), and `absorbed`
+            # (a consolidation-agent merge) is excluded here too — all included
+            # by --include-archived.
+            if not include_archived and is_tombstoned(fm):
                 continue
 
             # Extract body (after closing ---)
@@ -433,9 +450,29 @@ def load_adjudications(path):
 
 
 def distinct_pairs_from(adjudications):
-    """Set of sorted-tuple pairs adjudicated `distinct` (the ones entropy omits
-    from candidate lists and does not count)."""
+    """Set of sorted-tuple pairs adjudicated `distinct` (a false-positive pair).
+    Kept for the JSON provenance count; suppression uses `suppressed_pairs_from`
+    (which ALSO covers `duplicate` verdicts) — see below."""
     return {k for k, v in adjudications.items() if v['verdict'] == 'distinct'}
+
+
+def duplicate_pairs_from(adjudications):
+    """Set of sorted-tuple pairs adjudicated `duplicate` (Phase 6 Item 3). A
+    `duplicate` verdict means "already judged — being resolved via
+    tombstone/reap", so entropy must stop re-flagging it (else it re-surfaces in
+    scored dups + review candidates and re-inflates dup_rate every run until the
+    reap lands)."""
+    return {k for k, v in adjudications.items() if v['verdict'] == 'duplicate'}
+
+
+def suppressed_pairs_from(adjudications):
+    """Phase 6 Item 3: the set of pairs entropy omits from surfaced candidate
+    lists AND from the dup_rate / contradiction counts — pairs adjudicated
+    EITHER `distinct` (a false positive) OR `duplicate` (already judged, being
+    resolved via tombstone/reap). Stale-guard is applied downstream: a pair
+    whose ids are absent from the live memory set simply never matches, so it is
+    inert."""
+    return distinct_pairs_from(adjudications) | duplicate_pairs_from(adjudications)
 
 
 # ============================================================================
@@ -460,7 +497,7 @@ def _semantic_cosines(memories, band_candidates):
     return [float(row[i] @ row[j]) for i, j in band_candidates]
 
 
-def compute_dup_rate(memories, distinct_pairs=None):
+def compute_dup_rate(memories, suppressed_pairs=None):
     """
     Find approximate duplicates in two passes:
       1. Jaccard (cheap, always): word-overlap >= DUP_JACCARD -> duplicate.
@@ -483,17 +520,19 @@ def compute_dup_rate(memories, distinct_pairs=None):
     outcome is recorded in the module-level _SEMANTIC_META (surfaced in JSON)
     and a one-line notice goes to stderr — never a hard failure.
 
-    Item 7: `distinct_pairs` (a set of sorted-tuple id pairs adjudicated
-    `distinct`) is honoured — such a pair is NEVER surfaced as a duplicate or
-    review candidate and NEVER counted in dup_rate. Stale-guard: a pair whose
-    ids are absent from `memories` simply never matches, so it is inert.
+    Item 7 + Phase 6 Item 3: `suppressed_pairs` (a set of sorted-tuple id pairs
+    adjudicated EITHER `distinct` OR `duplicate`) is honoured — such a pair is
+    NEVER surfaced as a duplicate or review candidate and NEVER counted in
+    dup_rate. A `duplicate` verdict means "already judged, being resolved via
+    tombstone/reap" so it must stop re-flagging. Stale-guard: a pair whose ids
+    are absent from `memories` simply never matches, so it is inert.
 
     Returns: (dup_rate, duplicate_pairs)   [contract unchanged; review
     candidates are carried out-of-band via _SEMANTIC_META so they never touch
     the (dup_rate, pairs) contract]
     """
     global _SEMANTIC_META
-    distinct_pairs = distinct_pairs or set()
+    suppressed_pairs = suppressed_pairs or set()
     pairs = []
     review_candidates = []  # {'id_a','id_b','cosine'}; NOT scored duplicates
     n = len(memories)
@@ -513,10 +552,11 @@ def compute_dup_rate(memories, distinct_pairs=None):
 
             if pair_key in seen_pairs:
                 continue
-            # Item 7: adjudicated-distinct pairs are never candidates and never
-            # counted — skip before any scoring (covers Jaccard, the embedding
-            # band, and review candidates in one place).
-            if pair_key in distinct_pairs:
+            # Item 7 + Phase 6 Item 3: adjudicated pairs (distinct OR duplicate)
+            # are never candidates and never counted — skip before any scoring
+            # (covers Jaccard, the embedding band, and review candidates in one
+            # place).
+            if pair_key in suppressed_pairs:
                 continue
 
             sim = jaccard_similarity(memories[i]['body'], memories[j]['body'])
@@ -617,19 +657,20 @@ def slug_family_prefix(mem_id):
         return mem_id
     return parts[0]
 
-def compute_contradiction_score(memories, distinct_pairs=None):
+def compute_contradiction_score(memories, suppressed_pairs=None):
     """
     Detect contradictions: two memories about the same topic (same slug
     family OR Jaccard 0.5-0.8) that ALSO contain opposing keywords. Opposing
     keywords are required — sharing a topic without opposition is not a conflict.
 
-    Item 7: `distinct_pairs` (sorted-tuple id pairs adjudicated `distinct`) are
-    omitted from the surfaced contradiction candidate list and do not count in
-    the score. Stale-guard: pairs referencing absent ids simply never match.
+    Item 7 + Phase 6 Item 3: `suppressed_pairs` (sorted-tuple id pairs
+    adjudicated EITHER `distinct` OR `duplicate`) are omitted from the surfaced
+    contradiction candidate list and do not count in the score. Stale-guard:
+    pairs referencing absent ids simply never match.
 
     Returns: (contradiction_score, contradiction_pairs)
     """
-    distinct_pairs = distinct_pairs or set()
+    suppressed_pairs = suppressed_pairs or set()
     pairs = []
     n = len(memories)
 
@@ -645,8 +686,8 @@ def compute_contradiction_score(memories, distinct_pairs=None):
 
             if pair_key in seen_pairs:
                 continue
-            if pair_key in distinct_pairs:
-                continue  # adjudicated distinct — never a contradiction candidate
+            if pair_key in suppressed_pairs:
+                continue  # adjudicated (distinct/duplicate) — never a candidate
 
             # Same slug family (tier-aware prefix) OR topical similarity only
             # tells us two memories are ABOUT the same thing — that is necessary
@@ -931,20 +972,26 @@ def main():
     # Load memories
     memories = load_memories(args.memory_dir, include_archived=args.include_archived)
 
-    # Item 7: adjudication ledger — pairs judged `distinct` are dropped from
-    # candidate lists and excluded from dup_rate / contradiction_score.
+    # Item 7 + Phase 6 Item 3: adjudication ledger — pairs judged EITHER
+    # `distinct` (false positive) OR `duplicate` (already judged, resolving via
+    # tombstone/reap) are dropped from candidate lists and excluded from
+    # dup_rate / contradiction_score.
     adjudications = load_adjudications(args.adjudications)
     distinct_pairs = distinct_pairs_from(adjudications)
+    duplicate_pairs = duplicate_pairs_from(adjudications)
+    suppressed_pairs = distinct_pairs | duplicate_pairs
     live_ids = {m['id'] for m in memories}
     applied_distinct = sorted(list(k) for k in distinct_pairs
                               if k[0] in live_ids and k[1] in live_ids)
+    applied_suppressed = sorted(list(k) for k in suppressed_pairs
+                                if k[0] in live_ids and k[1] in live_ids)
 
     # Item 6 anti-abuse: non-blessed memories self-declaring charter (suspicious).
     suspicious_charter_ids = find_suspicious_charter(memories)
 
     # Compute dimensions
-    dup_rate, dup_pairs = compute_dup_rate(memories, distinct_pairs=distinct_pairs)
-    contra_score, contra_pairs = compute_contradiction_score(memories, distinct_pairs=distinct_pairs)
+    dup_rate, dup_pairs = compute_dup_rate(memories, suppressed_pairs=suppressed_pairs)
+    contra_score, contra_pairs = compute_contradiction_score(memories, suppressed_pairs=suppressed_pairs)
     stale_rate, stale_ids = compute_stale_rate(memories, now_date)
     unverified_rate, unverified_ids = compute_unverified_rate(memories)
 
@@ -986,12 +1033,18 @@ def main():
         },
         # Item 2: whether the semantic (embedding) dedup pass ran or fell back.
         'semantic_dedup': _SEMANTIC_META,
-        # Item 7: adjudication ledger provenance — how many distinct-verdict
-        # pairs were loaded and which live pairs they suppressed this run.
+        # Item 7 + Phase 6 Item 3: adjudication ledger provenance — how many
+        # distinct/duplicate-verdict pairs were loaded and which live pairs they
+        # suppressed this run. `distinct_pairs`/`applied_distinct_pairs` kept for
+        # back-compat; `duplicate_pairs`/`suppressed_pairs`/`applied_suppressed_pairs`
+        # added (extend-not-break) so a `duplicate` verdict's effect is visible.
         'adjudications': {
             'source_file': args.adjudications if Path(args.adjudications).exists() else None,
             'distinct_pairs': len(distinct_pairs),
+            'duplicate_pairs': len(duplicate_pairs),
+            'suppressed_pairs': len(suppressed_pairs),
             'applied_distinct_pairs': applied_distinct,
+            'applied_suppressed_pairs': applied_suppressed,
         },
         'config': {
             'source_file': args.config if config_exists else None,

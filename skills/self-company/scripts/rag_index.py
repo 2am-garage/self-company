@@ -21,6 +21,17 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import urllib.request
+
+# Phase 6 Item 1: shared tombstone vocabulary (archived/defunct/absorbed) so a
+# tombstoned memory can never leak into the RAG index. Best-effort import.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
+except Exception:  # pragma: no cover - authoritative copy: tombstone.py
+    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+
+    def is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
 import urllib.error
 
 # ============================================================================
@@ -149,7 +160,7 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
             elif key == "owner":
                 result["owner"] = val_str if val_str else None
             elif key == "status":
-                if val_str in ("active", "archived"):
+                if val_str == "active" or val_str in TOMBSTONE_STATUSES:
                     result["status"] = val_str
                 else:
                     result["_parse_errors"].append(f"Invalid status: {val_str}")
@@ -392,7 +403,7 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
             allowed = ("L0", "L1", "L2") if include_l0 else ("L1", "L2")
             if mem["tier"] not in allowed:
                 continue
-            if mem["status"] == "archived":
+            if is_tombstoned(mem):
                 continue
             if mem["id"] is None:
                 report["warnings"].append(f"{path}: missing id, skipped")

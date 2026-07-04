@@ -31,9 +31,18 @@ read-only.
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
+
+# Phase 6 Item 1: shared tombstone vocabulary (archived/defunct/absorbed).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from tombstone import is_tombstoned
+except Exception:  # pragma: no cover - authoritative copy: tombstone.py
+    def is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in ("archived", "defunct", "absorbed")
 
 # Valid categories (kept in sync with decay.py::L2_CATEGORIES and
 # capture-trigger.py::CATEGORIES).
@@ -67,8 +76,7 @@ def scan(memory_dir, include_archived=False):
             continue
         if not fm or not fm.get("id"):
             continue
-        status = fm.get("status", "")
-        if not include_archived and status in ("archived", "defunct"):
+        if not include_archived and is_tombstoned(fm):
             continue  # tombstones don't need routing; skip unless asked
         total += 1
         if fm.get("category") not in CATEGORIES:

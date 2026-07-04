@@ -374,16 +374,20 @@ PY
 The deterministic scanners in THIS run already measured the backlog below. Do NOT
 re-scan the corpus for duplicates — work the list TOP-DOWN, PAIR BY PAIR:
 - Each pair is ATOMIC: complete the FULL sequence for one pair — read BOTH files
-  -> merge -> write the canonical -> delete the absorbed file -> adjudicate —
+  -> merge -> write the canonical -> TOMBSTONE the absorbed file -> adjudicate —
   BEFORE touching the next pair. NEVER interleave steps across pairs: a
-  half-done pair (merged-but-not-deleted, or deleted-but-not-merged) corrupts
-  memory if this run is killed mid-flight.
+  half-done pair (merged-but-not-tombstoned, or tombstoned-but-not-merged)
+  corrupts memory if this run is killed mid-flight.
 - For each SCORED DUPLICATE pair: read BOTH memory files (find each id under
   .company/memory/). If they are truly the SAME observation, merge into the
   canonical (the higher-tier one, else the older created date): union the sources
   lists, reinforce_count++ ONLY if the absorbed side adds a session id the
-  canonical doesn't already have, last_reinforced=today, then delete the
-  absorbed file. NEVER delete an L1/L2 file; if either side is L2, only annotate.
+  canonical doesn't already have, last_reinforced=today, then TOMBSTONE the
+  absorbed file via an Edit — set its frontmatter \`status: absorbed\` and add
+  \`invalid_at: $DATE\`. NEVER run rm / os.remove / any shell delete: physical
+  removal is the deterministic decay reap's job, not yours (your \`rm\` is
+  sandbox-blocked anyway — attempting it just fails the run). NEVER tombstone an
+  L1/L2 file; if either side is L2, only annotate.
 - If a pair is DISTINCT (a false positive), record the verdict so it never
   resurfaces: append ONE row to .company/ops/adjudications.md, exactly this
   table format:
@@ -398,10 +402,12 @@ $BACKLOG
 EOF
     else
       echo "- agent prompt: generic (no scored candidates in this run's entropy output)" >> "$LOG"
-      read -r -d '' CONSOLIDATE_SECTION <<'EOF' || true
+      read -r -d '' CONSOLIDATE_SECTION <<EOF || true
 - Read L0-working memories. Where two L0 entries are clearly the same observation,
-  reinforce (merge sources, reinforce_count++, last_reinforced=today) into one and
-  remove the exact duplicate.
+  reinforce (merge sources, reinforce_count++, last_reinforced=today) into one, then
+  TOMBSTONE the absorbed duplicate via an Edit — set its frontmatter
+  \`status: absorbed\` and add \`invalid_at: $DATE\`. NEVER run rm / os.remove / any
+  shell delete: physical removal is the deterministic decay reap's job, not yours.
 EOF
     fi
     read -r -d '' PROMPT <<EOF || true
@@ -416,7 +422,8 @@ Working dir: $PROJECT_DIR . Memory lives in .company/memory (L0-working, L1-warm
 Do a CONSERVATIVE consolidation pass per references/pipeline.md and references/memory-tiers.md:
 $CONSOLIDATE_SECTION
 - Promote an L0 memory to L1-warm only if reinforce_count>=2; L1 to L2-cold only if >=4.
-- Do NOT invent memories, do NOT delete anything that is not a true duplicate, do NOT
+- Do NOT invent memories, do NOT tombstone anything that is not a true duplicate, do NOT
+  run rm/os.remove on ANY memory file (physical removal is decay's reap job), do NOT
   touch L2 except to add a contradiction note. Keep frontmatter valid (policy.md §4.2).
 - Append a short summary of what you changed to .company/ops/logs/daily-$DATE.md.
 

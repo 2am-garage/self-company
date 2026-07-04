@@ -51,6 +51,19 @@ def _reexec_into_rag_venv():
 
 _reexec_into_rag_venv()
 
+# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) lives in
+# ONE shared place so it can't drift. Best-effort import + verbatim fallback,
+# same pattern as the charter/policy loaders elsewhere in this dir. A tombstoned
+# memory must not be a reinforcement candidate (it can't become canonical, and
+# an already-absorbed dup must not re-surface).
+try:
+    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: tombstone.py)
+    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+
+    def is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+
 try:
     import rag_embed
     import numpy as np
@@ -90,7 +103,7 @@ def load_memories(memory_dir):
         except OSError:
             continue
         fm, close = parse_frontmatter(text)
-        if not fm or not fm.get("id") or fm.get("status") == "archived":
+        if not fm or not fm.get("id") or is_tombstoned(fm):
             continue
         body = "\n".join(text.split("\n")[close + 1:]).strip()
         out.append({
