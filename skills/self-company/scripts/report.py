@@ -24,8 +24,11 @@ Status verdict:
   keep  — something substantive moved (entropy dropped, decayed, verified, or
           upgrade candidates surfaced) — the "keep" of a good experiment
   flat  — ran clean but nothing changed (no-op maintenance) — like "discard"
-  skip  — agent step was skipped (daily cap hit / no claude CLI)
-  fail  — the agent step errored (the "crash")
+  skip  — agent step was BENIGNLY skipped (daily cap hit / no claude CLI)
+  fail  — the agent died (rc!=0), TIMED OUT, or was AUTH_FAIL-skipped — an
+          unhealthy agent day is never masked as keep/skip, even when the
+          deterministic half moved things (Phase 5 Item 3 / N4: the 18:07
+          "keep | verify +68" row on a dead-agent day was the bug)
 
 Usage:
   report.py [--company DIR]                 # print markdown ledger to stdout
@@ -89,21 +92,53 @@ def collect(company):
                 if em:
                     r["entropy"] = float(em.group(1))
                     r["memories"] = int(em.group(2))
-                if ln.startswith("- agent"):
-                    r["agent"] = "ok" if " ok" in ln else ("skipped" if "skip" in ln else "failed")
+                if ln.startswith(("- agent:", "- agent (", "- agent prompt")):
+                    # B3 (Phase 5 Item 3, N4): classify the agent OUTCOME
+                    # honestly. The old substring test counted an AUTH_FAIL
+                    # skip as benign "skipped" and knew nothing of timeouts —
+                    # a green ledger row on a red day. "- agent prompt: ..."
+                    # is a breadcrumb, not an outcome (but remember we saw it:
+                    # a prompt with NO outcome line means the run died before
+                    # it could record one -> failed, see below).
+                    # Only daily-run.sh's own writer shapes count ("- agent:",
+                    # "- agent (", "- agent prompt"): a CAPTURE line for a
+                    # memory whose slug starts with "agent" ("- agent-model-…
+                    # (L0) — pending_verify") is DATA, not an outcome — it must
+                    # never flip a healthy day red (or mask a red day).
+                    if ln.startswith("- agent prompt"):
+                        r["_agent_attempted"] = True
+                    elif "AUTH_FAIL" in ln or "auth pre-flight" in ln:
+                        r["agent"] = "auth-fail"
+                    elif "TIMEOUT" in ln:
+                        r["agent"] = "timeout"
+                    elif " ok" in ln:
+                        r["agent"] = "ok"
+                    elif "skip" in ln:
+                        r["agent"] = "skipped"   # benign: cap reached / no CLI
+                    else:
+                        r["agent"] = "failed"
                 # agent consolidation prose: count merges / promotions if present
                 if "absorbed" in ln.lower() or re.search(r"→ status: archived", ln):
                     r["merged"] += 1
                 if re.search(r"promoted|L0\s*->\s*L1|L0→L1", ln):
                     r["promoted"] += 1
                 i += 1
+            # B3: an agent prompt was built but NO outcome line follows — the
+            # run died before it could record one (no-output crash). Honest
+            # classification: failed.
+            if r.pop("_agent_attempted", False) and r["agent"] is None:
+                r["agent"] = "failed"
             rows.append(r)
     rows.sort(key=lambda x: x["ts"])
     return rows
 
 
 def verdict(r, prev_entropy):
-    if r["agent"] == "failed":
+    # B3 (Phase 5 Item 3, N4): a run where the agent died (rc!=0), timed out,
+    # or was AUTH_FAIL-skipped is a FAILED run — the deterministic half's
+    # progress is noted in the description column but can never turn the
+    # verdict green. Only benign skips (daily cap / no CLI) stay `skip`.
+    if r["agent"] in ("failed", "timeout", "auth-fail"):
         return "fail"
     moved = (
         r["drop"] or r["demote"] or r["archive"] or r["upgrade"]
@@ -119,6 +154,14 @@ def verdict(r, prev_entropy):
 
 def describe(r):
     bits = []
+    # B3: agent health leads the description on a red day — the deterministic
+    # half's progress follows (reported, but it never greens the verdict).
+    if r["agent"] == "timeout":
+        bits.append("agent TIMEOUT (partial trail in agent log)")
+    elif r["agent"] == "failed":
+        bits.append("agent died")
+    elif r["agent"] == "auth-fail":
+        bits.append("AUTH_FAIL — run /login")
     if r["verified"]:
         bits.append(f"verify +{r['verified']}")
     if r["drop"]:

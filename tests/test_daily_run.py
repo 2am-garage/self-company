@@ -69,15 +69,61 @@ class TestDailyRun(unittest.TestCase):
             subprocess.run(["rm", "-rf", d])
 
     def test_no_agent_applies_decay_to_stale(self):
+        # Phase 5 Item 2 (N2): this previously asserted the stale L0 was
+        # physically deleted — drop is now a SOFT-DELETE. The file remains as
+        # a recoverable tombstone (status: archived + invalid_at).
         d = _fresh_project()
         try:
             company = os.path.join(d, ".company")
             _write_mem(company, "obs-stale", last_reinforced="2026-05-01")  # ~56d -> drop
             r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
             self.assertEqual(r.returncode, 0, r.stderr)
-            # stale L0 should have been dropped by decay --apply
-            self.assertFalse(
-                os.path.exists(os.path.join(company, "memory", "L0-working", "obs-stale.md")))
+            path = os.path.join(company, "memory", "L0-working", "obs-stale.md")
+            self.assertTrue(os.path.exists(path), "drop must tombstone, not unlink")
+            with open(path) as f:
+                txt = f.read()
+            self.assertIn("status: archived", txt)
+            self.assertIn("invalid_at:", txt)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_snapshot_created_before_mutation_and_rotated(self):
+        # Phase 5 Item 2 (N2): a real (non-dry) run tars memory/ to
+        # .company/backups/mem-<UTCts>.tar.gz BEFORE mutating, and rotates to
+        # the newest BACKUP_KEEP (policy §7.8 — overridden to 3 here).
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            with open(os.path.join(company, "org", "policy.md"), "a") as f:
+                f.write("\n| `BACKUP_KEEP` | **3** | test override | ✓ |\n")
+            bdir = os.path.join(company, "backups")
+            os.makedirs(bdir)
+            for i in range(4):  # pre-existing older snapshots
+                with open(os.path.join(bdir, f"mem-0001010{i}T000000Z.tar.gz"), "w") as f:
+                    f.write("old")
+            _write_mem(company, "obs-fresh")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            backups = sorted(os.listdir(bdir))
+            self.assertEqual(len(backups), 3)              # rotated at N
+            self.assertNotIn("mem-00010100T000000Z.tar.gz", backups)  # oldest gone
+            self.assertTrue(backups[-1].startswith("mem-2"))  # fresh one kept
+            self.assertIn("- backup: memory -> backups/mem-", _read_log(company))
+            # the snapshot actually contains the memory tree
+            out = subprocess.run(["tar", "-tzf", os.path.join(bdir, backups[-1])],
+                                 capture_output=True, text=True)
+            self.assertIn("memory/L0-working/obs-fresh.md", out.stdout)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_dry_run_never_snapshots(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-fresh")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--dry-run"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(company, "backups")))
         finally:
             subprocess.run(["rm", "-rf", d])
 
@@ -113,12 +159,20 @@ def _read_log(company):
 
 
 def _fake_rag_venv(company, script_body):
-    """Plant a fake .company/.rag-venv/bin/python so the reinforce step 'runs'."""
+    """Plant a fake .company/.rag-venv/bin/python so the reinforce step 'runs'.
+
+    Phase 5 C2: entropy.py now re-execs into this same project venv (resolved
+    from --memory-dir, not cwd), so the fake interpreter must apply its canned
+    behaviour ONLY to reinforce_memory.py and pass every other script through
+    to the real interpreter (the re-exec sets SC_RAG_REEXEC, so no loop)."""
     bindir = os.path.join(company, ".rag-venv", "bin")
     os.makedirs(bindir, exist_ok=True)
     py = os.path.join(bindir, "python")
     with open(py, "w") as f:
-        f.write("#!/usr/bin/env bash\n" + script_body)
+        f.write("#!/usr/bin/env bash\n"
+                'if [[ "${1:-}" != *reinforce_memory.py ]]; then\n'
+                '  exec python3 "$@"\n'
+                "fi\n" + script_body)
     os.chmod(py, 0o755)
     return py
 
@@ -278,6 +332,66 @@ class TestDailyRunAgentPrompt(unittest.TestCase):
             self.assertIn("Read L0-working memories", prompt)   # today's generic text
             self.assertNotIn("SCORED DUPLICATE pairs", prompt)
             self.assertIn("agent prompt: generic", _read_log(company))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_prompt_states_actual_budget_and_atomic_pairs(self):
+        # B3 (Phase 5 Item 3): the prompt must state the REAL seconds budget
+        # (the timeout value), demand a pre-exhaustion hard-stop summary line,
+        # and require pair-by-pair ATOMIC completion.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            self._write_body_mem(company, "pref-dark-theme-one", self.BODY)
+            self._write_body_mem(company, "pref-dark-theme-two", self.BODY)
+            promptfile = os.path.join(d, "prompt.txt")
+            env = {"PATH": _fake_claude(d) + os.pathsep + os.environ["PATH"],
+                   "FAKE_CLAUDE_PROMPT_FILE": promptfile,
+                   "SELF_COMPANY_DAILY_TIMEOUT": "123"}
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d], env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(promptfile) as f:
+                prompt = f.read()
+            self.assertIn("HARD limit of 123 seconds", prompt)  # actual budget
+            self.assertIn("AGENT SUMMARY:", prompt)             # hard-stop line
+            self.assertIn("Each pair is ATOMIC", prompt)
+            self.assertIn("NEVER interleave steps across pairs", prompt)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_timeout_preserves_partial_output_and_logs_explicit_line(self):
+        # B3 (Phase 5 Item 3, N3): a timed-out agent must leave (a) whatever
+        # it streamed before the kill in the audit log and (b) an explicit
+        # "TIMEOUT after Ns" line in both logs (report.py keys on it).
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a")
+            bindir = os.path.join(d, "fakebin")
+            os.makedirs(bindir, exist_ok=True)
+            with open(os.path.join(bindir, "claude"), "w") as f:
+                f.write('#!/usr/bin/env bash\n'
+                        'if [[ "${1:-}" == "auth" ]]; then echo \'{"loggedIn": true}\'; exit 0; fi\n'
+                        'echo "PARTIAL-STREAM-EVENT-1"\n'   # flushed pre-kill
+                        'sleep 30\n')
+            os.chmod(os.path.join(bindir, "claude"), 0o755)
+            env = {"PATH": bindir + os.pathsep + os.environ["PATH"],
+                   "SELF_COMPANY_DAILY_TIMEOUT": "1"}
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d], env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            date = _today()
+            with open(os.path.join(company, "ops", "logs",
+                                   f"agent-{date}.log")) as f:
+                agent_log = f.read()
+            self.assertIn("PARTIAL-STREAM-EVENT-1", agent_log)  # partial kept
+            self.assertIn("agent: TIMEOUT after 1s (partial output above)",
+                          agent_log)
+            text = _read_log(company)
+            self.assertIn("- agent: TIMEOUT after 1s (rc 124)", text)
+            self.assertIn("partial output in agent-", text)
+            # timeout grows the fail streak like any agent failure
+            with open(os.path.join(company, "ops", "auth-fail.marker")) as f:
+                self.assertIn("reason=agent", f.read())
         finally:
             subprocess.run(["rm", "-rf", d])
 
