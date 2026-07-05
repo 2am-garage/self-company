@@ -4,7 +4,7 @@
 #
 # Ships the scheduling mechanism *inside the skill* (Tom's domain). Each company
 # (project) installs TWO OS crontab entries — (1) daily-run.sh every 6h (4×/day,
-# internal maintenance) and (2) research-scan.sh weekly (Tony's external survey).
+# internal maintenance) and (2) research-scan.sh weekly (Mike's external survey).
 #
 # MULTI-COMPANY (Phase 7): the crontab is treated as a KEYED SET of companies —
 # one entry pair per project, every operation scoped by a stable project key
@@ -112,7 +112,7 @@ DEFAULT_RESEARCH_MIN=$(( 0x$_h2 % 60 ))
 
 CRON_MIN="${SELF_COMPANY_CRON_MIN:-$DEFAULT_MIN}"
 CRON_EXPR="$CRON_MIN */6 * * *"          # 4× a day, every 6h, staggered minute
-# Weekly external research scan (Tony) — Sunday, off-peak, staggered minute.
+# Weekly external research scan (Mike) — Sunday, off-peak, staggered minute.
 RESEARCH_EXPR="${SELF_COMPANY_RESEARCH_CRON:-$DEFAULT_RESEARCH_MIN 3 * * 0}"
 
 CLAUDE_BIN="$(command -v claude || echo "$HOME/.local/bin/claude")"

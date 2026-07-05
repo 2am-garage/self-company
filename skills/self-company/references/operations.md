@@ -73,6 +73,11 @@ poll only as a fallback.
 
 `schedule.sh` owns Trigger #2 (the clock). One deployment installs **two** OS
 crontab lines per project: `daily-run.sh` every 6h and `research-scan.sh` weekly.
+The two lines mirror the role split — the 6-hourly line is Tony's *internal*
+maintenance; the weekly line is **Mike's *external* research pass** (R&D
+Researcher): a bounded headless `claude -p` that surveys the outside world and
+writes a dated, cited BRIEF to `ops/research/research-<date>.md`, then feeds the
+mechanism-level items to `ops/plans/proposals-<date>.md` for Tony/Elon.
 The Chairman deploys the skill to several repos, so the scheduler treats the
 crontab as a **keyed set of companies** — one entry pair per project, every
 operation scoped by a stable per-project key (`sha1(abs PROJECT_DIR)[:12]`).

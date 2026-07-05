@@ -173,7 +173,11 @@ treats the crontab as a keyed set of companies: each project's cron lines are
 namespaced by a `sha1(path)` key so installing one repo never evicts another,
 minutes are auto-staggered (`sha1(path) % 60`) so N companies don't stack on one
 minute, and `list`/`status --all`/`prune`/scoped `uninstall` manage the fleet
-(orphan = a project whose `.company/` is gone). **Catch-Up** — a `SessionStart`
+(orphan = a project whose `.company/` is gone). The two cron lines mirror the role
+split: the 6-hourly `daily-run.sh` is Tony's internal maintenance, while the weekly
+`research-scan.sh` is **Mike's external research pass** — it writes a dated, cited
+brief to `ops/research/` and appends mechanism-level proposals for Tony/Elon.
+**Catch-Up** — a `SessionStart`
 hook (`notify-status.py --emit-hook`) pushes one summary when unattended runs moved
 something substantive; push only, never Discord. **Ledger** — `report.py` writes
 `ops/reports/ledger.md`, an autoresearch-style table with entropy as the headline
