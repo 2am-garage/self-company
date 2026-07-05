@@ -53,6 +53,7 @@ CONSTANT_SPECS = {
     "CAPTURE_COOLDOWN_MINUTES": int,
     "BACKUP_KEEP": int,
     "OFFLINE_GAP_DAYS": int,
+    "FLEET_AGENT_BUDGET": int,
 }
 
 # Candidate numeric token. We deliberately capture an optional sign and any

@@ -15,7 +15,13 @@
 # Ownership marks are namespaced:
 #   # self-company-daily    project=<key> path=<PROJECT_DIR>
 #   # self-company-research project=<key> path=<PROJECT_DIR>
-# where <key> = first 12 hex of sha1(PROJECT_DIR). Legacy un-namespaced lines
+#   # self-company-fleet    project=<key> path=<PARENT_DIR>   (Phase 8, holding co)
+# where <key> = first 12 hex of sha1(PROJECT_DIR). The three marks form ONE managed
+# set: every filter/list/prune/scoped-uninstall recognises the whole set, so a fleet
+# driver line is just another kind of managed line — not a special case. A parent
+# runs ONE fleet driver (fleet-run.sh over its registry) instead of per-sub daily
+# lines; `install`/`install-fleet` are mutually-exclusive ownership modes for a key
+# (installing one first evicts the other's lines for that project). Legacy un-namespaced lines
 # (no project=) are migrated to the namespaced form on the next install/uninstall
 # for their embedded path — never orphaned, never duplicated.
 #
@@ -29,12 +35,14 @@
 # leaves the box.
 #
 # Usage:
-#   schedule.sh install   [PROJECT_DIR]   # add/refresh this project's cron lines
-#   schedule.sh uninstall [PROJECT_DIR]   # remove only this project's lines
-#   schedule.sh status    [PROJECT_DIR]   # single-project view (back-compat)
-#   schedule.sh status --all              # fleet view (alias of list)
-#   schedule.sh list                      # fleet table: all companies + orphans
-#   schedule.sh prune                     # remove only orphan/dead-path lines
+#   schedule.sh install      [PROJECT_DIR] # add/refresh this project's daily+research
+#   schedule.sh install-fleet [PARENT_DIR] # add/refresh a holding-company fleet driver
+#                                          # (one fleet-run.sh line + weekly research)
+#   schedule.sh uninstall    [PROJECT_DIR] # remove only this project's lines (any mode)
+#   schedule.sh status       [PROJECT_DIR] # single-project view (back-compat)
+#   schedule.sh status --all               # fleet view (alias of list)
+#   schedule.sh list                       # table: all companies + orphans + TYPE
+#   schedule.sh prune                      # remove only orphan/dead-path lines
 #
 # Tunables (env):
 #   SELF_COMPANY_CRON_MIN      explicit minute override (else auto-staggered)
@@ -48,6 +56,10 @@ set -uo pipefail
 
 MARK_DAILY="# self-company-daily"
 MARK_RESEARCH="# self-company-research"
+MARK_FLEET="# self-company-fleet"
+# One ERE covering the whole managed mark set. Every filter/count reuses this so a
+# new managed kind (here: fleet) is added in ONE place, never per-callsite.
+SC_MARK_ERE='# self-company-(daily|research|fleet)'
 CMD="${1:-status}"
 PROJECT_DIR="${2:-${SELF_COMPANY_PROJECT_DIR:-$PWD}}"
 # For fleet-wide commands PROJECT_DIR may be a flag ("--all") — don't resolve it.
@@ -123,10 +135,16 @@ fi
 PATH_PREFIX="PATH='$CLAUDE_DIR:/usr/local/bin:/usr/bin:/bin'"
 MARK="$MARK_DAILY project=$PROJ_KEY path=$PROJECT_DIR"
 MARK_RES="$MARK_RESEARCH project=$PROJ_KEY path=$PROJECT_DIR"
+MARK_FLT="$MARK_FLEET project=$PROJ_KEY path=$PROJECT_DIR"
 RUNNER="cd '$PROJECT_DIR' && $PATH_PREFIX bash '$SCRIPTS_DIR/daily-run.sh' '$PROJECT_DIR' >> '$LOGFILE' 2>&1"
 LINE="$CRON_EXPR $RUNNER $MARK"
 RESEARCH_RUNNER="cd '$PROJECT_DIR' && $PATH_PREFIX bash '$SCRIPTS_DIR/research-scan.sh' '$PROJECT_DIR' >> '$LOGFILE' 2>&1"
 RESEARCH_LINE="$RESEARCH_EXPR $RESEARCH_RUNNER $MARK_RES"
+# Fleet driver (Phase 8): ONE line running fleet-run.sh over the parent's registry,
+# on the SAME 6-hourly staggered schedule as a daily line. Reuses all Phase-7
+# machinery (key, stagger, backend); the only difference is the runner + the mark.
+FLEET_RUNNER="cd '$PROJECT_DIR' && $PATH_PREFIX bash '$SCRIPTS_DIR/fleet-run.sh' '$PROJECT_DIR' >> '$LOGFILE' 2>&1"
+FLEET_LINE="$CRON_EXPR $FLEET_RUNNER $MARK_FLT"
 
 # --- project-scoped crontab filters ------------------------------------------
 # Remove ONLY the current project's self-company lines (namespaced by key, OR a
@@ -135,7 +153,7 @@ RESEARCH_LINE="$RESEARCH_EXPR $RESEARCH_RUNNER $MARK_RES"
 _without_project() {
   awk -v key="$PROJ_KEY" -v pdir="$PROJECT_DIR" '
     {
-      is_sc = ($0 ~ /# self-company-(daily|research)/)
+      is_sc = ($0 ~ /# self-company-(daily|research|fleet)/)
       if (is_sc && index($0, "project=" key)) next                        # ours (namespaced)
       if (is_sc && $0 !~ /project=/ && index($0, "\047" pdir "\047")) next # ours (legacy path)
       if ($0 ~ /^[[:space:]]*$/) next                                      # trim blanks
@@ -147,7 +165,7 @@ _without_project() {
 _our_lines() {
   awk -v key="$PROJ_KEY" -v pdir="$PROJECT_DIR" '
     {
-      if ($0 !~ /# self-company-(daily|research)/) next
+      if ($0 !~ /# self-company-(daily|research|fleet)/) next
       if (index($0, "project=" key)) { print; next }
       if ($0 !~ /project=/ && index($0, "\047" pdir "\047")) { print }
     }'
@@ -167,8 +185,24 @@ _parse_records() {
     }
     /# self-company-research/ {
       split($0,a,/[ \t]+/)
-      print "research\t" get_path($0) "\t" a[1] "\t" a[1] " " a[2] " " a[3] " " a[4] " " a[5]
+      print "research\t" get_path($0) "\t" a[1] "\t" a[1] " " a[2] " " a[3] " " a[4] " " a[5]; next
+    }
+    /# self-company-fleet/ {
+      split($0,a,/[ \t]+/)
+      print "fleet\t" get_path($0) "\t" a[1] "\t" a[1] " " a[2] " " a[3] " " a[4] " " a[5]
     }'
+}
+
+# Best-effort subsidiary count for a fleet parent. Parses <parent>/.company/org/
+# subsidiaries.md LENIENTLY (Item 1's file, owned by fleet.py): counts rows whose
+# first field is an absolute path. Missing file / unknown format -> "-". Never a
+# hard dependency on fleet.py.
+_fleet_subcount() {  # $1 = parent dir
+  local reg="$1/.company/org/subsidiaries.md"
+  [[ -f "$reg" ]] || { printf '%s' "-"; return; }
+  local n
+  n="$(grep -cE '(^|[|[:space:]-])/[^[:space:]|]' "$reg" 2>/dev/null)" || n=0
+  printf '%s' "$n"
 }
 
 # Extract the project path from a single crontab line (namespaced or legacy).
@@ -185,7 +219,7 @@ _line_path() {
 # Drop self-company lines whose project .company/ dir is gone (orphans); keep all
 # else. Never removes a line with a live .company/ or a non-self-company line.
 _prune_filter() {
-  local sc_re='# self-company-(daily|research)'
+  local sc_re="$SC_MARK_ERE"
   local line p
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" =~ $sc_re ]]; then
@@ -206,20 +240,32 @@ do_list() {
     echo "[schedule] no self-company companies scheduled"
     return 0
   fi
-  printf '%-48s %-12s %-9s %s\n' "PROJECT PATH" "DAILY(min)" "RESEARCH" "STATUS"
-  local paths p dmin research status
+  printf '%-44s %-6s %-5s %-9s %-5s %s\n' \
+    "PROJECT PATH" "TYPE" "MIN" "RESEARCH" "SUBS" "STATUS"
+  local paths p type dmin research subs status
   paths="$(printf '%s\n' "$recs" | awk -F'\t' 'NF>=2{print $2}' | sort -u)"
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
-    dmin="$(printf '%s\n' "$recs" | awk -F'\t' -v p="$p" '$1=="daily" && $2==p {print $3; exit}')"
-    [[ -z "$dmin" ]] && dmin="-"
+    # Driver kind: a fleet line makes this a holding company; else a daily line
+    # is a self-scheduled company; else it has only a research line.
+    if printf '%s\n' "$recs" | awk -F'\t' -v p="$p" '$1=="fleet" && $2==p{f=1} END{exit !f}'; then
+      type="fleet"
+      dmin="$(printf '%s\n' "$recs" | awk -F'\t' -v p="$p" '$1=="fleet" && $2==p {print $3; exit}')"
+      subs="$(_fleet_subcount "$p")"
+    elif printf '%s\n' "$recs" | awk -F'\t' -v p="$p" '$1=="daily" && $2==p{f=1} END{exit !f}'; then
+      type="daily"
+      dmin="$(printf '%s\n' "$recs" | awk -F'\t' -v p="$p" '$1=="daily" && $2==p {print $3; exit}')"
+      subs="-"
+    else
+      type="-"; dmin="-"; subs="-"
+    fi
     if printf '%s\n' "$recs" | awk -F'\t' -v p="$p" '$1=="research" && $2==p{f=1} END{exit !f}'; then
       research="yes"
     else
       research="no"
     fi
     if [[ -d "$p/.company" ]]; then status="ok"; else status="ORPHAN"; fi
-    printf '%-48s %-12s %-9s %s\n' "$p" "$dmin" "$research" "$status"
+    printf '%-44s %-6s %-5s %-9s %-5s %s\n' "$p" "$type" "$dmin" "$research" "$subs" "$status"
   done <<< "$paths"
 }
 
@@ -243,6 +289,30 @@ case "$CMD" in
     echo "[schedule] key:     $PROJ_KEY"
     echo "[schedule] log:     $LOGFILE"
     ;;
+  install-fleet)
+    # Holding-company mode: one fleet driver line (fleet-run.sh over PARENT's
+    # registry) + the weekly research line, replacing any prior lines for this key
+    # (a parent does NOT also carry a per-sub daily line — the fleet sweep runs the
+    # parent's own maintenance too). Same key/stagger/backend as `install`.
+    if [[ ! -d "$PROJECT_DIR/.company" ]]; then
+      echo "[schedule] error: $PROJECT_DIR/.company not found — run init_company.sh first." >&2
+      exit 1
+    fi
+    if [[ ! -f "$SCRIPTS_DIR/fleet-run.sh" ]]; then
+      # Non-fatal: fleet-run.sh ships as a sibling of this script; the cron line
+      # points at it regardless. Warn so a broken install is visible, don't abort.
+      echo "[schedule] warning: fleet-run.sh not found at $SCRIPTS_DIR — the cron line will point there; ensure the skill/plugin ships it." >&2
+    fi
+    mkdir -p "$(dirname "$LOGFILE")"
+    base="$(_cron_read | _without_project)"   # evict any prior lines for this key (incl. a plain daily)
+    { [[ -n "$base" ]] && printf '%s\n' "$base"
+      printf '%s\n%s\n' "$FLEET_LINE" "$RESEARCH_LINE"; } | _cron_write
+    echo "[schedule] installed: '$CRON_EXPR' (4×/day) -> fleet-run.sh (holding company)"
+    echo "[schedule] installed: '$RESEARCH_EXPR' (weekly) -> research-scan.sh"
+    echo "[schedule] parent:  $PROJECT_DIR"
+    echo "[schedule] key:     $PROJ_KEY"
+    echo "[schedule] log:     $LOGFILE"
+    ;;
   uninstall)
     if _cron_read | _our_lines | grep -q .; then
       _put "$(_cron_read | _without_project)"
@@ -256,10 +326,10 @@ case "$CMD" in
     ;;
   prune)
     before="$(_cron_read)"
-    n_before="$(printf '%s\n' "$before" | grep -cE '# self-company-(daily|research)' || true)"
+    n_before="$(printf '%s\n' "$before" | grep -cE "$SC_MARK_ERE" || true)"
     after="$(printf '%s\n' "$before" | _prune_filter)"
     _put "$after"
-    n_after="$(printf '%s\n' "$after" | grep -cE '# self-company-(daily|research)' || true)"
+    n_after="$(printf '%s\n' "$after" | grep -cE "$SC_MARK_ERE" || true)"
     removed=$(( n_before - n_after ))
     echo "[schedule] prune: removed $removed orphan line(s); $n_after self-company line(s) remain"
     ;;
@@ -269,14 +339,19 @@ case "$CMD" in
     elif _cron_read | _our_lines | grep -q .; then
       echo "[schedule] INSTALLED ($PROJECT_DIR, key=$PROJ_KEY):"
       ours="$(_cron_read | _our_lines)"
-      printf '%s\n' "$ours" | grep -F "$MARK_DAILY" || echo "  (daily: missing)"
+      # Report the driver line: fleet (holding company) takes precedence, else daily.
+      if printf '%s\n' "$ours" | grep -qF "$MARK_FLEET"; then
+        printf '%s\n' "$ours" | grep -F "$MARK_FLEET"
+      else
+        printf '%s\n' "$ours" | grep -F "$MARK_DAILY" || echo "  (daily: missing)"
+      fi
       printf '%s\n' "$ours" | grep -F "$MARK_RESEARCH" || echo "  (research: missing)"
     else
       echo "[schedule] not installed"
     fi
     ;;
   *)
-    echo "usage: schedule.sh [install|uninstall|status|list|prune] [PROJECT_DIR|--all]" >&2
+    echo "usage: schedule.sh [install|install-fleet|uninstall|status|list|prune] [PROJECT_DIR|--all]" >&2
     exit 2
     ;;
 esac

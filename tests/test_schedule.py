@@ -210,6 +210,131 @@ class TestFleet(ScheduleTestBase):
         self.assertEqual(len(self._sc_lines()), 4)
 
 
+class TestFleetMode(ScheduleTestBase):
+    """Phase 8 — holding-company fleet driver line (install-fleet)."""
+
+    def _fleet_lines(self, path=None):
+        return [ln for ln in self._sc_lines()
+                if "self-company-fleet" in ln and (path is None or path in ln)]
+
+    def _daily_lines(self, path):
+        return [ln for ln in self._sc_lines()
+                if "self-company-daily" in ln and path in ln]
+
+    def _research_lines(self, path):
+        return [ln for ln in self._sc_lines()
+                if "self-company-research" in ln and path in ln]
+
+    def _write_registry(self, parent, sub_paths):
+        org = os.path.join(parent, ".company", "org")
+        os.makedirs(org, exist_ok=True)
+        rows = "".join("| %s | 1 | true |\n" % p for p in sub_paths)
+        with open(os.path.join(org, "subsidiaries.md"), "w") as f:
+            f.write("# Subsidiaries\n| path | weight | enabled |\n|---|---|---|\n" + rows)
+
+    def test_install_fleet_one_line_no_daily(self):
+        # (a) install-fleet -> exactly one fleet line + research line, NO daily line
+        r = _run(["install-fleet", self.A], self.fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self._fleet_lines(self.A)), 1)
+        self.assertEqual(len(self._research_lines(self.A)), 1)
+        self.assertEqual(self._daily_lines(self.A), [])
+        line = self._fleet_lines(self.A)[0]
+        self.assertIn("fleet-run.sh", line)
+        self.assertIn("project=", line)
+        self.assertIn("path=" + self.A, line)
+        # staggered minute is a valid 0..59
+        minute = int(line.split()[0])
+        self.assertTrue(0 <= minute < 60)
+
+    def test_fleet_reinstall_no_duplicate(self):
+        _run(["install-fleet", self.A], self.fake)
+        _run(["install-fleet", self.A], self.fake)
+        self.assertEqual(len(self._fleet_lines(self.A)), 1)
+        self.assertEqual(len(self._research_lines(self.A)), 1)
+
+    def test_fleet_coexists_with_plain_install(self):
+        # (a) fleet P + plain A coexist; foreign intact
+        _run(["install-fleet", self.A], self.fake)
+        _run(["install", self.B], self.fake)
+        self.assertEqual(len(self._fleet_lines(self.A)), 1)
+        self.assertEqual(len(self._daily_lines(self.B)), 1)
+        self.assertEqual(self._fleet_lines(self.B), [])   # B is not a fleet parent
+        self.assertEqual(self._daily_lines(self.A), [])    # A is not a daily company
+        self.assertIn(self.foreign, self._lines())
+
+    def test_install_fleet_switches_mode(self):
+        # plain install then install-fleet on the SAME key -> daily evicted, fleet in
+        _run(["install", self.A], self.fake)
+        self.assertEqual(len(self._daily_lines(self.A)), 1)
+        _run(["install-fleet", self.A], self.fake)
+        self.assertEqual(self._daily_lines(self.A), [])
+        self.assertEqual(len(self._fleet_lines(self.A)), 1)
+        # and back again
+        _run(["install", self.A], self.fake)
+        self.assertEqual(self._fleet_lines(self.A), [])
+        self.assertEqual(len(self._daily_lines(self.A)), 1)
+
+    def test_list_shows_type_column(self):
+        # (b) list TYPE column: fleet vs daily
+        _run(["install-fleet", self.A], self.fake)
+        _run(["install", self.B], self.fake)
+        out = _run(["list"], self.fake).stdout
+        self.assertIn("TYPE", out)
+        a_row = next(ln for ln in out.splitlines() if self.A in ln)
+        b_row = next(ln for ln in out.splitlines() if self.B in ln)
+        self.assertIn("fleet", a_row)
+        self.assertIn("daily", b_row)
+
+    def test_list_shows_subcount(self):
+        # sub count read best-effort from subsidiaries.md; "-" when absent
+        _run(["install-fleet", self.A], self.fake)
+        out0 = _run(["list"], self.fake).stdout
+        a0 = next(ln for ln in out0.splitlines() if self.A in ln)
+        self.assertRegex(a0, r"fleet\s+\d+\s+\w+\s+-\s")   # SUBS="-" (no registry)
+        self._write_registry(self.A, ["/tmp/sub-one", "/tmp/sub-two"])
+        out1 = _run(["list"], self.fake).stdout
+        a1 = next(ln for ln in out1.splitlines() if self.A in ln)
+        self.assertRegex(a1, r"fleet\s+\d+\s+\w+\s+2\s")   # SUBS=2
+
+    def test_uninstall_fleet_scoped(self):
+        # (c) uninstall removes only the fleet parent's lines, leaves plain company
+        _run(["install-fleet", self.A], self.fake)
+        _run(["install", self.B], self.fake)
+        _run(["uninstall", self.A], self.fake)
+        self.assertEqual(self._fleet_lines(self.A), [])
+        self.assertEqual(self._research_lines(self.A), [])
+        self.assertEqual(len(self._daily_lines(self.B)), 1)
+        self.assertIn(self.foreign, self._lines())
+
+    def test_prune_scopes_fleet_orphan(self):
+        # (c) prune drops an orphaned fleet parent, keeps a live plain company
+        _run(["install-fleet", self.A], self.fake)
+        _run(["install", self.B], self.fake)
+        subprocess.run(["rm", "-rf", os.path.join(self.A, ".company")])
+        _run(["prune"], self.fake)
+        self.assertEqual(self._fleet_lines(self.A), [])
+        self.assertEqual(self._research_lines(self.A), [])
+        self.assertEqual(len(self._daily_lines(self.B)), 1)
+        self.assertIn(self.foreign, self._lines())
+
+    def test_status_reports_fleet_driver(self):
+        _run(["install-fleet", self.A], self.fake)
+        out = _run(["status", self.A], self.fake).stdout
+        self.assertIn("INSTALLED", out)
+        self.assertIn("self-company-fleet", out)
+        self.assertNotIn("(daily: missing)", out)
+
+    def test_foreign_untouched_full_fleet_lifecycle(self):
+        # (e) real-crontab seam: foreign line survives a full fleet lifecycle
+        _run(["install-fleet", self.A], self.fake)
+        _run(["install", self.B], self.fake)
+        _run(["uninstall", self.A], self.fake)
+        _run(["prune"], self.fake)
+        _run(["uninstall", self.B], self.fake)
+        self.assertIn(self.foreign, self._lines())
+
+
 class TestSingleProjectBackCompat(ScheduleTestBase):
     def test_status_single_project(self):
         r0 = _run(["status", self.A], self.fake)
