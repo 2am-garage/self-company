@@ -69,6 +69,42 @@ same split as `daily-run.sh`. Every call (fired or held) is appended to
 **poll adapter** can check them and call the same entry point — push primary,
 poll only as a fallback.
 
+### Multi-company scheduling (`schedule.sh`) — the crontab as a keyed set
+
+`schedule.sh` owns Trigger #2 (the clock). One deployment installs **two** OS
+crontab lines per project: `daily-run.sh` every 6h and `research-scan.sh` weekly.
+The Chairman deploys the skill to several repos, so the scheduler treats the
+crontab as a **keyed set of companies** — one entry pair per project, every
+operation scoped by a stable per-project key (`sha1(abs PROJECT_DIR)[:12]`).
+Installing company B never evicts company A. This is a general mechanism (N
+companies as data), the same generalization `tombstone.py`/`charter_ids.py` use —
+not a per-repo special case.
+
+- **Namespaced ownership.** Each managed line is tagged
+  `# self-company-daily project=<key> path=<PROJECT_DIR>` (and `-research`
+  likewise). install/uninstall filter on `project=<key>`, so they touch only the
+  current project; other companies and any non-self-company crontab line are left
+  byte-untouched. Idempotent per project (re-install replaces just its two lines).
+  A legacy un-namespaced line (`# self-company-daily`, no `project=`) whose
+  embedded `cd '<path>'` matches the project is migrated to the namespaced form on
+  the next install/uninstall — never orphaned, never duplicated.
+- **Auto-stagger.** The default daily minute is `sha1(path) % 60` (the weekly
+  research minute a second, independent hash slice), so N companies land on
+  different minutes across the hour instead of stacking on `:07` (concurrent
+  headless `claude -p`, token bursts). `SELF_COMPANY_CRON_MIN` still overrides
+  explicitly — accept the special case via config, don't hardcode it.
+- **Fleet commands.**
+  - `list` (or `status --all`) — table of every scheduled company: path, daily
+    minute, research present, and **ORPHAN** if that project's `.company/` is gone.
+  - `status [PROJECT]` — single-project view (back-compat).
+  - `install [PROJECT]` / `uninstall [PROJECT]` — scoped add / remove.
+  - `prune` — remove only orphan/dead-path lines; never a live one.
+- **Testability seam (C1).** All crontab I/O routes through `_cron_read` /
+  `_cron_write`. Set `SELF_COMPANY_CRONTAB_FILE` to read+write a file instead of
+  the real `crontab` binary (`SELF_COMPANY_CRONTAB_CMD` overrides the binary) — a
+  general injectable backend used by `tests/test_schedule.py` so the suite never
+  touches the user's real crontab.
+
 ---
 
 ## Session Catch-Up Notification (Chairman opt-in: "Option B")

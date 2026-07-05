@@ -168,7 +168,12 @@ stages, iron disciplines, worked examples). Start a spec from
 Day-to-day running of the company has four moving parts. **Triggers** — the company
 starts working four ways: the Chairman calls, the clock fires (`daily-run.sh` cron),
 an external event pushes (`fire-trigger.sh`), or the session hands off a task
-(session vs headless dispatch, per the §5.5 chain). **Catch-Up** — a `SessionStart`
+(session vs headless dispatch, per the §5.5 chain). **Scheduling** — `schedule.sh`
+treats the crontab as a keyed set of companies: each project's cron lines are
+namespaced by a `sha1(path)` key so installing one repo never evicts another,
+minutes are auto-staggered (`sha1(path) % 60`) so N companies don't stack on one
+minute, and `list`/`status --all`/`prune`/scoped `uninstall` manage the fleet
+(orphan = a project whose `.company/` is gone). **Catch-Up** — a `SessionStart`
 hook (`notify-status.py --emit-hook`) pushes one summary when unattended runs moved
 something substantive; push only, never Discord. **Ledger** — `report.py` writes
 `ops/reports/ledger.md`, an autoresearch-style table with entropy as the headline
