@@ -105,6 +105,31 @@ not a per-repo special case.
   general injectable backend used by `tests/test_schedule.py` so the suite never
   touches the user's real crontab.
 
+### Holding company (fleet orchestrator) — one cron for N sub-companies
+
+Instead of N independent crons each paying full maintenance every tick, a **parent
+company** can drive its sub-companies from a single schedule. `fleet-run.sh` is the
+parent's one cron entry; `schedule.sh install-fleet <parent>` installs it (a
+`# self-company-fleet project=<key>` line, managed by the same namespaced set as
+`daily`/`research` — `list` shows it as `TYPE=fleet`; `install` ⇄ `install-fleet`
+are mutually-exclusive ownership modes per project).
+
+- **Registry.** `<parent>/.company/org/subsidiaries.md` — a human-editable table
+  (`path | weight | enabled`) of sub project dirs. Adding a sub is data, not code.
+  Dead paths (missing `.company/`) are flagged, not fatal.
+- **The token win.** Each tick: one auth pre-flight for the whole fleet; the cheap
+  deterministic pass (`daily-run.sh <sub> --no-agent`) for **all** live subs; then
+  the expensive CONSOLIDATE agent only for subs whose entropy rose or dup-backlog
+  exceeds threshold, ranked by `delta × weight`, **hard-capped at
+  `FLEET_AGENT_BUDGET`** (policy §7.9, default 3). Healthy subs cost zero agent
+  runs. Cost is allocated by need, not `N × blind`.
+- **Isolation invariant.** The parent orchestrates scheduling + budget only. It
+  invokes each sub's **own** `daily-run.sh` and writes solely under
+  `<parent>/.company/ops/` (`fleet-ledger.md`, `fleet-state.json`); it never reads
+  or writes a sub's memory/personas. Each sub's `.company/` and `skeleton_guard`
+  are untouched. Standalone (`self`-scheduled) companies keep using plain
+  `install` unchanged.
+
 ---
 
 ## Session Catch-Up Notification (Chairman opt-in: "Option B")
