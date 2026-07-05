@@ -357,6 +357,14 @@ Each reinforcement: `reinforce_count++`, `last_reinforced = today`. Promotion "d
 
 > The daily batch is idempotent (`decay.py --apply` re-run is a no-op on already-disposed memory, verified in the red/blue ledger), so running it 4× a day is safe — extra runs simply catch newly-captured L0 sooner.
 
+### 7.9 Fleet (holding company)
+
+**PARENT-company constant** — applies only to a holding company that schedules its subsidiaries with `schedule.sh install-fleet` and orchestrates them via `scripts/fleet-run.sh`. A standalone (self-scheduled) company never reads it. The isolation invariant still holds: the parent orchestrates SCHEDULING + BUDGET only and never reads/writes a sub's `.company/` except by invoking that sub's own `daily-run.sh`.
+
+| Constant | Default | Meaning | tunable |
+|---|---|---|---|
+| `FLEET_AGENT_BUDGET` | **3** | Max subsidiaries that get the expensive headless CONSOLIDATE agent per fleet tick. `fleet-run.sh` gives EVERY live sub the cheap deterministic pass (reinforce→decay→verify→entropy→report), then spends the agent only on the top-K subs ranked by need (entropy delta × weight), where K = this budget. This is the fleet-wide cost ceiling — healthy subs cost zero agent runs; deferred subs are logged and picked up next tick. Raise to consolidate more subs per tick at higher token cost. | ✓ |
+
 ---
 
 ## 8. RAG Tunables (Tony's Domain)
@@ -378,5 +386,5 @@ RAG ships dormant:
 
 ---
 
-Version: v4 (RAG dormant; §7.7 scheduling cadence + CAPTURE throttle)  
-Last updated: 2026-07-03
+Version: v5 (RAG dormant; §7.7 scheduling cadence + CAPTURE throttle; §7.9 fleet: FLEET_AGENT_BUDGET)  
+Last updated: 2026-07-05
