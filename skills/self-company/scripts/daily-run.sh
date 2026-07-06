@@ -92,13 +92,14 @@ _run_reinforce=1; _should_run reinforce || _run_reinforce=0
 _run_decay=1;     _should_run decay     || _run_decay=0
 _run_verify=1;    _should_run verify    || _run_verify=0
 _run_entropy=1;   _should_run entropy   || _run_entropy=0
+_run_rag_index=1; _should_run rag_index || _run_rag_index=0
 
 # --- 1+2. deterministic core: reinforce + decay + verify + entropy ----------
 # Capture each script's JSON to a temp file, then parse via a heredoc that reads
 # the FILES by path. (Piping data INTO a `python3 <<'PY'` heredoc does not work —
 # the heredoc itself becomes stdin, so the pipe is ignored.)
-DOUT="$(mktemp)"; EOUT="$(mktemp)"; VOUT="$(mktemp)"; ROUT="$(mktemp)"; SERR="$(mktemp)"
-trap 'rm -f "$DOUT" "$EOUT" "$VOUT" "$ROUT" "$SERR"' EXIT
+DOUT="$(mktemp)"; EOUT="$(mktemp)"; VOUT="$(mktemp)"; ROUT="$(mktemp)"; SERR="$(mktemp)"; IOUT="$(mktemp)"
+trap 'rm -f "$DOUT" "$EOUT" "$VOUT" "$ROUT" "$SERR" "$IOUT"' EXIT
 
 # --- Phase 5 Item 2 (N2): durability floor — pre-apply snapshot -------------
 # BEFORE the first mutating pass (reinforce --apply below), tar the whole
@@ -177,9 +178,30 @@ if (( _run_verify )) && [[ -f "$SCRIPTS/verify_memory.py" ]]; then
   $DRY_RUN || verify_args+=(--apply)
   python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>>"$SERR" || true
 fi
-if (( _run_entropy )); then
-  [[ -f "$SCRIPTS/entropy.py" ]] && \
-    python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+if (( _run_entropy )) && [[ -f "$SCRIPTS/entropy.py" ]]; then
+  # P13A-1: entropy MUST always produce its line — it degrades to a Jaccard-only
+  # pass in base python when the RAG stack is unavailable. Invoke it the SAME way
+  # as the reinforce / rag-index blocks: use THIS project's venv python when it is
+  # usable (gets the semantic dedup pass), else plain python3 with SC_RAG_REEXEC=1
+  # so entropy does NOT self-re-exec (entropy.py main() re-execs into
+  # .company/.rag-venv otherwise). A BROKEN venv — python present but exits nonzero
+  # (corrupt/half-installed/version-mismatch) — used to make plain `python3
+  # entropy.py` self-re-exec into that dead python and vanish mid-run, silently
+  # dropping the entropy line. The retry below closes that AND the garbage-stdout
+  # case (P13A-2): a broken/wrapper venv can print a progress/deprecation notice to
+  # stdout and exit 0, leaving NON-JSON in $EOUT that the log-parse's json.load
+  # would choke on. So the retry keys on "did the venv attempt produce VALID
+  # entropy JSON?" (a dict with an `entropy` key) — NOT merely on $EOUT being
+  # non-empty. If not valid, discard $EOUT and run the guaranteed base-python
+  # (SC_RAG_REEXEC=1, Jaccard) pass. A HEALTHY venv (valid JSON) is kept as-is —
+  # no downgrade, no double-run.
+  if [[ -x "$RAG_PY" ]]; then
+    SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+  fi
+  if ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, dict) and "entropy" in d else 1)' "$EOUT" 2>/dev/null; then
+    : > "$EOUT"   # drop the venv attempt's absent/garbage stdout, then degrade cleanly
+    SC_RAG_REEXEC=1 python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+  fi
 fi
 
 DRY_FLAG="$($DRY_RUN && echo 1 || echo 0)"
@@ -260,10 +282,81 @@ elif e:
         lines.append(f"  - contradiction candidates: {det['contradiction_pairs']}")
     if det["duplicate_pairs"]:
         lines.append(f"  - duplicate candidates: {det['duplicate_pairs']}")
+else:
+    # P13A-2 belt-and-suspenders: even if BOTH the venv attempt and the base-python
+    # retry failed to leave valid entropy JSON, entropy is NEVER silently absent —
+    # emit an explicit errored line so the drop is visible, not a missing row.
+    lines.append("- entropy: no output (errored) — core unaffected")
 
 with open(log, "a") as f:
     f.write("\n".join(lines) + "\n")
 PY
+
+# --- Phase 13 Item A.1/A.2: incremental RAG index refresh + activation surface ---
+# Placed AFTER reinforce+decay+verify+entropy so the LanceDB index reflects
+# post-consolidation truth (absorbed L0s gone, decay's tier promotions applied).
+# INCREMENTAL by default (no --rebuild): unchanged bodies are skipped via
+# content_hash, so re-running is idempotent and cheap. Index scope is L1/L2 only
+# (Chairman D-A — NO --include-l0). Mirrors the reinforce block exactly: resolve
+# THIS project's $RAG_PY explicitly (cron-safe), one-line skip when the venv is
+# absent, `|| true` so a nonzero rc can NEVER abort the already-completed core.
+# A.2 threshold-check is DEPS-FREE (plain python3, no LanceDB/fastembed): it only
+# counts active L1+L2 and, when that crosses RAG_ENABLE_THRESHOLD while the venv
+# is NOT installed, surfaces an "activate RAG" upgrade candidate (replaces the
+# aspirational weekly-Tony prose in references/rag.md §4).
+RAGIDX_STATE="missing"   # missing | gated | novenv | ran
+RAG_OVER=1               # 1 = under threshold (default); 0 = at/over (deps-free check)
+if (( ! _run_rag_index )); then
+  RAGIDX_STATE="gated"
+elif [[ -f "$SCRIPTS/rag_index.py" ]]; then
+  # A.2 — deps-free threshold count (works even with NO venv; that is the whole
+  # point: tell the Chairman it is worth installing the RAG stack).
+  if command -v python3 >/dev/null 2>&1; then
+    SC_RAG_REEXEC=1 python3 "$SCRIPTS/rag_index.py" --threshold-check \
+      --memory-dir "$MEM" >/dev/null 2>>"$SERR"
+    RAG_OVER=$?
+  fi
+  # A.1 — incremental index refresh (needs the RAG venv).
+  if [[ -x "$RAG_PY" ]]; then
+    SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
+      --memory-dir "$MEM" --index-dir "$MEM/index" >"$IOUT" 2>>"$SERR" || true
+    RAGIDX_STATE="ran"
+  else
+    RAGIDX_STATE="novenv"
+  fi
+fi
+
+case "$RAGIDX_STATE" in
+  gated)
+    echo "- rag-index: skipped — schedule.yaml gated off tony.rag_index for this tick" >> "$LOG" ;;
+  novenv)
+    echo "- rag-index: skipped — RAG venv absent (.company/.rag-venv) — index refresh deferred; decay/verify/entropy/capture unaffected" >> "$LOG" ;;
+  missing)
+    echo "- rag-index: skipped — rag_index.py not found beside decay.py" >> "$LOG" ;;
+  ran)
+    python3 - "$IOUT" >> "$LOG" <<'PY' || echo "- rag-index: ran (log-parse error) — core unaffected" >> "$LOG"
+import sys, json
+try:
+    r = json.load(open(sys.argv[1]))
+except Exception:
+    print("- rag-index: no output (errored) — core unaffected"); sys.exit(0)
+# A backend-absent/degraded report (e.g. LanceDB missing) carries only warnings.
+if r.get("warnings") and not r.get("table_rows") and not r.get("embedded"):
+    print(f"- rag-index: no-op — {r['warnings'][0]}"); sys.exit(0)
+print("- rag-index: embedded {e} | skipped {s} | deleted-stale {d} | rows {t} "
+      "(L1/L2 {c})".format(e=r.get("embedded", 0), s=r.get("skipped_unchanged", 0),
+                           d=r.get("deleted_stale", 0), t=r.get("table_rows", 0),
+                           c=r.get("l1_l2_count", 0)))
+PY
+    ;;
+esac
+
+# A.2 — surface the activation candidate ONLY when the deps-free count is at/over
+# threshold AND the RAG stack is not yet installed (venv absent). Once installed,
+# RAG is active and refreshing above, so no candidate is raised.
+if (( _run_rag_index )) && (( RAG_OVER == 0 )) && [[ ! -x "$RAG_PY" ]]; then
+  echo "- rag-index: RAG activation candidate — active L1+L2 >= RAG_ENABLE_THRESHOLD but the RAG stack is not installed; run 'bash .company/scripts/rag_setup.sh install' to enable semantic memory search (Tony -> Elon)" >> "$LOG"
+fi
 
 # Elon's daily survey: a prioritized TODO from current metrics (read-only,
 # deterministic — keeps the CEO load-bearing every day). Writes ops/plans/todo-<date>.md.
