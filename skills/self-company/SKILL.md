@@ -177,6 +177,16 @@ minute, and `list`/`status --all`/`prune`/scoped `uninstall` manage the fleet
 split: the 6-hourly `daily-run.sh` is Tony's internal maintenance, while the weekly
 `research-scan.sh` is **Mike's external research pass** — it writes a dated, cited
 brief to `ops/research/` and appends mechanism-level proposals for Tony/Elon.
+**Holding company** — for several companies on one machine, `schedule.sh
+install-fleet <parent>` installs ONE cron running `fleet-run.sh` over the
+sub-companies listed in `<parent>/.company/org/subsidiaries.md`: each sub gets the
+cheap deterministic pass every tick, but the expensive consolidation agent is spent
+only on subs whose entropy rose, capped by `FLEET_AGENT_BUDGET` — the parent
+orchestrates scheduling + budget only, never a sub's memory. **Durability** — before
+any mutating pass `daily-run.sh` snapshots `memory/` to `ops/backups/` (rotated to
+`BACKUP_KEEP`); decay's "drop" is a soft-delete tombstone (recoverable within the
+grace window), and an offline-gap damper stops a long machine outage from
+mass-purging the store on the first tick back.
 **Hooks** — since v0.1.2 all **7 hooks are plugin-native**: declared once in
 `hooks/hooks.json` (plugin root) and run via `${CLAUDE_PLUGIN_ROOT}`, so Claude Code
 loads them on install with no `install-hook.sh` edit. They are `Stop` (capture),
