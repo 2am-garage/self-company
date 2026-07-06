@@ -21,6 +21,16 @@
             "timeout": 120
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/hook_schedule_guard.sh\"",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
