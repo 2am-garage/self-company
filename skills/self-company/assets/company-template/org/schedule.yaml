@@ -1,0 +1,66 @@
+# org/schedule.yaml — per-company schedule, triggers & duties (Phase 9).
+#
+# EVERY key below is OPTIONAL and COMMENTED OUT. As shipped this file is
+# absent-equivalent: a company with this template (all comments) behaves EXACTLY
+# like today's defaults. Uncomment and edit only what you want to change.
+#
+# TWO LAYERS (read references/red-blue-protocol.md):
+#   * Layer A — the KNOBS below: WHEN a duty runs, WHICH optional duties run,
+#     and HOW MUCH the agent may spend. Freely adjustable, per employee.
+#   * Layer B — WHO holds which ROLE (attacker vs builder), the 3-consecutive
+#     sign-off gate, the ledger rules — is NOT here and is NOT configurable.
+#     schedule_validator.py REJECTS any config that tries to touch it, and the
+#     company falls back to defaults. There is deliberately NO role:/attacks:/
+#     tier: field — its mere presence is a hard reject.
+#
+# Malformed YAML, an unknown key, or a rejected invariant => the whole file is
+# ignored and today's defaults run (logged, never a crash). Safe to experiment.
+
+# --- Company tick: how often daily-run.sh fires (drives the cron line) --------
+# Grammar: "every Nh" (1..23) | "hourly" | "weekdays-<start>-<end>" (hours, Mon-Fri)
+#          | a raw 5-field cron expression. Invalid => default (every 6h).
+# Default: every 6h (4x/day). A change here re-installs the cron on next session.
+# cadence: every 6h
+
+# --- Mike's external research scan --------------------------------------------
+# enabled: turn the weekly survey on/off. cadence: "weekly-<dow>-<hh>"
+# (dow = sun..sat or 0..6) | raw cron. Default: on, Sunday 03:00.
+# research: { enabled: true, cadence: weekly-sun-03 }
+
+# --- Headless agent knobs (the daily CONSOLIDATE/VERIFY pass) -----------------
+# model: which model the agent uses. timeout: hard wall-clock seconds.
+# daily_cap: max token-spending agent runs per day (the token breaker).
+# Env still wins: SELF_COMPANY_DAILY_MODEL / SELF_COMPANY_DAILY_TIMEOUT override.
+# Default: model claude-sonnet-4-6, timeout 600, daily_cap 4.
+# agent: { model: claude-sonnet-4-6, timeout: 600, daily_cap: 4 }
+
+# --- Per-employee blocks ------------------------------------------------------
+# Each block accepts ONLY: cadence, duties, budget, enabled. NO role field.
+#   cadence : sub-cadence RELATIVE to the company tick — every-run | every-Nth |
+#             daily (first tick of the day) | weekly (Sunday first tick) |
+#             on-trigger (never in the batch; only via fire-trigger.sh).
+#   duties  : which of THIS employee's OWN duties run. You may only ever list a
+#             subset of the employee's fixed role set — never a foreign duty
+#             (e.g. gibby may not list "build"; that is a hard reject).
+#   budget  : advisory token budget for the employee's work.
+#   enabled : false disables the employee's scheduled duties. NOTE: disabling Bob
+#             while Gibby still builds, or uncovering the attack surface, is
+#             rejected — you cannot ship builds with no red team (R2).
+#
+# Allowed duties per employee (fixed — Layer B, editing needs a code change):
+#   tony  : reinforce, decay, entropy, propose, agent
+#   gibby : verify, attack            (Red Team — attacks, never builds)
+#   bob   : build                     (Blue Team — builds, never attacks/verifies)
+#   mike  : research                  (weekly external survey)
+#   elon  : survey                    (daily prioritized TODO)
+#   tom   : backup, report, schedule
+#   phoebe: (gateway — no scheduled deterministic duty)
+#   july  : (HR tuning — no scheduled deterministic duty)
+#
+# Examples (uncomment/adapt):
+# tony:  { cadence: every-run, duties: [reinforce, decay, entropy, propose, agent], budget: 20000 }
+# gibby: { cadence: every-run, duties: [verify, attack] }
+# bob:   { cadence: on-trigger, duties: [build] }
+# mike:  { cadence: weekly, duties: [research] }
+# elon:  { cadence: daily, duties: [survey] }
+# tom:   { cadence: every-run, duties: [backup, report] }
