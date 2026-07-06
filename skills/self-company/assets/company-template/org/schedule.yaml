@@ -48,7 +48,7 @@
 #             rejected — you cannot ship builds with no red team (R2).
 #
 # Allowed duties per employee (fixed — Layer B, editing needs a code change):
-#   tony  : reinforce, decay, entropy, propose, agent
+#   tony  : reinforce, decay, entropy, rag_index, propose, agent
 #   gibby : verify, attack            (Red Team — attacks, never builds)
 #   bob   : build                     (Blue Team — builds, never attacks/verifies)
 #   mike  : research                  (weekly external survey)
@@ -58,7 +58,7 @@
 #   july  : (HR tuning — no scheduled deterministic duty)
 #
 # Examples (uncomment/adapt):
-# tony:  { cadence: every-run, duties: [reinforce, decay, entropy, propose, agent], budget: 20000 }
+# tony:  { cadence: every-run, duties: [reinforce, decay, entropy, rag_index, propose, agent], budget: 20000 }
 # gibby: { cadence: every-run, duties: [verify, attack] }
 # bob:   { cadence: on-trigger, duties: [build] }
 # mike:  { cadence: weekly, duties: [research] }

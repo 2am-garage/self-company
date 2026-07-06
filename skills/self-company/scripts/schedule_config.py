@@ -50,7 +50,7 @@ CONFIG_SUBPATH = "org/schedule.yaml"
 EMPLOYEES = ("tony", "gibby", "bob", "mike", "elon", "phoebe", "tom", "july")
 
 ALLOWED_DUTIES = {
-    "tony":   {"reinforce", "decay", "entropy", "propose", "agent"},
+    "tony":   {"reinforce", "decay", "entropy", "rag_index", "propose", "agent"},
     "gibby":  {"verify", "attack"},          # Red Team — attack, never build
     "bob":    {"build"},                     # Blue Team — build, never attack/verify
     "mike":   {"research"},                  # external weekly survey
@@ -76,6 +76,7 @@ STEP_OWNER = {
     "decay":     "tony",
     "verify":    "gibby",
     "entropy":   "tony",
+    "rag_index": "tony",   # Phase 13 A.1: daily incremental LanceDB index refresh
     "survey":    "elon",
     "report":    "tom",
     "agent":     "tony",

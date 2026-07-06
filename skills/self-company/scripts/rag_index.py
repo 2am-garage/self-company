@@ -2,8 +2,9 @@
 """
 RAG Index Builder — Index memory for semantic search (self-company).
 
-Scans .company/memory/ for L1 and L2 markdown files, computes embeddings via Ollama,
-stores in LanceDB (local, offline). Index is a derivative of markdown truth; always rebuildable.
+Scans .company/memory/ for L1 and L2 markdown files, computes embeddings via the
+local fastembed backend (rag_embed, in .company/.rag-venv), stores in LanceDB
+(local, offline). Index is a derivative of markdown truth; always rebuildable.
 
 Pure stdlib only: argparse, json, os, sys, re, hashlib, urllib, pathlib, datetime.
 Optional lancedb wrapped in try/except with graceful exit(2).
@@ -100,7 +101,6 @@ except ImportError:
 
 RAG_ENABLE_THRESHOLD = 50
 RAG_MODEL = "BAAI/bge-small-en-v1.5"   # fastembed (local CPU, offline); see rag_embed.py
-RAG_OLLAMA_HOST = "http://localhost:11434"  # legacy; unused with fastembed backend
 EMBEDDING_DIM = 384
 
 
@@ -108,8 +108,9 @@ EMBEDDING_DIM = 384
 # EXCEPTIONS
 # ============================================================================
 
-class OllamaUnavailable(Exception):
-    """Raised when Ollama is not reachable."""
+class EmbeddingUnavailable(Exception):
+    """Raised when the local embedding backend (fastembed in .company/.rag-venv)
+    is unavailable — the shared signal the index path degrades on (exit 2)."""
     pass
 
 
@@ -237,22 +238,20 @@ def compute_content_hash(body: str) -> str:
 
 
 # ============================================================================
-# EMBEDDING VIA OLLAMA
+# EMBEDDING (local fastembed backend — see rag_embed.py)
 # ============================================================================
 
-def embed(text: str, model: str = None, host: str = None) -> List[float]:
+def embed(text: str) -> List[float]:
     """
-    Embed text via the local fastembed backend (rag_embed). The `model`/`host`
-    params are kept for signature compatibility with the old Ollama callers and
-    are ignored. Raises OllamaUnavailable (reused as a generic "embedding
-    backend unavailable" signal) if fastembed/the venv isn't installed.
+    Embed text via the local fastembed backend (rag_embed). Raises
+    EmbeddingUnavailable if fastembed / the .company/.rag-venv isn't installed.
     """
     if not _HAS_EMBED:
-        raise OllamaUnavailable("rag_embed/fastembed not importable")
+        raise EmbeddingUnavailable("rag_embed/fastembed not importable")
     try:
         return rag_embed.embed(text)
     except Exception as e:
-        raise OllamaUnavailable(f"local embedding failed: {e}")
+        raise EmbeddingUnavailable(f"local embedding failed: {e}")
 
 
 # ============================================================================
@@ -371,7 +370,7 @@ def check_threshold(memory_dir: Path, threshold: int) -> bool:
 def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = False,
                  now: Optional[datetime] = None, include_l0: bool = False) -> Dict[str, Any]:
     """
-    Scan memory_dir for L1/L2 active files, embed via Ollama, upsert to LanceDB.
+    Scan memory_dir for L1/L2 active files, embed via fastembed, upsert to LanceDB.
 
     Returns JSON summary dict.
     """
@@ -447,11 +446,10 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         except Exception as e:
             report["warnings"].append(f"Failed to load existing index: {e}")
 
-    # Connect to Ollama for embedding
+    # Pre-flight: prove the local embedding backend is available before scanning.
     try:
-        # Test connection with a tiny embedding
-        _ = embed("test", model, RAG_OLLAMA_HOST)
-    except OllamaUnavailable as e:
+        _ = embed("test")
+    except EmbeddingUnavailable:
         print("[rag_index] RAG backend not installed. Run:\n"
               "  bash .company/scripts/rag_setup.sh install\n"
               "(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)",
@@ -471,9 +469,9 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
                 report["skipped_unchanged"] += 1
                 continue
 
-        # Embed body
+        # Embed body (backend availability already proven by the pre-flight above).
         try:
-            vec = embed(body, model, RAG_OLLAMA_HOST)
+            vec = embed(body)
             if len(vec) != EMBEDDING_DIM:
                 report["warnings"].append(
                     f"{mem['id']}: embedding dim {len(vec)} != {EMBEDDING_DIM}"
@@ -490,11 +488,12 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
             rows_to_add.append(row)
             report["embedded"] += 1
 
-        except OllamaUnavailable as e:
-            print(f"[rag_index] Ollama not reachable at {RAG_OLLAMA_HOST}. "
-                  f"Start Ollama and run: ollama pull {model}  "
-                  f"(see references/rag.md)", file=sys.stderr)
-            sys.exit(2)
+        except EmbeddingUnavailable as e:
+            # Pre-flight already proved the backend present, so this is a transient
+            # per-item failure: skip that one memory with a warning rather than
+            # aborting the whole index build.
+            report["warnings"].append(f"{mem['id']}: embedding failed: {e}")
+            continue
 
     # Connect to LanceDB and upsert
     try:
@@ -548,7 +547,7 @@ def main():
     parser.add_argument(
         "--model",
         default=RAG_MODEL,
-        help=f"Ollama embedding model (default: {RAG_MODEL})"
+        help=f"embedding model, informational (fastembed model is fixed; default: {RAG_MODEL})"
     )
     parser.add_argument(
         "--rebuild",
@@ -560,7 +559,7 @@ def main():
         action="store_true",
         help="Check if L1+L2 count >= threshold. "
              "Exit 0 if at/over threshold (enable RAG), 1 if under. "
-             "Does NOT require Ollama/LanceDB."
+             "Deps-free: does NOT require the RAG venv (LanceDB/fastembed)."
     )
     parser.add_argument(
         "--threshold",
@@ -635,9 +634,9 @@ def main():
     # Full indexing mode
     if not _HAS_LANCEDB:
         print(
-            "[rag_index] LanceDB not installed. Run: "
-            "python3 -m ensurepip --upgrade && pip install lancedb  "
-            "(see references/rag.md)",
+            "[rag_index] RAG backend not installed. Run:\n"
+            "  bash .company/scripts/rag_setup.sh install\n"
+            "(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)",
             file=sys.stderr
         )
         sys.exit(2)

@@ -191,6 +191,15 @@ class TestGating(Base):
         self.assertEqual(self.should(c, "entropy", 6, 0), 1)   # idx 1 -> skip
         self.assertEqual(self.should(c, "entropy", 12, 0), 0)  # idx 2 -> run
 
+    def test_rag_index_step_owned_by_tony_runs_by_default(self):
+        # Phase 13 A.1: the new deterministic step is Tony's; absent config it runs.
+        self.assertEqual(self.should(self.company(), "rag_index", 3, 2), 0)
+
+    def test_rag_index_deselectable_via_tony_duties(self):
+        c = self.company("tony: { duties: [reinforce, decay, entropy] }\n")
+        self.assertEqual(self.should(c, "rag_index", 3, 2), 1)  # omitted -> skip
+        self.assertEqual(self.should(c, "decay", 3, 2), 0)      # kept
+
     def test_duty_deselection_skips_only_that_step(self):
         c = self.company("tony: { duties: [decay] }\n")
         self.assertEqual(self.should(c, "decay", 3, 2), 0)     # kept

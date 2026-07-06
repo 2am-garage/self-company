@@ -42,5 +42,33 @@ class TestRagDegradation(unittest.TestCase):
         self.assertNotIn("Traceback", err)
 
 
+class TestIncrementalHash(unittest.TestCase):
+    """Phase 13 A.1: the incremental-refresh idempotence guarantee rests on
+    compute_content_hash — an unchanged body must hash identically across runs so
+    rag_index skips it (no re-embed). Deps-free: content hashing is pure stdlib,
+    so this runs under the base interpreter with SC_RAG_REEXEC=1 (no venv needed)."""
+
+    def test_content_hash_stable_normalized_and_distinct(self):
+        prog = (
+            "import sys; sys.path.insert(0, sys.argv[1]); import rag_index as R\n"
+            "a = R.compute_content_hash('hello world')\n"
+            "b = R.compute_content_hash('  hello   world  ')\n"   # whitespace-normalized -> same
+            "c = R.compute_content_hash('hello world')\n"          # recomputed -> same
+            "d = R.compute_content_hash('a different body entirely')\n"
+            "assert a == c, 'hash not stable across calls'\n"
+            "assert a == b, 'normalization changed the hash'\n"
+            "assert a != d, 'distinct bodies collided'\n"
+            "print('OK')\n"
+        )
+        import subprocess
+        import sys
+        proc = subprocess.run(
+            [sys.executable, "-c", prog, _helpers.SCRIPTS_DIR],
+            capture_output=True, text=True,
+            env={**os.environ, "SC_RAG_REEXEC": "1"})  # no re-exec into any real venv
+        self.assertEqual(proc.returncode, 0, f"out={proc.stdout} err={proc.stderr}")
+        self.assertIn("OK", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
