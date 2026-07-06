@@ -177,7 +177,7 @@ minute, and `list`/`status --all`/`prune`/scoped `uninstall` manage the fleet
 split: the 6-hourly `daily-run.sh` is Tony's internal maintenance, while the weekly
 `research-scan.sh` is **Mike's external research pass** — it writes a dated, cited
 brief to `ops/research/` and appends mechanism-level proposals for Tony/Elon.
-**Hooks** — since v0.2.0 all **7 hooks are plugin-native**: declared once in
+**Hooks** — since v0.1.2 all **7 hooks are plugin-native**: declared once in
 `hooks/hooks.json` (plugin root) and run via `${CLAUDE_PLUGIN_ROOT}`, so Claude Code
 loads them on install with no `install-hook.sh` edit. They are `Stop` (capture),
 `SessionStart` (catch-up push), `UserPromptSubmit` (ask-time memory injection, 30s
@@ -226,7 +226,7 @@ time, so after the skill/plugin moves or updates re-run the scheduler:
 ```bash
 bash scripts/schedule.sh install       # refresh the cron lines
 ```
-Hooks need **no** re-install: since v0.2.0 they are plugin-native (`hooks/hooks.json`
+Hooks need **no** re-install: since v0.1.2 they are plugin-native (`hooks/hooks.json`
 via `${CLAUDE_PLUGIN_ROOT}`) and survive version bumps automatically.
 
 ### Optional local setup (not pre-installed on clone)
@@ -234,7 +234,7 @@ via `${CLAUDE_PLUGIN_ROOT}`) and survive version bumps automatically.
 These are opt-in and live only on your machine (`.claude/` is git-ignored):
 
 - **Hooks** — none needed: all 7 hooks are plugin-native (`hooks/hooks.json`). If you
-  used the pre-v0.2.0 installer, run `scripts/install-hook.sh uninstall` once to remove
+  used the pre-v0.1.2 installer, run `scripts/install-hook.sh uninstall` once to remove
   the legacy `.claude/settings.json` entries that would otherwise double-fire.
 - **Dev repo only** — if you cloned the skill's *development* repo (the one with a
   `.self-company-dev` marker) and want it to load itself as a skill, run

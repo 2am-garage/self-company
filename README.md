@@ -26,9 +26,9 @@ bash skills/self-company/scripts/init_company.sh
 bash skills/self-company/scripts/schedule.sh install        # the scheduled work below
 ```
 
-> Hooks need **no** setup: since v0.2.0 all 7 hooks are **plugin-native** (declared in
+> Hooks need **no** setup: since v0.1.2 all 7 hooks are **plugin-native** (declared in
 > `hooks/hooks.json`, run via `${CLAUDE_PLUGIN_ROOT}`) and load automatically with the
-> plugin. If you used the pre-v0.2.0 installer, run
+> plugin. If you used the pre-v0.1.2 installer, run
 > `install-hook.sh uninstall` once to drop the legacy `.claude/settings.json` entries
 > (plugin hooks merge with settings hooks, so leaving them would double-fire).
 

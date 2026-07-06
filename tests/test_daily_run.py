@@ -424,7 +424,7 @@ class TestInstallHook(unittest.TestCase):
         return os.path.join(d, ".claude", "settings.json")
 
     def _write_legacy(self, d):
-        """Seed a project settings.json with the pre-v0.2.0 self-company hooks."""
+        """Seed a project settings.json with the pre-v0.1.2 self-company hooks."""
         import json
         os.makedirs(os.path.join(d, ".claude"), exist_ok=True)
         cfg = {
@@ -440,7 +440,7 @@ class TestInstallHook(unittest.TestCase):
             json.dump(cfg, f)
 
     def test_install_is_plugin_native_noop(self):
-        # v0.2.0: hooks are plugin-native; install writes nothing to settings.json.
+        # v0.1.2: hooks are plugin-native; install writes nothing to settings.json.
         with tempfile.TemporaryDirectory() as d:
             r = _bash([self.SH, "install", d])
             self.assertEqual(r.returncode, 0)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# install-hook.sh — DEPRECATED since v0.2.0 (hooks are plugin-native).
+# install-hook.sh — DEPRECATED since v0.1.2 (hooks are plugin-native).
 #
 # The self-company hooks are now declared ONCE in the plugin's `hooks/hooks.json`
 # (at the plugin root; commands use `${CLAUDE_PLUGIN_ROOT}`), so Claude Code loads
@@ -33,7 +33,7 @@ STOP_MARK="self-company-capture"
 NOTIFY_MARK="self-company-notify"
 
 if [[ "$CMD" == "install" ]]; then
-  echo "[install-hook] hooks are plugin-native since v0.2.0 — nothing to install (see hooks/hooks.json)"
+  echo "[install-hook] hooks are plugin-native since v0.1.2 — nothing to install (see hooks/hooks.json)"
   exit 0
 fi
 
@@ -86,14 +86,14 @@ if cmd == "uninstall":
     if os.path.exists(settings):
         save(d)
     print(f"[install-hook] removed {removed} legacy self-company hook entr"
-          f"{'y' if removed == 1 else 'ies'} (plugin-native since v0.2.0)"
+          f"{'y' if removed == 1 else 'ies'} (plugin-native since v0.1.2)"
           if removed else
           "[install-hook] no legacy self-company hook entries found — nothing to remove")
 elif cmd == "status":
     hooks = d.get("hooks", {})
     legacy = [event for event, mark in HOOKS
               if any(is_ours(g, mark) for g in hooks.get(event, []))]
-    print("[install-hook] hooks are plugin-native since v0.2.0 (declared in hooks/hooks.json)")
+    print("[install-hook] hooks are plugin-native since v0.1.2 (declared in hooks/hooks.json)")
     if legacy:
         print(f"[install-hook] WARNING: legacy settings.json entries still present for "
               f"{', '.join(legacy)} — run 'install-hook.sh uninstall' to stop double-firing")
