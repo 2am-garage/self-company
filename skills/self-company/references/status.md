@@ -24,6 +24,7 @@
 - ✅ Graceful degradation — stdlib-only fallback everywhere (entropy Jaccard-only pass, reinforce no-op with message)
 - ✅ Rebuild/query scripts — `scripts/rag_index.py` and `scripts/rag_query.py` (code/data separation: scripts stay in the skill, no longer copied into `.company/`)
 - ✅ Technical reference — see `references/rag.md` for full design and usage
+- ✅ **Phase 13 Stage A — RAG index wired into the daily core** — `daily-run.sh` refreshes the LanceDB index incrementally each run (after reinforce+decay+verify+entropy, L1/L2 only, Tony-owned, idempotent via content_hash), and surfaces a deps-free "activate RAG" candidate when active L1+L2 ≥ 50 while the venv is uninstalled. Absent/broken venv → one logged skip line; the core always completes. Dead Ollama vestiges removed from `rag_index.py`; `rag.md` rewritten to the wired reality. (Stage B — semantic ask-time injection — upcoming, not yet wired.)
 
 ### v3 Daily Loop & Governance Completed (Phases 1-4, 2026-07-03)
 
@@ -61,5 +62,5 @@
 - ⏳ Code/Chat entropy — code drift detection, session distillation
 - ⏳ NLI/cross-encoder second signal for the cosine [0.74, 0.81] overlap band
 - ⏳ Real token accounting (policy §3 currently documented as a runs/day proxy)
-- ⏳ RAG index refresh wiring in the daily loop + `rag.md` path cleanup
+- ⏳ RAG Stage B — semantic ask-time injection in `hook_memory_inject.py` (consumes `rag_query.py`; keyword path stays the no-venv floor). Stage A (daily index refresh) is DONE.
 - ⏳ July (HR) periodic worker-performance review — Chairman decision pending

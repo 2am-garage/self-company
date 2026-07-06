@@ -1,455 +1,260 @@
 # RAG Playbook — Retrieval-Augmented Memory Search
 
-> **This is Tony's domain.** RAG (Retrieval-Augmented Generation) is an optional vector index over the markdown memory store, speeding up semantic search when memory volume grows large. Shipped **dormant** and **degrades gracefully**; activate with `rag_setup.sh install` (LanceDB + fastembed, local & offline — no Ollama daemon).
+> **Tony's domain.** RAG is a local, offline vector index (LanceDB + fastembed) over the markdown memory store, used to catch semantic matches keyword search misses. Shipped **dormant**; activate with one command:
+> ```bash
+> bash .company/scripts/rag_setup.sh install
+> ```
+> This creates a private venv at `.company/.rag-venv` and installs **LanceDB + fastembed** (`BAAI/bge-small-en-v1.5`, 384-dim, local CPU, no daemon, fully offline). No Ollama. Everything degrades gracefully: with no venv the pipeline runs exactly as before.
 
 ---
 
 ## 1. What RAG Is Here
 
-The memory substrate is **markdown truth** in `.company/memory/L1-warm/` and `.company/memory/L2-cold/` — readable, auditable, durable. RAG is a **layered vector index** on top, built from that markdown.
+The memory substrate is **markdown truth** in `.company/memory/L1-warm/` and `.company/memory/L2-cold/` — readable, auditable, durable. RAG is a **vector index** on top, built from that markdown.
 
-**Key principle**: The index is a **derivative, not the source of truth**. Markdown files are the truth; the index can be:
+**Key principle**: the index is a **derivative, not the source of truth**. Markdown files are the truth; the index can be:
 - Rebuilt anytime without loss (content is still in the files).
-- Deleted without harm (just lose the speed boost).
-- Queried in fallback via `grep` if the index is unavailable.
+- Deleted without harm (just lose the speed/recall boost).
+- Fallen back from to `grep` if the index is unavailable.
 
-This design keeps the system **resilient** — RAG failure is annoying, never catastrophic.
+RAG failure is annoying, never catastrophic.
+
+### Two embedding paths (don't confuse them)
+
+There are two consumers of the shared `rag_embed` backend:
+
+1. **In-process semantic dedup (Path A — always used when the venv is present).**
+   `reinforce_memory.py` and `entropy.py` call `rag_embed.embed_batch()` directly and compute cosine similarity **in memory** (numpy). They do NOT read the LanceDB index — they embed bodies fresh each run to find near-duplicate / contradiction pairs across all tiers. This is how the daily consolidation matures memories (L0 → L1 → L2).
+
+2. **The LanceDB index (Path B — this playbook).**
+   `rag_index.py` builds a persistent vector table; `rag_query.py` queries it by meaning and returns file paths. Index scope is **L1/L2 only** (working L0 is volatile and excluded). This is the path Phase 13 wires into the pipeline (below) and that Stage B (upcoming) will consume for ask-time retrieval.
 
 ---
 
 ## 2. When RAG Activates
 
-RAG is not enabled from day one; it waits until the memory store is large enough that semantic search becomes faster than keyword search.
+RAG is not enabled from day one; it earns its place once the store is large enough that semantic search beats keyword search.
 
-### Activation Criteria
+### The threshold gate
 
-**Threshold**: L1 + L2 active memory count ≥ **50**
+**`RAG_ENABLE_THRESHOLD` = 50** (policy.md §8, tunable). Counts **active L1 + L2** memories (L0 excluded — volatile).
 
-- **Below 50**: Full-text `grep` over `.company/memory/` is actually faster to reason about, and simpler. No overhead.
-- **At or above 50**: RAG starts to pay for itself; semantic retrieval catches paraphrases that keyword search misses.
+- **Below 50**: keyword `grep` / the Jaccard pass is faster to reason about and simpler. No RAG overhead.
+- **At or above 50**: semantic retrieval starts to pay for itself, catching paraphrases keyword search misses.
 
-### Trigger Modes
+The gate is the on/off switch, and **the degrade path IS the below-threshold path** — no special-casing. Consumers use keyword/Jaccard below threshold and when the venv is absent; semantic kicks in above.
 
-1. **Auto-trigger (weekly)**: 
-   - Tony's weekly maintenance runs `python3 .company/scripts/rag_index.py --threshold-check`.
-   - If L1+L2 count ≥ 50 (script exits 0) → Tony raises an "enable RAG" upgrade candidate to Elon.
-   - If still below 50 (script exits 1) → no action needed.
+### Auto-surfacing activation (Phase 13 A.2)
 
-2. **Manual override**:
-   - Chairman can order Elon directly: "Enable RAG."
-   - Elon approves, Phoebe plans, Tom executes the setup steps (below).
+`daily-run.sh` runs `rag_index.py --threshold-check` every run. This is **deps-free** — it only counts active L1+L2, needs no LanceDB/fastembed, and exits 0 (at/over) or 1 (under). When the count is at/over threshold **and the RAG stack is not yet installed**, the daily log surfaces a one-line **"activate RAG" candidate** pointing at `rag_setup.sh install` (Tony → Elon). Below threshold, or once installed, nothing is surfaced.
 
-### Status at Ship
+(This replaces the old aspirational "weekly Tony rebuild" prose — the check is now wired into every daily run.)
 
-Shipped **DORMANT**. No Ollama, no LanceDB, no pip in the environment initially. Scripts exist in `.company/scripts/` but exit gracefully with an actionable message until dependencies are installed.
+### Manual override
 
----
+Chairman can order activation directly ("Enable RAG"): run `rag_setup.sh install`, then the index refresh below takes over automatically.
 
-## 3. One-Time Setup (When Activating)
+### Status at ship
 
-> **CURRENT BACKEND — fastembed (no Ollama).** Activation is now one command:
-> ```bash
-> bash .company/scripts/rag_setup.sh install
-> ```
-> This creates a private venv at `.company/.rag-venv` and installs **LanceDB +
-> fastembed** (`BAAI/bge-small-en-v1.5`, 384-dim, local CPU, no daemon, fully
-> offline). `rag_index.py` / `rag_query.py` auto re-exec into that venv, so
-> `python3 .company/scripts/rag_index.py --rebuild --include-l0` and
-> `rag_query.py` just work afterwards. Then build: `rag_index.py --rebuild`
-> (add `--include-l0` to index working memory too, e.g. for the reinforce path).
->
-> The Ollama steps below are **superseded/legacy** — kept only for reference if
-> someone prefers an Ollama backend. You can skip them.
-
-When the threshold is crossed or Chairman orders activation, follow these steps in order. This is a one-time task; Tom does it (or a human can during manual activation).
-
-### Step 1: Install Ollama (legacy — superseded by rag_setup.sh)
-
-Ollama runs embedding models locally, offline, without any API calls.
-
-1. Download from [ollama.com](https://ollama.com).
-2. Install per your platform instructions (Mac, Linux, Windows).
-3. Start the Ollama server: `ollama serve` (runs on `http://localhost:11434` by default).
-4. Keep it running in the background (e.g., as a daemon or persistent terminal).
-
-### Step 2: Pull the Embedding Model
-
-Once Ollama is running, fetch the embedding model:
-
-```bash
-ollama pull nomic-embed-text
-```
-
-This downloads a 274 MB model to your local Ollama cache. It's a one-time download; subsequent runs reuse it.
-
-### Step 3: Bootstrap Python Dependencies
-
-LanceDB requires Python 3.8+. If you don't have pip installed, bootstrap it:
-
-```bash
-python3 -m ensurepip --upgrade
-```
-
-Alternatively, if you prefer a virtual environment (recommended for isolation):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-```
-
-### Step 4: Install LanceDB
-
-```bash
-pip install lancedb
-```
-
-LanceDB is a lightweight embedded vector database. No server needed; the index lives in `.company/memory/index/` on disk.
-
-### Verification
-
-After setup, verify the stack is ready:
-
-```bash
-# Test Ollama is running
-curl http://localhost:11434/api/tags  # should list nomic-embed-text
-
-# Test Python + LanceDB
-python3 -c "import lancedb; print('LanceDB OK')"
-
-# Test the RAG scripts (should work now)
-python3 .company/scripts/rag_index.py --threshold-check
-```
-
-If all commands succeed, RAG is active. If any fails, the scripts will guide you with clear error messages.
+Ships **DORMANT** — no venv, no LanceDB/fastembed. `rag_index.py` / `rag_query.py` exist and exit gracefully with an actionable message until `rag_setup.sh install` runs.
 
 ---
 
-## 4. How Tony Rebuilds the Index (Weekly Maintenance)
-
-Once activated, RAG requires periodic maintenance to stay in sync with markdown changes.
-
-### Incremental Rebuild (Default, Weekly)
+## 3. One-Time Setup
 
 ```bash
-python3 .company/scripts/rag_index.py
+bash .company/scripts/rag_setup.sh install
 ```
 
-This runs **incrementally**:
-- Scans all L1/L2 active memory files.
-- Computes a content hash (SHA-256) for each file body.
-- Skips files whose body is unchanged (no embedding call, fast).
-- Embeds changed/new files via Ollama.
-- Upserts results into LanceDB.
-- Deletes index entries for memories no longer on disk (archived/deleted).
+Creates `.company/.rag-venv`, installs LanceDB + fastembed, and warms the embedding model (one-time ~130 MB download of `BAAI/bge-small-en-v1.5`). `rag_index.py` / `rag_query.py` auto re-exec into that venv, so plain `python3 .company/scripts/rag_*.py` just works afterward.
 
-**Output**: JSON summary to stdout, including:
-- `embedded`: number of new/changed files embedded.
-- `skipped_unchanged`: files skipped due to unchanged content.
-- `deleted_stale`: index entries for deleted memories.
-- `table_rows`: total rows in the index now.
-- `over_threshold`: whether L1+L2 count is still above 50.
-
-**Example output**:
-```json
-{
-  "now": "2026-06-18T14:30:00Z",
-  "mode": "incremental",
-  "embedded": 3,
-  "skipped_unchanged": 47,
-  "deleted_stale": 0,
-  "table_rows": 50,
-  "over_threshold": true,
-  "warnings": []
-}
+Other subcommands:
+```bash
+bash .company/scripts/rag_setup.sh status      # INSTALLED / not installed
+bash .company/scripts/rag_setup.sh uninstall   # remove the venv
 ```
 
-### Full Rebuild (After Deep Cleanup)
+The venv lives under `.company/` (gitignored, per-project, never committed).
 
-If Tony performs a major reorganization, consolidation, or suspects corruption:
+---
 
+## 4. Index Refresh (Phase 13 A.1 — automatic)
+
+Once activated, the index is kept fresh **automatically** by `daily-run.sh`. There is no separate weekly job.
+
+Each daily run, after the deterministic core has settled (**reinforce → decay → verify → entropy**), the RAG-index step runs an **incremental** rebuild so the index reflects **post-consolidation truth** (absorbed L0 duplicates gone, decay's tier promotions applied):
+
+```bash
+python3 .company/scripts/rag_index.py --memory-dir .company/memory --index-dir .company/memory/index
+```
+
+The step is:
+- **Owned by Tony**, gated like every other core step (`_should_run rag_index`); a company can retune or disable it via `org/schedule.yaml` (Tony's `duties`).
+- **Incremental & idempotent**: each L1/L2 body is SHA-256 content-hashed; unchanged bodies are skipped (no re-embed). Re-running changes nothing.
+- **L1/L2 only** — no `--include-l0` (Chairman D-A).
+- **Never able to fail the core**: it resolves this project's `.company/.rag-venv/bin/python` explicitly; if the venv is absent the step logs one skip line and the already-completed core (decay/verify/entropy/capture) is untouched. A nonzero index run is swallowed (`|| true`) and logged.
+
+What it does each run:
+- Scans L1/L2 active memory files (tombstoned skipped).
+- Embeds changed/new bodies via fastembed; skips unchanged (content hash).
+- Upserts rows into LanceDB.
+- Deletes index rows for memories no longer on disk (archived/reaped).
+
+**Daily-log line** (example): `- rag-index: embedded 3 | skipped 47 | deleted-stale 1 | rows 50 (L1/L2 50)`.
+
+### Full rebuild (manual, rare)
+
+After a major reorganization or suspected corruption:
 ```bash
 python3 .company/scripts/rag_index.py --rebuild
+# or nuke and rebuild:
+rm -rf .company/memory/index && python3 .company/scripts/rag_index.py --rebuild
 ```
-
-This **drops the entire LanceDB table** and rebuilds from scratch, re-embedding all L1/L2 memories. Slower but ensures consistency. Still uses content hash for subsequent incremental runs.
-
-### Notes
-
-- Incremental rebuild is fast (only changed files).
-- Ollama must be running (`ollama serve`).
-- LanceDB index lives at `.company/memory/index/` (gitignored, private).
-- If Ollama is unreachable, the script exits with code 2 and a clear message; the rebuild is deferred.
 
 ---
 
-## 5. How to Query (Tony or Gibby)
+## 5. The Index Data Model
 
-Once the index is built, query it semantically:
+- **Location**: `.company/memory/index/` (LanceDB, gitignored, private). Configurable via `RAG_INDEX_PATH` (policy.md §8).
+- **Table**: `memory`.
+- **Row schema**: `{ id, tier, path, content_hash, vector[384] }`. The index stores **no body text** — only a pointer (`path`) back to the markdown source plus the content hash (for incremental skip) and the embedding vector.
+- **Scope**: L1 + L2 active memories only.
+
+Because only paths are stored, retrieval always resolves back to live markdown files (and a stale/tombstoned id simply maps to a file the consumer can re-check).
+
+---
+
+## 6. Querying (manual / ad-hoc today)
+
+Once built, query the index semantically:
 
 ```bash
 python3 .company/scripts/rag_query.py --query "what does the Chairman prefer for documentation?" --top-k 5
 ```
 
-### Arguments
-
 | Argument | Default | Meaning |
 |---|---|---|
 | `--query` | (required) | Natural-language search question |
-| `--top-k` | 5 | Number of results to return |
+| `--top-k` | 5 | Number of results |
 | `--index-dir` | `.company/memory/index` | LanceDB index path |
-| `--model` | `nomic-embed-text` | Embedding model (must match rag_index.py) |
+| `--model` | (ignored) | Accepted for back-compat; the fastembed model is fixed |
 
-### Output (JSON)
-
+**Output (JSON)** — one row per hit, best first:
 ```json
 [
-  {
-    "id": "chairman-docs-preference",
-    "tier": "L2",
-    "path": ".company/memory/L2-cold/preferences/documentation.md",
-    "score": 0.87
-  },
-  {
-    "id": "onboarding-docs-request",
-    "tier": "L1",
-    "path": ".company/memory/L1-warm/sessions/2026-06-10.md",
-    "score": 0.72
-  },
-  ...
+  { "id": "chairman-docs-preference", "tier": "L2",
+    "path": ".company/memory/L2-cold/preferences/documentation.md", "score": 0.87 }
 ]
 ```
+`score` = cosine similarity (0–1, higher = closer). `path` points back to the markdown source so you can read the full context.
 
-- `score`: similarity score (0–1, higher = more relevant). Computed from cosine distance: `1 - distance`.
-- Sorted descending by score (best first).
-- `path` points back to the markdown source, so you can read the full context.
+> **Status:** `rag_query.py` is available for manual/ad-hoc use. The **user-facing consumer** — semantic ask-time injection in `hook_memory_inject.py` — is **Stage B of Phase 13 and is NOT wired yet** (keyword injection remains the live path). This section documents the query contract Stage B will build on; it does not yet run in the pipeline.
 
-### Fallback: No Index
-
-If the index isn't available (not built yet, Ollama down, LanceDB missing):
+### Fallback: no index / no venv
 
 ```bash
-# Manual grep fallback
 grep -ri "documentation" .company/memory/
 ```
-
-The script hints at this fallback if it exits with code 2.
-
----
-
-## 6. Gibby's VERIFY Integration
-
-During memory verification (pipeline stage 4), Gibby uses RAG to surface near-duplicates and potential contradictions, complementing the entropy checks.
-
-### Semantic Duplicate Search
-
-When a new memory is written, Gibby queries the index with the memory's body:
-
-```bash
-python3 .company/scripts/rag_query.py \
-  --query "$(cat .company/memory/L0-working/new_memory.md | tail -n +5)" \
-  --top-k 10
-```
-
-(Assumes frontmatter is the first 5 lines; adjust as needed.)
-
-High-similarity hits (score > 0.85) are **flagged as potential duplicates** for manual review.
-
-### Contradiction Detection
-
-Gibby also searches for **opposing keywords** in high-similarity results. For example:
-
-```bash
-python3 .company/scripts/rag_query.py \
-  --query "Chairman prefers async communication" \
-  --top-k 10
-```
-
-If the results include a memory like "Chairman prefers synchronous meetings" (high similarity but negating keywords), Gibby flags this as a **contradiction** and asks Tony to investigate.
-
-### Workflow
-
-1. New memory written to L0.
-2. Gibby runs semantic query of the body.
-3. For each high-similarity result:
-   - If similarity > 0.85 and text is nearly identical → reject new memory, return to CAPTURE for re-evaluation.
-   - If similarity > 0.85 but keywords conflict → flag as contradiction, ask Tony to reconcile sources.
-4. If no conflicts, memory moves to L1 (Phoebe approves placement).
-
-This complements the entropy.py heuristic (Jaccard similarity) by catching paraphrases that keyword matching misses.
+The scripts hint at this fallback whenever they exit 2.
 
 ---
 
 ## 7. Privacy & Security
 
-RAG is **offline only**, no exceptions. This is a hard rule.
+RAG is **offline only** — a hard rule.
 
-- **No API embeddings**: Ollama runs locally; all embeddings computed on your machine.
-- **No network egress**: Content never leaves your disk except to Ollama (local HTTP).
-- **Gitignored**: `.company/memory/index/` is in `.gitignore`; the index never enters version control.
-- **Rebuildable**: Delete the index anytime without loss of information; markdown is the truth.
+- **Local embeddings**: fastembed runs entirely on-device (ONNX/CPU). No API calls, no network at index or query time.
+- **Gitignored**: `.company/` (including `memory/index/` and `.rag-venv/`) is in `.gitignore`; the index and venv never enter version control.
+- **Rebuildable**: delete the index anytime without information loss — markdown is the truth.
 
-If you ever share a repo or hand off the computer, wipe `.company/` before leaving (or just delete `.company/memory/index/` to remove the indexed copy).
+To hand off a repo or machine, wipe `.company/` (or just `.company/memory/index/`) to remove the indexed copy.
 
 ---
 
 ## 8. Graceful Degradation
 
-The RAG stack is designed to fail loud and clear, with fallback instructions, never silently crashing.
+The RAG stack fails loud and clear with fallback instructions, never silently.
 
-### Exit Code 2 Signals
+### Exit code 2 — backend missing
 
-When `rag_index.py` or `rag_query.py` exits with code 2, something is missing.
-
-#### LanceDB Not Installed
-
+Both `rag_index.py` (full build) and `rag_query.py` exit **2** with an actionable message when the RAG venv isn't installed:
 ```
-[rag_index] LanceDB not installed. Run:
-  python3 -m ensurepip --upgrade && pip install lancedb
-(see references/rag.md § Setup)
+[rag_index] RAG backend not installed. Run:
+  bash .company/scripts/rag_setup.sh install
+(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)
 ```
+`rag_query.py` additionally hints the grep fallback and distinguishes "no index yet" (build it first) from "backend unavailable".
 
-**Fix**: Follow the setup steps in §3 above.
+### Deps-free threshold check
 
-#### Ollama Not Reachable
-
-```
-[rag_index] Ollama not reachable at http://localhost:11434.
-Start Ollama:
-  ollama serve
-Then pull the model:
-  ollama pull nomic-embed-text
-(see references/rag.md § Setup)
-```
-
-**Fix**: Start `ollama serve` in a separate terminal and ensure the model is downloaded.
-
-#### No Index Yet
-
-```
-[rag_query] No index yet. Tony must run rag_index.py first, or grep .company/memory directly.
-Fallback:
-  grep -ri '<your_keywords>' .company/memory
-```
-
-**Fix**: Run `rag_index.py` to build the index, or use grep.
-
-### Threshold Check (No Deps Required)
-
-The `--threshold-check` flag works **offline** (no Ollama, no LanceDB):
-
+`--threshold-check` works with **no venv, no LanceDB, no fastembed**:
 ```bash
 python3 .company/scripts/rag_index.py --threshold-check
 ```
+It only counts active L1/L2 and exits 0 (at/over threshold) or 1 (under) — the mechanism behind the daily activation surface (§2).
 
-This only counts L1/L2 active memories and exits 0 (at/above threshold) or 1 (below). Useful for automation that doesn't require the full stack.
+### Never fails the core
 
-### Grep Fallback
+The daily index refresh (§4) is wired so that an absent **or broken** venv, or a nonzero index run, degrades to a single logged line — the deterministic core (reinforce/decay/verify/entropy/capture) always completes and `daily-run.sh` always exits 0.
 
-If RAG is unavailable but you need to search memory, use grep:
+### Environment escape hatches
+
+- `SC_RAG_REEXEC=1` — suppress the auto re-exec into `.company/.rag-venv` (run under the current interpreter; used by tests and the pipeline's explicit venv invocation).
+- `SC_NO_RAG=1` — force the in-process semantic pass off in `entropy.py` (Jaccard-only); the skip reason names the env var, distinct from a genuinely absent backend.
+
+### Grep fallback
 
 ```bash
-# Search all memory
-grep -ri "keyword" .company/memory/
-
-# Search a specific tier
-grep -ri "keyword" .company/memory/L1-warm/
-grep -ri "keyword" .company/memory/L2-cold/
-
-# Show context
-grep -B2 -A2 -ri "keyword" .company/memory/
+grep -ri "keyword" .company/memory/            # all memory
+grep -ri "keyword" .company/memory/L1-warm/    # one tier
+grep -B2 -A2 -ri "keyword" .company/memory/    # with context
 ```
-
-Not as fast as semantic search for paraphrases, but always available.
 
 ---
 
 ## 9. Troubleshooting
 
-### "No module named lancedb"
-
-**Cause**: LanceDB not installed.  
-**Fix**: `pip install lancedb` (see §3 Step 4).
-
-### "Connection refused" when querying Ollama
-
-**Cause**: `ollama serve` not running.  
-**Fix**: Start Ollama: `ollama serve` in a new terminal.
-
-### "Embedding model 'nomic-embed-text' not found"
-
-**Cause**: Model not downloaded.  
-**Fix**: `ollama pull nomic-embed-text`.
+### "No module named lancedb / fastembed"
+Backend not installed → `bash .company/scripts/rag_setup.sh install`.
 
 ### "Index is out of sync after a markdown edit"
-
-**Cause**: Incremental rebuild skipped an edited file (hash collision, rare).  
-**Fix**: Force a full rebuild: `rag_index.py --rebuild`.
+Incremental skipped an edited file (rare hash edge) → force a full rebuild: `rag_index.py --rebuild`.
 
 ### "Query returns no results"
+Index empty (no L1/L2 yet), query too specific, or RAG below threshold. Check with the grep fallback and verify the index has rows (`rag_index.py` reports `table_rows`).
 
-**Cause**: 
-- Index is empty (no L1/L2 memories yet).
-- Query is too specific / uses domain jargon not in memory.
-- RAG not activated yet (below threshold).
-
-**Fix**: 
-- Check: `grep -ri "your_keyword" .company/memory/` (grep fallback).
-- Verify index: `rag_index.py` returns non-zero `table_rows`.
-- Try a broader query.
-
-### "Index file is corrupted / LanceDB won't start"
-
-**Cause**: Disk corruption or LanceDB version mismatch (rare).  
-**Fix**: Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
+### "Index file is corrupted / LanceDB won't open"
+Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
 
 ---
 
-## 10. Summary: RAG Lifecycle
+## 10. RAG Lifecycle
 
 | Stage | Who | Action | Condition |
 |---|---|---|---|
-| **Monitor** | Tony (weekly) | Run `--threshold-check` | Count L1+L2; assess if RAG is worth enabling |
+| **Monitor** | Tony (daily, deps-free) | `--threshold-check` in daily-run surfaces an activation candidate | Active L1+L2 ≥ 50 and venv not installed |
 | **Decide** | Elon | Approve activation | Threshold crossed or Chairman orders |
-| **Setup** | Tom (one-time) | Install Ollama, LanceDB, pip (§3) | Before first rebuild |
-| **Maintain** | Tony (weekly) | Run `rag_index.py` incremental | Keep index in sync with markdown changes |
-| **Query** | Tony, Gibby | Run `rag_query.py` | Search when needed, or during Gibby's VERIFY |
-| **Rebuild** | Tony (as needed) | Run `--rebuild` flag | After major cleanup or if corruption suspected |
-| **Degrade** | All | Exit 2 + fallback message | When Ollama/LanceDB missing; grep as fallback |
+| **Setup** | Tom / human (one-time) | `rag_setup.sh install` | Before first refresh |
+| **Refresh** | Tony (daily, automatic) | Incremental `rag_index.py` after reinforce+decay | Keeps the index in sync with markdown |
+| **Query** | manual today; Stage B (upcoming) will inject at ask-time | `rag_query.py` | Search by meaning |
+| **Rebuild** | Tony (as needed) | `--rebuild` | After major cleanup / corruption |
+| **Degrade** | All | Exit 2 + grep fallback; core never fails | Venv absent/broken |
 
 ---
 
 ## 11. Integration with Company Workflow
 
-- **§3 Weekly Action Breakdown** (in `org/triggers.md`): Step [5] is the RAG rebuild (Tony, Sonnet + rag_index.py). Marked as "deps required (Ollama + LanceDB)"; if deps absent, script exits 2 and step is logged but not a failure.
-- **Gibby's VERIFY Loop** (in `references/red-blue-protocol.md`): Semantic query for duplicates/contradictions is one attack surface Gibby can rotate; complements entropy.py heuristics.
-- **Policy tunables** (in `org/policy.md § RAG`): `RAG_ENABLE_THRESHOLD`, `RAG_MODEL`, `RAG_INDEX_PATH` are configurable per company instance.
+- **Daily core** (`daily-run.sh`): the RAG-index refresh + threshold surface run after the reinforce/decay/verify/entropy core, owned by Tony, gated via `org/schedule.yaml`. Venv absent/broken → one logged skip line, core unaffected.
+- **In-process dedup** (`reinforce_memory.py`, `entropy.py`): use `rag_embed` directly (Path A, §1) — separate from the LanceDB index.
+- **Policy tunables** (`org/policy.md §8`): `RAG_ENABLE_THRESHOLD`, `RAG_MODEL`, `RAG_INDEX_PATH`.
+- **Stage B (upcoming)**: semantic ask-time injection in `hook_memory_inject.py` will consume `rag_query.py` with a tight timeout and fall back to today's keyword path. Not yet wired.
 
 ---
 
 ## 12. References
 
-- **Authoritative design**: `design/self-company-design.md §8`.
-- **RAG build manifest**: `.rag-manifest.md` (specs, schema, build order).
-- **Scripts**: `.company/scripts/rag_index.py`, `.company/scripts/rag_query.py`.
+- **Scripts**: `.company/scripts/rag_setup.sh`, `rag_index.py`, `rag_query.py`, `rag_embed.py`.
 - **Index location**: `.company/memory/index/` (LanceDB, gitignored).
-- **Memory tiers & frontmatter**: `design/self-company-design.md §2` and §4.
-- **Gibby VERIFY integration**: `references/red-blue-protocol.md` (attack surfaces, regression).
 - **Policy tunables**: `org/policy.md §8 RAG`.
-- **Weekly triggers**: `org/triggers.md §3 Action Breakdown, step [5]`.
-
----
-
-## Section Outline
-
-1. **What RAG Is Here** — index as derivative, markdown as truth, rebuildable.
-2. **When RAG Activates** — threshold 50, auto-trigger via `--threshold-check`, manual override.
-3. **One-Time Setup** — Ollama install, model pull, pip bootstrap, LanceDB install, verification.
-4. **How Tony Rebuilds** — incremental (default), full rebuild (after cleanup), output summary.
-5. **How to Query** — command syntax, JSON output, fallback grep.
-6. **Gibby's VERIFY Integration** — semantic duplicate search, contradiction detection, workflow.
-7. **Privacy & Security** — offline only, no API embeddings, gitignored, rebuildable.
-8. **Graceful Degradation** — exit code 2 signals, actionable messages, grep fallback.
-9. **Troubleshooting** — common issues and fixes.
-10. **Summary: RAG Lifecycle** — stages and who does what.
-11. **Integration with Company Workflow** — links to triggers, verify, policy, scripts.
-12. **References** — authoritative design, manifest, scripts, locations.
+- **Design**: `design/self-company-design.md §8`.
+- **Memory tiers & frontmatter**: `design/self-company-design.md §2` / §4.

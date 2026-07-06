@@ -12,7 +12,7 @@ A comprehensive overview of trigger timing, participants, actions, and token bud
 |---|---|---|---|---|---|
 | **Real-Time** | After each conversation | Cross-dept (Haiku) + Gibby (Sonnet) | CAPTURE observations → quick VERIFY → write L0 | Haiku + Sonnet | Parallel: capture; Serial: → verify → write |
 | **Daily** | Scheduled trigger | Tony (Sonnet) + Gibby (Sonnet verifies sources) + Tom watches budget | consolidate, decay, write, verify, upgrade-candidate handoff | Sonnet | Serial: consolidate → decay → write → verify |
-| **Weekly** | Scheduled trigger | Tony + Gibby + Phoebe + July (Sonnet) | Full verification, RAG rebuild, entropy measurement, performance tuning, report generation | Sonnet | Mostly parallel; verify → report serial |
+| **Weekly** | Scheduled trigger | Tony + Gibby + Phoebe + July (Sonnet) | Full verification, entropy measurement, performance tuning, report generation (the RAG index is refreshed automatically each DAILY run — Phase 13 A.1) | Sonnet | Mostly parallel; verify → report serial |
 | **Manual** | Chairman explicitly triggers | Elon (director) + all staff (Opus) | deep cleanup, reorganization, cross-tier review, build pipeline | Opus | Case-by-case (typically spec → build → verify serial) |
 
 ---
@@ -138,7 +138,7 @@ Scheduled to run at a fixed day and time each week (default **Monday 02:00 local
 
 ### Who Works
 
-1. **Tony (Sonnet)**: Diagnose entropy, RAG rebuild, overall memory inventory.
+1. **Tony (Sonnet)**: Diagnose entropy, review the daily RAG-index refresh, overall memory inventory.
 2. **Gibby (Sonnet)**: Full memory source verification, random sampling of build pipeline.
 3. **Phoebe (Sonnet)**: Final ORGANIZE memory decision, plan state review.
 4. **July (Sonnet)**: Five-staff performance review, recommend enable/disable adjustments.
@@ -174,13 +174,18 @@ Scheduled to run at a fixed day and time each week (default **Monday 02:00 local
     - Token weekly accumulated usage vs. ceiling (see `policy.md §3.1`)
     - Forecast budget remaining for next week
 
-[5] RAG-REBUILD (Tony, Sonnet + script)
-    - If RAG is active (L1+L2 count ≥ 50): run `python3 .company/scripts/rag_index.py` (incremental)
-    - Updates vector index with new/changed memories from the week, skips unchanged via content_hash
-    - Output: JSON summary (embedded count, skipped count, table rows)
-    - Deps required: Ollama running + LanceDB installed; if absent, script exits 2 (logged, not a failure)
-    - Gibby uses updated index during VERIFY for semantic duplicate/contradiction detection
-    - See `references/rag.md` §4 for details
+[5] RAG-INDEX REFRESH (Tony) — now AUTOMATIC in the daily core, not a weekly step
+    - The LanceDB index is refreshed INCREMENTALLY every daily run by `daily-run.sh`,
+      after reinforce+decay+verify+entropy (Phase 13 A.1) — no separate weekly rebuild.
+      It runs `python3 .company/scripts/rag_index.py` (L1/L2 only), skipping unchanged
+      bodies via content_hash.
+    - Activation is auto-surfaced: `rag_index.py --threshold-check` (deps-free) runs each
+      daily and, when active L1+L2 ≥ 50 while the RAG stack is not installed, logs an
+      "activate RAG" candidate (Phase 13 A.2). Below threshold → nothing surfaced.
+    - Deps: the fastembed venv (`bash .company/scripts/rag_setup.sh install`). Absent OR
+      broken venv → one logged skip line; the deterministic core always completes.
+    - See `references/rag.md` §2/§4 for details. (Semantic query consumption —
+      ask-time injection — is Stage B, upcoming, not yet wired.)
 
 [6] LOG-COMPILE (Tony, Sonnet)
     - Aggregate all week's changes (new / upgrade / decay / verify result)
@@ -259,7 +264,7 @@ Tom report: expected token usage, scheduled runs, risks to watch
 
 **When to Enable**: Chairman must explicitly approve before Tom sets up scheduling. Automation is **not pre-installed by default**.
 
-**Note**: v2.5 includes RAG rebuild (dormant, requires Ollama + LanceDB); report push mechanism (PushNotification / Discord) deferred to v3+.
+**Note**: the RAG index refresh is wired into the daily core (Phase 13 A.1; ships dormant, activated with `rag_setup.sh install` — fastembed + LanceDB, no Ollama). Report push mechanism (PushNotification / Discord) deferred to v3+.
 
 ---
 
@@ -383,7 +388,7 @@ Manual triggers are not limited by daily / weekly ceiling (Chairman is highest p
 
 **Real-Time Level**: Cross-dept CAPTURE can run in parallel (each person records independently); VERIFY single Gibby runs serially.
 **Daily Level**: CONSOLIDATE → DECAY → WRITE → VERIFY runs serially across stages (with dependencies: WRITE awaits DECAY's upgrade candidates, VERIFY awaits WRITE landing); TOKEN-CHECK (Tom) guards token count at the end.
-**Weekly Level**: VERIFY / RAG-REBUILD / ENTROPY-REPORT / PERFORMANCE-REVIEW / INFRA-CHECK five tasks are largely independent, can run in parallel; REPORT-COMPILE runs last serially.
+**Weekly Level**: VERIFY / ENTROPY-REPORT / PERFORMANCE-REVIEW / INFRA-CHECK tasks are largely independent, can run in parallel; REPORT-COMPILE runs last serially. (The RAG index refresh is automatic in the daily core — Phase 13 A.1 — not a weekly task.)
 
 ### Cross-Level Serialization
 
@@ -435,6 +440,6 @@ Manual triggers are not limited by daily / weekly ceiling (Chairman is highest p
 
 ---
 
-Version: v2.5 (memory pipeline + RAG dormant)  
+Version: v2.5 (memory pipeline + RAG index wired into the daily core, ships dormant)  
 Built by: Haiku (Claude Code)  
 Last updated: 2026-06-25
