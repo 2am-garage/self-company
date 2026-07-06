@@ -14,7 +14,7 @@ How to run and wire the company's day-to-day operations. Four areas:
 | # | Trigger | Mechanism | Fired by |
 |---|---|---|---|
 | 1 | Chairman calls | conversation | the Chairman |
-| 2 | Clock | cron → `daily-run.sh` (every 6h) | time |
+| 2 | Clock | cron → `daily-run.sh` (default every 6h; per-company via `org/schedule.yaml`) | time |
 | 3 | **Event** | **`fire-trigger.sh <name> <payload>`** (push) | any external program / user-defined |
 | 4 | **Session** | **`company-run.sh "<task>"`** | the interactive session (Elon hands work to the company) |
 
@@ -72,7 +72,9 @@ poll only as a fallback.
 ### Multi-company scheduling (`schedule.sh`) — the crontab as a keyed set
 
 `schedule.sh` owns Trigger #2 (the clock). One deployment installs **two** OS
-crontab lines per project: `daily-run.sh` every 6h and `research-scan.sh` weekly.
+crontab lines per project: `daily-run.sh` (default every 6h) and `research-scan.sh`
+weekly — both cadences are per-company overridable via `org/schedule.yaml` (see
+[Per-company schedule & duties](#per-company-schedule--duties-orgscheduleyaml--config-not-hardcode) below).
 The two lines mirror the role split — the 6-hourly line is Tony's *internal*
 maintenance; the weekly line is **Mike's *external* research pass** (R&D
 Researcher): a bounded headless `claude -p` that surveys the outside world and
@@ -109,6 +111,67 @@ not a per-repo special case.
   the real `crontab` binary (`SELF_COMPANY_CRONTAB_CMD` overrides the binary) — a
   general injectable backend used by `tests/test_schedule.py` so the suite never
   touches the user's real crontab.
+
+### Per-company schedule & duties (`org/schedule.yaml`) — config, not hardcode
+
+The `*/6` tick, weekly research, and the daily duty pipeline are **defaults**, not
+fixed: a company declares its OWN schedule and per-employee duties as DATA in
+`org/schedule.yaml` (per company, git-ignored like the rest of `.company/`; a
+commented, absent-equivalent template ships on init). The reader
+`schedule_config.py` is the single source of truth; same safe flat-YAML discipline
+as `trigger_engine.py` (PyYAML optional, stdlib fallback, no hard dep). **Every key
+is optional — a missing or empty `schedule.yaml` reproduces today's behaviour
+byte-for-byte.** The design has **two layers**:
+
+- **Layer A (knobs — freely adjustable).** Company **`cadence`** = the cron tick
+  (how often `daily-run.sh` fires); **`research: { enabled, cadence }`** = Mike's
+  weekly pass on/off + when; **`agent: { model, timeout, daily_cap }`** = the daily
+  headless-agent knobs (env `SELF_COMPANY_DAILY_*` still wins). Per-employee blocks
+  (`tony`/`gibby`/`bob`/`mike`/`elon`/`tom`/…) take **`cadence`** (a sub-cadence
+  relative to the tick), **`duties`** (which of that employee's OWN duties run),
+  **`budget`**, and **`enabled`**.
+- **Layer B (structural invariants — NOT configurable).** Who is attacker vs
+  builder, the 3-consecutive sign-off gate, ledger-first/defenses-only-grow, and
+  the dispatch topology stay in code. There is deliberately **no `role:`/`tier:`/
+  `attacks:` field** — config picks *which* of an employee's fixed duties run, it
+  can never *reassign* a role. See below and `references/red-blue-protocol.md`.
+
+**Cadence grammar** (company tick and per-employee alike, translated to a 5-field
+cron by `schedule_config.py`): `every Nh` (1–23) · `hourly` · `weekdays-<start>-<end>`
+(hours, Mon–Fri) · a raw 5-field cron expression. Research cadence adds
+`weekly-<dow>-<hh>` (dow `sun`..`sat` or `0`..`6`). Per-employee sub-cadences:
+`every-run` · `every-Nth` · `daily` (first tick of the day) · `weekly` (Sunday first
+tick) · `on-trigger` (never in the batch). Any invalid/out-of-range/malformed
+cadence falls back to the default and logs — **a broken or injection-shaped cron
+expression is never written to the crontab** (`schedule_config.py` validates the
+expression's charset AND per-field semantics; `schedule.sh` trusts that verdict).
+
+- **Runtime duty gating.** Per-employee cadence is resolved **deterministically at
+  runtime inside `daily-run.sh`** (one tick, gate duties as data) — NOT N separate
+  cron lines (that would multiply token/process cost). Gating is **fail-open**: any
+  doubt (no config, missing python, error) runs the step, so maintenance is never
+  silently suppressed. `schedule_config.py --should-run STEP --hour H --dow D` is
+  the seam.
+- **Invariant validator (Layer B enforcement).** `schedule_validator.py` refuses
+  any config that would break the red/blue competition — **rules R1–R6** (attacker≠
+  builder, attack surface must stay covered, sign-off gate/ledger/role fields are
+  not tunable, dispatch topology preserved). On any violation the config is
+  **rejected and the company runs with defaults**, logging the named rule; a
+  mis-configured competition never *runs*, it falls back. `schedule.sh` and
+  `daily-run.sh` both consult the validator before honouring config.
+- **SessionStart sync (`hook_schedule_guard.sh`).** Because the crontab carries an
+  absolute tick snapshot (Phase-7 A1), a `cadence`/`research` edit only reaches the
+  live crontab on re-install. The `SessionStart` guard closes that gap: if
+  `schedule.yaml` is absent it no-ops; otherwise it validates (an invalid config is
+  a non-blocking warning — daily-run falls back on its own), then compares the
+  desired tick signature to `ops/schedule/.installed-tick` and re-runs
+  `schedule.sh install` **only when the tick/research cadence actually changed**
+  (per-employee sub-cadence edits do NOT re-install). It honours
+  `SELF_COMPANY_CRONTAB_FILE` and skips silently with no crontab backend, and only
+  syncs an already-scheduled project (never auto-installs one).
+- **Generated roster.** `ops/schedule/roster.md` is now **GENERATED** by
+  `daily-run.sh` from the effective config on every run — do NOT hand-edit it (edit
+  `org/schedule.yaml` instead; the file is marked generated).
 
 ### Holding company (fleet orchestrator) — one cron for N sub-companies
 
