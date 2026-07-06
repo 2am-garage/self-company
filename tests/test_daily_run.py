@@ -423,42 +423,52 @@ class TestInstallHook(unittest.TestCase):
     def _settings(self, d):
         return os.path.join(d, ".claude", "settings.json")
 
-    def test_install_idempotent_and_preserves_existing(self):
+    def _write_legacy(self, d):
+        """Seed a project settings.json with the pre-v0.2.0 self-company hooks."""
         import json
-        with tempfile.TemporaryDirectory() as d:
-            os.makedirs(os.path.join(d, ".claude"))
-            with open(self._settings(d), "w") as f:
-                json.dump({"permissions": {"allow": ["Bash(ls)"]}}, f)
-            _bash([self.SH, "install", d])
-            _bash([self.SH, "install", d])  # twice -> still one
-            with open(self._settings(d)) as f:
-                cfg = json.load(f)
-            self.assertEqual(len(cfg["hooks"]["Stop"]), 1)
-            self.assertEqual(cfg["permissions"]["allow"], ["Bash(ls)"])  # preserved
-            cmd = cfg["hooks"]["Stop"][0]["hooks"][0]["command"]
-            self.assertIn("capture-trigger.py", cmd)
-            self.assertIn("self-company-capture", cmd)
+        os.makedirs(os.path.join(d, ".claude"), exist_ok=True)
+        cfg = {
+            "permissions": {"allow": ["Bash(ls)"]},
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command",
+                    "command": "python3 capture-trigger.py  # self-company-capture"}]}],
+                "SessionStart": [{"hooks": [{"type": "command",
+                    "command": "python3 notify-status.py  # self-company-notify"}]}],
+            },
+        }
+        with open(self._settings(d), "w") as f:
+            json.dump(cfg, f)
 
-    def test_status_reports_state(self):
+    def test_install_is_plugin_native_noop(self):
+        # v0.2.0: hooks are plugin-native; install writes nothing to settings.json.
+        with tempfile.TemporaryDirectory() as d:
+            r = _bash([self.SH, "install", d])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("plugin-native", r.stdout.lower())
+            self.assertIn("nothing to install", r.stdout.lower())
+            self.assertFalse(os.path.exists(self._settings(d)))
+
+    def test_status_reports_plugin_native(self):
         with tempfile.TemporaryDirectory() as d:
             r0 = _bash([self.SH, "status", d])
-            self.assertIn("not installed", r0.stdout)
-            _bash([self.SH, "install", d])
+            self.assertIn("plugin-native", r0.stdout.lower())
+            self.assertIn("no legacy", r0.stdout.lower())
+            self._write_legacy(d)
             r1 = _bash([self.SH, "status", d])
-            self.assertIn("INSTALLED", r1.stdout)
+            self.assertIn("legacy", r1.stdout.lower())
+            self.assertIn("double-fir", r1.stdout.lower())
 
-    def test_uninstall_removes_and_keeps_other_settings(self):
+    def test_uninstall_removes_legacy_and_keeps_other_settings(self):
         import json
         with tempfile.TemporaryDirectory() as d:
-            os.makedirs(os.path.join(d, ".claude"))
-            with open(self._settings(d), "w") as f:
-                json.dump({"permissions": {"allow": ["Bash(ls)"]}}, f)
-            _bash([self.SH, "install", d])
-            _bash([self.SH, "uninstall", d])
+            self._write_legacy(d)
+            r = _bash([self.SH, "uninstall", d])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("removed", r.stdout.lower())
             with open(self._settings(d)) as f:
                 cfg = json.load(f)
-            self.assertNotIn("hooks", cfg)
-            self.assertEqual(cfg["permissions"]["allow"], ["Bash(ls)"])
+            self.assertNotIn("hooks", cfg)  # legacy self-company entries gone
+            self.assertEqual(cfg["permissions"]["allow"], ["Bash(ls)"])  # preserved
 
 
 class TestScheduleGuards(unittest.TestCase):

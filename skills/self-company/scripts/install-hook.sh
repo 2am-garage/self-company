@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 ###############################################################################
-# install-hook.sh — install/uninstall/status the self-company hooks (Tom's job).
+# install-hook.sh — DEPRECATED since v0.2.0 (hooks are plugin-native).
 #
-# Installs TWO hooks into the project's `.claude/settings.json` (the SHARED
-# settings file) — NOT settings.local.json, because Claude Code's permission
-# auto-writer rewrites settings.local.json and would clobber an externally-added
-# hook. settings.json is stable. The merge preserves any existing settings/hooks.
+# The self-company hooks are now declared ONCE in the plugin's `hooks/hooks.json`
+# (at the plugin root; commands use `${CLAUDE_PLUGIN_ROOT}`), so Claude Code loads
+# them automatically when the plugin is installed — no per-repo settings.json edit.
+# Plugin hooks MERGE with settings.json hooks, so a LEGACY install-hook entry would
+# make Stop(capture) / SessionStart(notify) DOUBLE-FIRE. Therefore:
 #
-#   Stop         -> capture-trigger.py     (CAPTURE: cheap real-time memory capture)
-#   SessionStart -> notify-status.py --emit-hook  (catch-up PUSH on session entry:
-#                   surfaces unattended daily-run results; pushes only when something
-#                   substantive changed, then self-acks. push-only, never Discord.)
+#   install    -> NO-OP. Prints that hooks are plugin-native; nothing to install.
+#   uninstall  -> removes any LEGACY self-company hook entries from
+#                 `.claude/settings.json` (so existing installs stop double-firing).
+#   status     -> reports "plugin-native" + whether legacy entries still linger.
+#
+# The full 7-hook set is documented in references/operations.md and SKILL.md.
+# The uninstall path preserves the original marker-based settings.json editing.
 #
 # Usage:
-#   install-hook.sh install   [PROJECT_DIR]
-#   install-hook.sh uninstall [PROJECT_DIR]
+#   install-hook.sh install   [PROJECT_DIR]   # no-op (see hooks/hooks.json)
+#   install-hook.sh uninstall [PROJECT_DIR]   # clean legacy double-fire entries
 #   install-hook.sh status    [PROJECT_DIR]
 ###############################################################################
 set -uo pipefail
@@ -23,31 +27,26 @@ CMD="${1:-status}"
 PROJECT_DIR="${2:-${SELF_COMPANY_PROJECT_DIR:-$PWD}}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")"
 SETTINGS="$PROJECT_DIR/.claude/settings.json"
-# Code/data separation: the hook runs the CANONICAL script, not a .company/scripts
-# copy. Under a plugin, write the LITERAL ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts
-# so the hook shell expands it at runtime (survives plugin version bumps); else snapshot
-# the resolved absolute dev path. --company stays the data dir (unchanged). A1: because
-# the dev path is an absolute snapshot, re-run install-hook.sh after a skill move.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-  HOOK_SCRIPTS='${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts'
-else
-  HOOK_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-STOP_MARK="self-company-capture"
-STOP_CMD="python3 \"$HOOK_SCRIPTS/capture-trigger.py\" --company \"\$CLAUDE_PROJECT_DIR/.company\""
-NOTIFY_MARK="self-company-notify"
-NOTIFY_CMD="python3 \"$HOOK_SCRIPTS/notify-status.py\" --company \"\$CLAUDE_PROJECT_DIR/.company\" --emit-hook"
 
-python3 - "$CMD" "$SETTINGS" "$STOP_MARK" "$STOP_CMD" "$NOTIFY_MARK" "$NOTIFY_CMD" <<'PY'
+# Legacy markers this skill ever wrote into settings.json (uninstall targets these).
+STOP_MARK="self-company-capture"
+NOTIFY_MARK="self-company-notify"
+
+if [[ "$CMD" == "install" ]]; then
+  echo "[install-hook] hooks are plugin-native since v0.2.0 — nothing to install (see hooks/hooks.json)"
+  exit 0
+fi
+
+python3 - "$CMD" "$SETTINGS" "$STOP_MARK" "$NOTIFY_MARK" <<'PY'
 import json, os, sys
 
 cmd, settings = sys.argv[1], sys.argv[2]
-stop_mark, stop_cmd, notify_mark, notify_cmd = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+stop_mark, notify_mark = sys.argv[3], sys.argv[4]
 
-# (settings event, marker, command) for every hook this skill owns
+# Legacy (settings event, marker) pairs this skill used to install.
 HOOKS = [
-    ("Stop", stop_mark, stop_cmd),
-    ("SessionStart", notify_mark, notify_cmd),
+    ("Stop", stop_mark),
+    ("SessionStart", notify_mark),
 ]
 
 def load():
@@ -71,18 +70,10 @@ def save(d):
 
 d = load()
 
-if cmd == "install":
-    hooks = d.setdefault("hooks", {})
-    for event, mark, hook_cmd in HOOKS:
-        groups = hooks.setdefault(event, [])
-        groups[:] = [g for g in groups if not is_ours(g, mark)]   # idempotent
-        groups.append({"hooks": [{"type": "command", "command": f"{hook_cmd}  # {mark}"}]})
-    save(d)
-    print(f"[install-hook] installed Stop(capture) + SessionStart(notify) hooks -> {settings}")
-elif cmd == "uninstall":
+if cmd == "uninstall":
     hooks = d.get("hooks", {})
     removed = 0
-    for event, mark, _ in HOOKS:
+    for event, mark in HOOKS:
         groups = hooks.get(event, [])
         before = len(groups)
         groups[:] = [g for g in groups if not is_ours(g, mark)]
@@ -91,14 +82,23 @@ elif cmd == "uninstall":
             hooks.pop(event, None)
     if not hooks:
         d.pop("hooks", None)
-    save(d)
-    print(f"[install-hook] removed {removed} self-company hook(s)" if removed
-          else "[install-hook] nothing to remove")
+    # Only rewrite a settings file that actually exists (never create an empty one).
+    if os.path.exists(settings):
+        save(d)
+    print(f"[install-hook] removed {removed} legacy self-company hook entr"
+          f"{'y' if removed == 1 else 'ies'} (plugin-native since v0.2.0)"
+          if removed else
+          "[install-hook] no legacy self-company hook entries found — nothing to remove")
 elif cmd == "status":
     hooks = d.get("hooks", {})
-    for event, mark, _ in HOOKS:
-        ok = any(is_ours(g, mark) for g in hooks.get(event, []))
-        print(f"[install-hook] {event}: {'INSTALLED' if ok else 'not installed'}")
+    legacy = [event for event, mark in HOOKS
+              if any(is_ours(g, mark) for g in hooks.get(event, []))]
+    print("[install-hook] hooks are plugin-native since v0.2.0 (declared in hooks/hooks.json)")
+    if legacy:
+        print(f"[install-hook] WARNING: legacy settings.json entries still present for "
+              f"{', '.join(legacy)} — run 'install-hook.sh uninstall' to stop double-firing")
+    else:
+        print("[install-hook] no legacy settings.json entries — clean")
 else:
     print("usage: install-hook.sh [install|uninstall|status] [PROJECT_DIR]", file=sys.stderr)
     sys.exit(2)

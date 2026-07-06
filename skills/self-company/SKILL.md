@@ -177,7 +177,17 @@ minute, and `list`/`status --all`/`prune`/scoped `uninstall` manage the fleet
 split: the 6-hourly `daily-run.sh` is Tony's internal maintenance, while the weekly
 `research-scan.sh` is **Mike's external research pass** — it writes a dated, cited
 brief to `ops/research/` and appends mechanism-level proposals for Tony/Elon.
-**Catch-Up** — a `SessionStart`
+**Hooks** — since v0.2.0 all **7 hooks are plugin-native**: declared once in
+`hooks/hooks.json` (plugin root) and run via `${CLAUDE_PLUGIN_ROOT}`, so Claude Code
+loads them on install with no `install-hook.sh` edit. They are `Stop` (capture),
+`SessionStart` (catch-up push), `UserPromptSubmit` (ask-time memory injection, 30s
+stdlib), `PreCompact` (capture-rescue), `PreToolUse` (deny rm under `.company/memory`),
+`PostToolUse` (lint memory writes), `SessionEnd` (verify fresh captures). Plugin hooks
+fire in **every** repo, so each script's first action is an opt-in guard — no
+`$CLAUDE_PROJECT_DIR/.company` marker → silent `exit 0`. `install-hook.sh` is
+**deprecated**: `install` is a no-op, `uninstall` cleans legacy `settings.json` entries
+that would otherwise double-fire (plugin hooks merge with settings hooks).
+**Catch-Up** — the `SessionStart`
 hook (`notify-status.py --emit-hook`) pushes one summary when unattended runs moved
 something substantive; push only, never Discord. **Ledger** — `report.py` writes
 `ops/reports/ledger.md`, an autoresearch-style table with entropy as the headline
@@ -211,22 +221,21 @@ After completion, read `.company/org/policy.md` to understand the company charte
 
 ### Upgrading (after a skill/plugin update)
 
-The cron lines and Claude Code hooks are **absolute-path snapshots** of where the scripts
-lived at install time. After the skill/plugin moves or updates, re-run both installers so
-the snapshots point at the new location:
+The cron lines are **absolute-path snapshots** of where the scripts lived at install
+time, so after the skill/plugin moves or updates re-run the scheduler:
 ```bash
 bash scripts/schedule.sh install       # refresh the cron lines
-bash scripts/install-hook.sh install   # refresh the Stop/SessionStart hooks
 ```
-(Under a plugin the hooks use `${CLAUDE_PLUGIN_ROOT}` and survive version bumps, but
-re-running is harmless and idempotent.)
+Hooks need **no** re-install: since v0.2.0 they are plugin-native (`hooks/hooks.json`
+via `${CLAUDE_PLUGIN_ROOT}`) and survive version bumps automatically.
 
 ### Optional local setup (not pre-installed on clone)
 
 These are opt-in and live only on your machine (`.claude/` is git-ignored):
 
-- **Hooks** — `scripts/install-hook.sh install` wires the `Stop` (CAPTURE) and
-  `SessionStart` (catch-up push) hooks into `.claude/settings.json`.
+- **Hooks** — none needed: all 7 hooks are plugin-native (`hooks/hooks.json`). If you
+  used the pre-v0.2.0 installer, run `scripts/install-hook.sh uninstall` once to remove
+  the legacy `.claude/settings.json` entries that would otherwise double-fire.
 - **Dev repo only** — if you cloned the skill's *development* repo (the one with a
   `.self-company-dev` marker) and want it to load itself as a skill, run
   `scripts/dev-link-skill.sh` to (re)create the `.claude/skills/self-company/`

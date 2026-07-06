@@ -141,8 +141,8 @@ are mutually-exclusive ownership modes per project).
 
 The unattended daily cron (`schedule.sh`) runs silently and only writes logs. The
 Chairman shouldn't have to dig through logs, so this is now **automated via a
-`SessionStart` hook** (installed by `install-hook.sh` alongside the Stop/CAPTURE
-hook):
+`SessionStart` hook** (declared plugin-natively in `hooks/hooks.json` alongside the
+Stop/CAPTURE hook — see "Plugin-native hooks" below):
 
 - On session start the hook runs `notify-status.py --emit-hook`. If there are new
   background runs AND they are **substantive** (entropy or memory count moved,
@@ -165,6 +165,53 @@ Manual fallback (hook absent / ad-hoc check): run `notify-status.py`, and if
 
 This is how the silent local cron reaches the Chairman's phone without Discord or
 a cloud agent: the cron does the work; the SessionStart hook relays the summary.
+
+---
+
+## Plugin-native hooks (the single declaration point)
+
+Since **v0.2.0** all hooks ship **with the plugin**: they are declared once in
+`hooks/hooks.json` at the plugin root, and Claude Code loads them automatically the
+moment the plugin is installed — **no per-repo `install-hook.sh` edit**. Every command
+runs the canonical script via `${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/<script>`,
+so the wiring survives plugin version bumps with zero stale-path snapshots.
+
+**The 7 hooks** (event → matcher → script, per `hooks/hooks.json`):
+
+| Event | Matcher | Script | Timeout | What it does |
+|---|---|---|---|---|
+| `Stop` | — | `capture-trigger.py --company "$CLAUDE_PROJECT_DIR/.company"` | 120s | CAPTURE: cheap real-time memory capture (cooldown-guarded). |
+| `SessionStart` | `startup\|resume\|clear\|compact` | `notify-status.py --emit-hook --company …` | 120s | Catch-up push of unattended runs (push only, self-acks). |
+| `UserPromptSubmit` | — | `hook_memory_inject.py` | **30s** | Ask-time memory injection: ranks L2/high-rc L1 by a **fast stdlib** scorer and injects top-k as `additionalContext`. Relevance-gated (injects nothing if nothing scores), token-capped, never blocks. **No fastembed cold-start on this path** (30s cap). |
+| `PreCompact` | `auto\|manual` | `hook_precompact_capture.sh` | 120s | Capture-rescue over the pre-compaction transcript before facts are summarized away; reuses the Stop cooldown to de-dup; never blocks compaction. |
+| `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`mv`-away of any path under `.company/memory/` (physical deletion is the decay reap's job — Phase 6). Broadens in-script; emits `permissionDecision` with reason. |
+| `PostToolUse` | `Write\|Edit` | `hook_memory_lint.py` | 10s | Validates frontmatter of any `.company/memory/**.md` write (id/tier/status/sources, tombstone vocab); `block`s malformed writes with a reason. Non-memory files untouched. |
+| `SessionEnd` | — | `hook_sessionend_verify.sh` | 120s | Runs the deterministic verify pass so this session's fresh captures are source-stamped before the next SessionStart report. Side-effect only; never fails the session. |
+
+> Matcher key is `matcher` (real Claude Code schema). `PreToolUse` matches all `Bash`
+> and the guard script itself narrows to the dangerous `.company/memory` reap paths —
+> so `rm`, `unlink` and `mv` are all seen (defense in depth beside the tar floor).
+
+**Global-fire + `.company` opt-in guard.** Plugin hooks fire in **every** repo the
+Chairman opens, not just company repos. So every hook script's FIRST action is an
+opt-in guard: if `$CLAUDE_PROJECT_DIR/.company` (or `./.company`) does not exist it
+`exit 0`s as a silent no-op (no output, no writes). This one marker check is what keeps
+the hooks inert in non-company repos — there is no per-hook special-casing.
+
+**`install-hook.sh` is deprecated.** The plugin now owns these hooks, and plugin hooks
+**merge** with `settings.json` hooks — so a legacy `install-hook.sh install` entry
+would make Stop(capture)/SessionStart(notify) **double-fire**. Therefore:
+
+- `install-hook.sh install` → **no-op** ("hooks are plugin-native since v0.2.0 —
+  nothing to install (see hooks/hooks.json)").
+- `install-hook.sh uninstall` → **removes any legacy self-company hook entries** from
+  `.claude/settings.json` (marker-based: `self-company-capture` / `self-company-notify`),
+  leaving all other settings/hooks byte-untouched. Run this once on any repo that used
+  the old installer to stop the double-fire.
+- `install-hook.sh status` → reports **plugin-native**, and warns if legacy entries
+  still linger.
+
+Post-install the Chairman verifies wiring with `/hooks`; the hooks are simply *there*.
 
 ---
 

@@ -2,11 +2,15 @@
 """
 RAG Query Script — Search LanceDB index.
 
-Embeds a query text via Ollama, searches the LanceDB index, returns JSON results.
-Graceful degradation: if Ollama/LanceDB unavailable, exit(2) with actionable message + grep fallback hint.
+Embeds a query text via the local fastembed backend (rag_embed), searches the
+LanceDB index, returns JSON results. No network / no Ollama — embeddings run
+locally in-process.
+Graceful degradation: if the embedding backend / LanceDB is unavailable, exit(2)
+with an actionable message + grep fallback hint.
 
 Usage:
-  python3 rag_query.py --query "find memories about X" [--top-k 5] [--index-dir .company/memory/index] [--model nomic-embed-text]
+  python3 rag_query.py --query "find memories about X" [--top-k 5] [--index-dir .company/memory/index]
+  (--model is accepted for back-compat but ignored — the fastembed model is fixed.)
 
 Output (JSON, stdout):
   [{"id": "...", "tier": "L1|L2", "path": "...", "score": 0.95}, ...]
@@ -81,13 +85,14 @@ def query_rag(query_text, top_k=5, index_dir=".company/memory/index", model="nom
         query_text (str): Query string
         top_k (int): Number of results
         index_dir (str): Path to LanceDB index
-        model (str): Ollama model name
+        model (str): accepted for back-compat, ignored (fastembed model is fixed)
 
     Returns:
         list[dict]: Results with keys: id, tier, path, score
 
     Raises:
-        OllamaUnavailable: If Ollama not reachable
+        OllamaUnavailable: if the local embedding backend is unavailable
+            (class name kept for back-compat; no Ollama is involved)
         FileNotFoundError: If index not found
     """
     if not _HAS_LANCEDB:
@@ -143,7 +148,7 @@ Examples:
     parser.add_argument("--query", type=str, required=True, help="Query text (required)")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results (default: 5)")
     parser.add_argument("--index-dir", type=str, default=".company/memory/index", help="LanceDB index path")
-    parser.add_argument("--model", type=str, default="nomic-embed-text", help="Ollama model name")
+    parser.add_argument("--model", type=str, default="nomic-embed-text", help="ignored (kept for back-compat; fastembed model is fixed)")
 
     args = parser.parse_args()
 
