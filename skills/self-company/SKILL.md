@@ -240,9 +240,15 @@ After completion, read `.company/org/policy.md` to understand the company charte
 ### Upgrading (after a skill/plugin update)
 
 The cron lines are **absolute-path snapshots** of where the scripts lived at install
-time, so after the skill/plugin moves or updates re-run the scheduler:
+time. As of the Phase-12b self-heal this is now **automatic**: the `SessionStart`
+guard (`hook_schedule_guard.sh`) folds the resolved scripts dir into its signature,
+so when a plugin update/move changes that path it re-runs `schedule.sh install` for
+you on the next session — the cron re-points itself with no manual step (only an
+already-scheduled project; opted-out repos are never auto-installed). A tick/research
+edit self-heals the same way. If you'd rather not wait for the next session, the
+manual refresh remains available as a fallback:
 ```bash
-bash scripts/schedule.sh install       # refresh the cron lines
+bash scripts/schedule.sh install       # optional: refresh the cron lines now
 ```
 Hooks need **no** re-install: since v0.1.2 they are plugin-native (`hooks/hooks.json`
 via `${CLAUDE_PLUGIN_ROOT}`) and survive version bumps automatically.

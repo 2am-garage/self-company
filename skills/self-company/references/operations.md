@@ -159,14 +159,19 @@ expression's charset AND per-field semantics; `schedule.sh` trusts that verdict)
   **rejected and the company runs with defaults**, logging the named rule; a
   mis-configured competition never *runs*, it falls back. `schedule.sh` and
   `daily-run.sh` both consult the validator before honouring config.
-- **SessionStart sync (`hook_schedule_guard.sh`).** Because the crontab carries an
-  absolute tick snapshot (Phase-7 A1), a `cadence`/`research` edit only reaches the
-  live crontab on re-install. The `SessionStart` guard closes that gap: if
-  `schedule.yaml` is absent it no-ops; otherwise it validates (an invalid config is
-  a non-blocking warning — daily-run falls back on its own), then compares the
-  desired tick signature to `ops/schedule/.installed-tick` and re-runs
-  `schedule.sh install` **only when the tick/research cadence actually changed**
-  (per-employee sub-cadence edits do NOT re-install). It honours
+- **SessionStart sync + self-heal (`hook_schedule_guard.sh`).** Because the crontab
+  carries an **absolute snapshot** of both the tick and the scripts dir (Phase-7 A1),
+  a `cadence`/`research` edit — OR a plugin update that moves the scripts — only
+  reaches the live crontab on re-install. The `SessionStart` guard closes both gaps:
+  if `schedule.yaml` is absent it no-ops; otherwise it validates (an invalid config
+  is a non-blocking warning — daily-run falls back on its own), then compares a
+  signature = *desired tick + research cadence + resolved scripts dir* against
+  `ops/schedule/.installed-tick` and re-runs `schedule.sh install` **when any of the
+  three changed** — so a tick/research edit AND a **plugin update/move** both
+  self-heal the cron with no manual step (per-employee sub-cadence edits do NOT
+  change the signature, so they never re-install). The scripts dir is read
+  ground-truth from `schedule.sh scripts-dir` (single source, honours
+  `CLAUDE_PLUGIN_ROOT`); an older 2-field marker self-heals exactly once. It honours
   `SELF_COMPANY_CRONTAB_FILE` and skips silently with no crontab backend, and only
   syncs an already-scheduled project (never auto-installs one).
 - **Generated roster.** `ops/schedule/roster.md` is now **GENERATED** by
