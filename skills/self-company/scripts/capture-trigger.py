@@ -54,6 +54,55 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
     def is_tombstoned(fm):
         return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
 
+# Phase 11 Item 2 / C2: the fragile frontmatter PARSE/SPLIT/SERIALIZE seam AND
+# the `sources:` token extractor now live in ONE shared module (frontmatter.py,
+# same dir) so the ten scanners can't drift. Best-effort import + verbatim
+# fallback, mirroring the tombstone import above. This dedupes the SOURCE_ITEM_RE
+# copy that used to sit inline below (byte-identical to reinforce_memory.py's).
+try:
+    from frontmatter import parse as _fm_parse, serialize as _fm_serialize, \
+        SOURCE_ITEM_RE, tokenize_sources  # noqa: F401
+except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
+    SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
+
+    def tokenize_sources(raw):
+        return SOURCE_ITEM_RE.findall(raw or "")
+
+    def _fm_split(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return [], text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                return lines[1:i], '\n'.join(lines[i + 1:])
+        return [], text
+
+    def _fm_parse(text):
+        raw_fm_lines, body = _fm_split(text)
+        fm = {}
+        for line in raw_fm_lines:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            key, val = s.split(':', 1)
+            fm[key.strip()] = val.strip()
+        return fm, body
+
+    def _fm_serialize(fm, body, order=None):
+        keys = []
+        if order:
+            for k in order:
+                if k in fm and k not in keys:
+                    keys.append(k)
+        for k in fm:
+            if k not in keys:
+                keys.append(k)
+        out = ['---']
+        for k in keys:
+            out.append(f"{k}: {fm[k]}")
+        out.append('---')
+        return '\n'.join(out) + '\n' + body
+
 RECURSION_GUARD = "SELF_COMPANY_CAPTURE_ACTIVE"
 DEFAULT_MODEL = os.environ.get("SELF_COMPANY_CAPTURE_MODEL", "claude-haiku-4-5-20251001")
 MAX_CHAIRMAN_CHARS = 24000   # cap transcript size fed to the model
@@ -366,27 +415,15 @@ def _safe_source_token(s):
 
 
 def _parse_frontmatter(text):
-    """Minimal frontmatter parse -> ({key: value}, closing-line index), or
-    (None, -1). Same shape as reinforce_memory.py::parse_frontmatter."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return None, -1
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            fm = {}
-            for ln in lines[1:i]:
-                s = ln.strip()
-                if s and not s.startswith("#") and ":" in s:
-                    k, v = s.split(":", 1)
-                    fm[k.strip()] = v.strip()
-            return fm, i
-    return None, -1
-
-
-# Source items are the quoted strings in a `sources: ["[s#1]", "[s#2]"]` list —
-# same pattern as reinforce_memory.py (never reintroduce a `|[...]` bracket
-# alternative; it matches the outer bracket and corrupts the merged line).
-SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
+    """Frontmatter read via the shared parser (Phase 11) -> ({key: value}, body)
+    for a valid `---` block, else (None, ""). The old inline parser returned
+    (fm-or-None, closing-line-index); callers now consume the body string
+    directly, and the falsy/None sentinel still marks 'no usable frontmatter'
+    (no opening/closing fence, or an empty block) exactly as before."""
+    fm, body = _fm_parse(text)
+    if not fm:
+        return None, ""
+    return fm, body
 
 
 def _memory_id_paths(company_dir):
@@ -426,9 +463,8 @@ def _bump_reinforce(path, source_lines, safe_sid, today):
     returns False so the caller can fall back fail-safe."""
     try:
         text = Path(path).read_text(encoding="utf-8")
-        lines = text.split("\n")
-        fm, close = _parse_frontmatter(text)
-        if not fm or close < 0:
+        fm, body = _parse_frontmatter(text)
+        if not fm:
             return False
         items = SOURCE_ITEM_RE.findall(fm.get("sources", ""))
         # Distinct-session check BEFORE merging: a token "[<sid>#<line>]" for
@@ -446,15 +482,19 @@ def _bump_reinforce(path, source_lines, safe_sid, today):
             rc = 1
         if not already_this_session:
             rc += 1
-        for i in range(1, close):
-            key = lines[i].split(":", 1)[0].strip() if ":" in lines[i] else ""
-            if key == "reinforce_count":
-                lines[i] = f"reinforce_count: {rc}"
-            elif key == "last_reinforced":
-                lines[i] = f"last_reinforced: {today}"
-            elif key == "sources" and items:
-                lines[i] = "sources: [" + ", ".join(items) + "]"
-        Path(path).write_text("\n".join(lines), encoding="utf-8")
+        # In-place field updates, mirroring the old line-rewrite: only touch a
+        # field that ALREADY exists in the frontmatter (a missing key stays
+        # absent — never injected), and only rewrite sources when items exist.
+        # serialize with order=list(fm) re-emits keys in the file's own order,
+        # so a canonical memory round-trips byte-identically.
+        if "reinforce_count" in fm:
+            fm["reinforce_count"] = str(rc)
+        if "last_reinforced" in fm:
+            fm["last_reinforced"] = today
+        if "sources" in fm and items:
+            fm["sources"] = "[" + ", ".join(items) + "]"
+        Path(path).write_text(
+            _fm_serialize(fm, body, order=list(fm)), encoding="utf-8")
         return True
     except Exception:
         return False
@@ -475,7 +515,7 @@ def recent_l0_digest(company_dir, now=None, window_hours=RECENT_WINDOW_HOURS,
             text = p.read_text(encoding="utf-8")
         except OSError:
             continue
-        fm, close = _parse_frontmatter(text)
+        fm, mbody = _parse_frontmatter(text)
         if not fm or not fm.get("id"):
             continue
         if is_tombstoned(fm):  # archived / defunct (alias) / absorbed
@@ -486,7 +526,7 @@ def recent_l0_digest(company_dir, now=None, window_hours=RECENT_WINDOW_HOURS,
             continue
         if created < cutoff:
             continue
-        body = " ".join("\n".join(text.split("\n")[close + 1:]).split())
+        body = " ".join(mbody.split())
         gist = body.split(". ")[0][:RECENT_GIST_CHARS]
         entries.append((fm.get("created", ""), fm["id"], gist))
     entries.sort(key=lambda t: (t[0], t[1]), reverse=True)

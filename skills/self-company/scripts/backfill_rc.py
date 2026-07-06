@@ -42,31 +42,64 @@ except Exception:  # pragma: no cover - defensive
     def is_blessed_charter(fm):
         return False
 
-SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
+# Phase 11: the fragile frontmatter PARSING SEAM + source tokenizer live in ONE
+# shared module (frontmatter.py). Best-effort import + verbatim fallback, same
+# pattern as the charter import above. The `.strip()=='---'` delimiter and the
+# `SOURCE_ITEM_RE` extractor are now the single source; backfill keeps its OWN
+# closing-fence-index recovery (for the surgical rc-line edit) and clamp logic
+# layered on top.
+try:
+    from frontmatter import parse as _fm_parse, SOURCE_ITEM_RE, tokenize_sources
+except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
+    SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
+
+    def tokenize_sources(raw):
+        return SOURCE_ITEM_RE.findall(raw or "")
+
+    def _fm_parse(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return {}, text
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                end = i
+                break
+        if end is None:
+            return {}, text
+        fm = {}
+        for line in lines[1:end]:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            k, v = s.split(':', 1)
+            fm[k.strip()] = v.strip()
+        return fm, '\n'.join(lines[end + 1:])
+
 RC_LINE_RE = re.compile(r"^reinforce_count:\s*(\d+)\s*$")
 
 
 def parse_frontmatter(text):
-    """Minimal frontmatter parse -> ({key: raw-value}, closing-line index)."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
+    """Frontmatter parse -> ({key: raw-value}, closing-line index).
+
+    The fragile delimiter + key:value split is the shared Phase-11 parser
+    (`frontmatter.parse`). The closing-fence line INDEX (used by `scan` for the
+    surgical `reinforce_count:` line rewrite) is not part of the shared parse
+    contract, so it is recovered here from the same `.strip()=='---'` scan. A
+    non-empty `fm` guarantees a terminated block, so the closing fence exists.
+    """
+    fm, _body = _fm_parse(text)
+    if not fm:
         return None, -1
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            fm = {}
-            for ln in lines[1:i]:
-                s = ln.strip()
-                if s and not s.startswith("#") and ":" in s:
-                    k, v = s.split(":", 1)
-                    fm[k.strip()] = v.strip()
-            return fm, i
-    return None, -1
+    lines = text.split("\n")
+    close = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    return fm, close
 
 
 def distinct_sessions(sources_value):
     """Count distinct session ids in a raw `sources:` value string."""
     out = set()
-    for it in SOURCE_ITEM_RE.findall(sources_value or ""):
+    for it in tokenize_sources(sources_value):
         inner = it.strip('"')
         if inner.startswith("[") and inner.endswith("]") and "#" in inner:
             out.add(inner[1:].split("#", 1)[0])

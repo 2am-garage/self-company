@@ -480,5 +480,38 @@ class TestCharterMigration(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
 
 
+class TestFrontmatterMigration(unittest.TestCase):
+    """Phase 11 Item 2: decay routes its parse/serialize through the shared
+    frontmatter module while keeping its own defaults/validation/key-order.
+    Round-trip must stay byte-identical; a `----` body line must NOT truncate."""
+
+    def test_parse_serialize_round_trip_byte_identical(self):
+        text = ("---\n"
+                "id: pref-async-001\n"
+                "tier: L0\n"
+                "owner: Tony\n"
+                "provenance: capture\n"
+                "sources: [\"[sessA#12]\", \"[sessB#4]\"]\n"
+                "created: 2026-06-20\n"
+                "last_reinforced: 2026-07-01\n"
+                "reinforce_count: 2\n"
+                "decay_score: 0.9\n"
+                "status: active\n"
+                "---\n"
+                "Body line one.\n\n----\n\nBody after a rule.\n")
+        mem = decay.parse_frontmatter(text)
+        rebuilt = decay.serialize_frontmatter(mem) + "\n" + mem["_body"]
+        self.assertEqual(rebuilt, text)          # byte-identical round-trip
+        # the `----` body rule did NOT truncate the frontmatter:
+        self.assertEqual(mem["sources"], ['"[sessA#12]"', '"[sessB#4]"'])
+        self.assertEqual(mem["status"], "active")
+        self.assertIn("----", mem["_body"])
+
+    def test_no_frontmatter_bails_to_defaults(self):
+        mem = decay.parse_frontmatter("no frontmatter here\njust text\n")
+        self.assertIsNone(mem["id"])
+        self.assertEqual(mem["_body"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

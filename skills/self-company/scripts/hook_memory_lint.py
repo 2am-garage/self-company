@@ -31,6 +31,32 @@ try:
 except Exception:  # pragma: no cover - fallback copy
     TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
 
+# Phase 11 Item 2: the fragile frontmatter delimiter + key:value split lives in
+# ONE shared module (frontmatter.py). Best-effort import + verbatim fallback,
+# same pattern as the tombstone vocabulary above.
+try:
+    from frontmatter import parse as _fm_parse
+except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
+    def _fm_parse(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return {}, text
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                end = i
+                break
+        if end is None:
+            return {}, text
+        fm = {}
+        for line in lines[1:end]:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            k, v = s.split(':', 1)
+            fm[k.strip()] = v.strip()
+        return fm, '\n'.join(lines[end + 1:])
+
 VALID_STATUSES = {"active"} | set(TOMBSTONE_STATUSES)
 REQUIRED = ("id", "tier", "status", "sources")
 
@@ -41,26 +67,17 @@ def block(reason):
 
 
 def parse_frontmatter(text):
-    """Line-based frontmatter parse (mirrors verify_memory.parse_frontmatter).
-    Returns (dict, body) or (None, text) if the --- block is missing/unterminated."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
+    """Frontmatter parse via the shared parser (Phase 11). Returns (dict, body)
+    for a valid `---` block, or (None, text) if the block is missing/unterminated
+    — the None sentinel the `block(...)` logic relies on to flag a frontmatter-less
+    file. The shared parser collapses both no-fence and unterminated cases to
+    ({}, unchanged-text); we re-derive the sentinel by checking that the body was
+    NOT sliced (an empty-but-valid `---\\n---` block yields a sliced body and so
+    still parses to ({}, body), keeping the old 'missing required field' path)."""
+    fm, body = _fm_parse(text)
+    if not fm and body == text:
         return None, text
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end is None:
-        return None, text
-    fm = {}
-    for ln in lines[1:end]:
-        s = ln.strip()
-        if not s or s.startswith("#") or ":" not in s:
-            continue
-        k, v = s.split(":", 1)
-        fm[k.strip()] = v.strip()
-    return fm, "\n".join(lines[end + 1:])
+    return fm, body
 
 
 def sources_nonempty(raw):

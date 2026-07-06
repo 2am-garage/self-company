@@ -32,7 +32,6 @@ read-only.
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -44,26 +43,42 @@ except Exception:  # pragma: no cover - authoritative copy: tombstone.py
     def is_tombstoned(fm):
         return str(fm.get("status") or "").strip().lower() in ("archived", "defunct", "absorbed")
 
+# Phase 11: the fragile frontmatter PARSING SEAM lives in ONE shared module
+# (frontmatter.py). Best-effort import + verbatim fallback, same pattern as the
+# tombstone import above. This tool keeps only the keys it needs off the top of
+# the shared full-parse (id/tier/status/category).
+try:
+    from frontmatter import parse as _fm_parse
+except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
+    def _fm_parse(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return {}, text
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                end = i
+                break
+        if end is None:
+            return {}, text
+        fm = {}
+        for line in lines[1:end]:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            k, v = s.split(':', 1)
+            fm[k.strip()] = v.strip()
+        return fm, '\n'.join(lines[end + 1:])
+
 # Valid categories (kept in sync with decay.py::L2_CATEGORIES and
 # capture-trigger.py::CATEGORIES).
 CATEGORIES = ("preferences", "profile", "projects")
 
-_KEY_RE = re.compile(r"^(id|tier|status|category):\s*(.*)$")
-
 
 def _frontmatter(text):
-    """Minimal {key: value} for the keys we need; None if no frontmatter."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return None
-    fm = {}
-    for ln in lines[1:]:
-        if ln.strip() == "---":
-            return fm
-        m = _KEY_RE.match(ln.strip())
-        if m:
-            fm[m.group(1)] = m.group(2).strip()
-    return None
+    """Frontmatter dict via the shared parser; None if no frontmatter block."""
+    fm, _body = _fm_parse(text)
+    return fm or None
 
 
 def scan(memory_dir, include_archived=False):

@@ -25,7 +25,6 @@ Usage: reinforce_memory.py [--memory-dir DIR] [--threshold 0.85] [--now DATE] [-
 import argparse
 import json
 import os
-import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -64,6 +63,59 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
     def is_tombstoned(fm):
         return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
 
+# Phase 11: the fragile frontmatter PARSING SEAM (delimiter + key:value split +
+# source tokenization) is consolidated into ONE shared module (frontmatter.py,
+# same dir). This also dedupes the SOURCE_ITEM_RE that was copied verbatim here
+# and in capture-trigger.py (C2). Best-effort import + verbatim fallback (same
+# pattern as tombstone.py / charter_ids.py). reinforce keeps its own closing-
+# fence INDEX return (its in-place line rewrite needs it) and all sources/rc
+# merge logic layered on top.
+try:
+    from frontmatter import (split as _fm_split, parse as _fm_parse,
+                             serialize as _fm_serialize,
+                             SOURCE_ITEM_RE, tokenize_sources)
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: frontmatter.py)
+    import re as _fm_re
+    SOURCE_ITEM_RE = _fm_re.compile(r'"[^"]*"')
+
+    def tokenize_sources(raw):
+        return SOURCE_ITEM_RE.findall(raw or "")
+
+    def _fm_split(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return [], text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                return lines[1:i], '\n'.join(lines[i + 1:])
+        return [], text
+
+    def _fm_parse(text):
+        raw_fm_lines, body = _fm_split(text)
+        fm = {}
+        for line in raw_fm_lines:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            key, val = s.split(':', 1)
+            fm[key.strip()] = val.strip()
+        return fm, body
+
+    def _fm_serialize(fm, body, order=None):
+        keys = []
+        if order:
+            for k in order:
+                if k in fm and k not in keys:
+                    keys.append(k)
+        for k in fm:
+            if k not in keys:
+                keys.append(k)
+        out = ['---']
+        for k in keys:
+            out.append(f"{k}: {fm[k]}")
+        out.append('---')
+        return '\n'.join(out) + '\n' + body
+
 try:
     import rag_embed
     import numpy as np
@@ -73,24 +125,21 @@ except Exception:
 
 DEFAULT_THRESHOLD = 0.85   # tuned: catches clear re-observations (~0.88) but not
                            # merely-related-but-distinct ones (~0.80), with margin.
-# Source items are the quoted strings in a `sources: ["[s#1]", "[s#2]"]` list.
-# (An earlier `"..."|[...]` form wrongly matched the outer bracket and corrupted
-# the merged line — never reintroduce the bracket alternative.)
-SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
 
 
 def parse_frontmatter(text):
+    # Phase 11: dict built by the shared parser; reinforce still returns the
+    # closing-fence line INDEX (not a body string) because apply_reinforcement
+    # rewrites frontmatter lines in place by index. The opening-fence gate
+    # (`lines[0].strip()=='---'`, no leading-blank skip) and the `(None, -1)`
+    # no-frontmatter sentinel are preserved exactly; only the key:value dict is
+    # now sourced from `frontmatter.parse`.
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return None, -1
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
-            fm = {}
-            for ln in lines[1:i]:
-                s = ln.strip()
-                if s and not s.startswith("#") and ":" in s:
-                    k, v = s.split(":", 1)
-                    fm[k.strip()] = v.strip()
+            fm, _body = _fm_parse(text)
             return fm, i
     return None, -1
 
@@ -155,7 +204,8 @@ def plan_reinforcements(mems, pairs, threshold):
 
 
 def _source_items(sources_value):
-    return SOURCE_ITEM_RE.findall(sources_value or "")
+    # C2 dedupe: the source-token extractor is the shared one (frontmatter.py).
+    return tokenize_sources(sources_value)
 
 
 def _session_ids(items):

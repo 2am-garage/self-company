@@ -70,6 +70,61 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
         return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
 
 
+# Phase 11: the fragile frontmatter PARSING SEAM (delimiter + key:value split +
+# body split + source tokenization) is consolidated into ONE shared module
+# (frontmatter.py, same dir) so the legacy per-scanner parsers can't drift
+# again — the `.strip() == '---'` delimiter is now the single source. Best-effort
+# import + verbatim fallback, same pattern as tombstone.py / charter_ids.py. The
+# module does PARSE/SPLIT/SERIALIZE/TOKENIZE ONLY; decay keeps its OWN 13-key
+# defaults, tier/status/category validation, defunct->archived normalization,
+# `_parse_errors`, and serialize key order layered on top.
+try:
+    from frontmatter import (split as _fm_split, parse as _fm_parse,
+                             serialize as _fm_serialize,
+                             SOURCE_ITEM_RE, tokenize_sources)
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: frontmatter.py)
+    import re as _fm_re
+    SOURCE_ITEM_RE = _fm_re.compile(r'"[^"]*"')
+
+    def tokenize_sources(raw):
+        return SOURCE_ITEM_RE.findall(raw or "")
+
+    def _fm_split(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return [], text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                return lines[1:i], '\n'.join(lines[i + 1:])
+        return [], text
+
+    def _fm_parse(text):
+        raw_fm_lines, body = _fm_split(text)
+        fm = {}
+        for line in raw_fm_lines:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            key, val = s.split(':', 1)
+            fm[key.strip()] = val.strip()
+        return fm, body
+
+    def _fm_serialize(fm, body, order=None):
+        keys = []
+        if order:
+            for k in order:
+                if k in fm and k not in keys:
+                    keys.append(k)
+        for k in fm:
+            if k not in keys:
+                keys.append(k)
+        out = ['---']
+        for k in keys:
+            out.append(f"{k}: {fm[k]}")
+        out.append('---')
+        return '\n'.join(out) + '\n' + body
+
+
 # ============================================================================
 # BUILT-IN DEFAULTS (== manifest §1, tunable via --config / policy.md)
 # ============================================================================
@@ -138,24 +193,19 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
         "_parse_errors": []
     }
 
-    # Find frontmatter block
-    lines = content.split('\n')
-    if not lines or lines[0].strip() != '---':
-        result["_parse_errors"].append("No opening --- found")
+    # Find frontmatter block via the shared parser (delimiter `.strip()=='---'`).
+    # `_fm_split` returns `([], text)` for BOTH a missing opening fence and a
+    # missing closing fence — decay's original early-returns (defaults + empty
+    # body) collapse to a single "no frontmatter block" bail-out. The specific
+    # _parse_errors note is internal only (never surfaced in the JSON report),
+    # so the two messages merge without any behavioral change.
+    fm_lines, body = _fm_split(content)
+    if not fm_lines:
+        result["_parse_errors"].append("No frontmatter block found")
         return result
 
-    end_idx = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == '---':
-            end_idx = i
-            break
-
-    if end_idx is None:
-        result["_parse_errors"].append("No closing --- found")
-        return result
-
-    # Parse frontmatter lines
-    for line in lines[1:end_idx]:
+    # Parse frontmatter lines (validation/interpretation layer kept verbatim).
+    for line in fm_lines:
         line = line.strip()
         if not line or line.startswith('#'):
             continue
@@ -243,8 +293,8 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
         except Exception as e:
             result["_parse_errors"].append(f"Error parsing {key}: {e}")
 
-    # Extract body
-    result["_body"] = '\n'.join(lines[end_idx + 1:])
+    # Extract body (everything after the closing fence, exactly as split returns).
+    result["_body"] = body
 
     return result
 
@@ -252,8 +302,17 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
 def serialize_frontmatter(meta: Dict[str, Any]) -> str:
     """
     Serialize dict back to YAML-like frontmatter.
+
+    Routed through the shared `frontmatter.serialize` (single source) but keeps
+    decay's OWN interpretation: emit ONLY the keys in `order` that are present
+    AND non-None, formatting a `sources` list as `[a, b, c]` / `[]`. The shared
+    serializer appends `'\n' + body`; decay's contract is the fence block WITHOUT
+    a trailing newline (callers do `serialize_frontmatter(meta) + '\n' + body`),
+    so we pass `body=""` and drop the single trailing newline. Byte-identical to
+    the previous inline implementation.
     """
-    lines = ["---"]
+    order = ["id", "tier", "category", "owner", "provenance", "sources", "created", "last_reinforced",
+             "reinforce_count", "decay_score", "status", "invalid_at", "verified_date", "verified_by"]
 
     def format_value(v):
         if isinstance(v, list):
@@ -262,13 +321,10 @@ def serialize_frontmatter(meta: Dict[str, Any]) -> str:
             return "[" + ", ".join(str(x) for x in v) + "]"
         return str(v) if v is not None else ""
 
-    for key in ["id", "tier", "category", "owner", "provenance", "sources", "created", "last_reinforced",
-                "reinforce_count", "decay_score", "status", "invalid_at", "verified_date", "verified_by"]:
-        if key in meta and meta[key] is not None:
-            lines.append(f"{key}: {format_value(meta[key])}")
-
-    lines.append("---")
-    return '\n'.join(lines)
+    fm = {key: format_value(meta[key]) for key in order
+          if key in meta and meta[key] is not None}
+    doc = _fm_serialize(fm, "", order=order)   # '---\n<k: v>\n...\n---\n'
+    return doc[:-1]                            # drop the trailing '\n' after '---'
 
 
 # ============================================================================
