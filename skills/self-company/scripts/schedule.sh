@@ -131,6 +131,60 @@ if [[ ! -f "$SCRIPTS_DIR/daily-run.sh" && -f "$PROJECT_DIR/.company/scripts/dail
   SCRIPTS_DIR="$PROJECT_DIR/.company/scripts"
 fi
 
+# --- Phase 12: per-company tick/research from org/schedule.yaml ---------------
+# A company may declare its own tick + research cadence as DATA. Consult the
+# reader (single source of truth) — but ONLY after the validator passes: a config
+# that would break the red/blue invariants (Layer B) is REFUSED and we keep the
+# hardcoded defaults above. Explicit SELF_COMPANY_CRON_* env still wins (the
+# reader is handed $CRON_MIN, so the staggered/overridden minute is preserved).
+CFG_FILE="$PROJECT_DIR/.company/org/schedule.yaml"
+# Defense-in-depth (P9-D2): even after the validator + the reader's own
+# _valid_cron_expr gate, NEVER assign a computed expr into a crontab line unless
+# it is a clean single-line, exactly-5-field, cron-charset expr. A newline would
+# split the crontab (line injection); junk fields would make `crontab -` reject
+# the WHOLE file and evict every other company. Belt-and-suspenders — if anything
+# upstream regresses, we keep the hardcoded default instead of writing garbage.
+_valid_cron_line() {  # $1 = expr; return 0 if safe to write, 1 otherwise
+  local e="$1"
+  [[ "$e" == *$'\n'* || "$e" == *$'\t'* || "$e" == *$'\r'* ]] && return 1  # no control chars
+  # Split on spaces via `read -ra` (NOT `f=($e)` — that would GLOB-expand the '*'
+  # cron chars against the filesystem). Newlines already rejected above, so a
+  # single `read` line captures the whole expr.
+  local -a f
+  IFS=' ' read -r -a f <<< "$e"
+  [[ ${#f[@]} -eq 5 ]] || return 1                  # exactly 5 fields
+  local x
+  for x in "${f[@]}"; do
+    [[ "$x" =~ ^[0-9*/,-]+$ ]] || return 1          # cron charset only
+  done
+  return 0
+}
+if [[ -f "$CFG_FILE" && -f "$SCRIPTS_DIR/schedule_config.py" ]]; then
+  if python3 "$SCRIPTS_DIR/schedule_validator.py" --company "$PROJECT_DIR/.company" --quiet 2>/dev/null; then
+    # TRUST config_py's exit code as the source of validity (it does the full
+    # charset+semantic cron check — P9-D2/D3): exit 0 = a usable expr, exit 2 =
+    # fallback (it still prints the default, but we must NOT treat that as the
+    # company's tick — keep our own default and warn). `_valid_cron_line` remains
+    # only as a minimal last-ditch structural guard against a future regression.
+    _cexpr="$(python3 "$SCRIPTS_DIR/schedule_config.py" --company "$PROJECT_DIR/.company" --cron daily --minute "$CRON_MIN" 2>/dev/null)"; _crc=$?
+    if (( _crc == 0 )) && [[ -n "$_cexpr" ]] && _valid_cron_line "$_cexpr"; then
+      CRON_EXPR="$_cexpr"
+    else
+      echo "[schedule] daily tick from schedule.yaml unusable (rc=$_crc) — keeping default '$CRON_EXPR'" >&2
+    fi
+    if [[ -z "${SELF_COMPANY_RESEARCH_CRON:-}" ]]; then
+      _rexpr="$(python3 "$SCRIPTS_DIR/schedule_config.py" --company "$PROJECT_DIR/.company" --cron research --minute "$DEFAULT_RESEARCH_MIN" 2>/dev/null)"; _rrc=$?
+      if (( _rrc == 0 )) && [[ -n "$_rexpr" ]] && _valid_cron_line "$_rexpr"; then
+        RESEARCH_EXPR="$_rexpr"
+      else
+        echo "[schedule] research cron from schedule.yaml unusable (rc=$_rrc) — keeping default '$RESEARCH_EXPR'" >&2
+      fi
+    fi
+  else
+    echo "[schedule] schedule.yaml REJECTED by validator — keeping default tick; run schedule_validator.py to see which rule fired" >&2
+  fi
+fi
+
 # cron has a minimal PATH; prepend the claude dir and /usr/bin so python3+claude resolve.
 PATH_PREFIX="PATH='$CLAUDE_DIR:/usr/local/bin:/usr/bin:/bin'"
 MARK="$MARK_DAILY project=$PROJ_KEY path=$PROJECT_DIR"

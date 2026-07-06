@@ -63,6 +63,36 @@ mkdir -p "$LOGDIR"
 ts="$(date +%FT%T)"
 printf '\n## Daily run %s%s\n' "$ts" "$($DRY_RUN && echo ' (dry-run)')" >> "$LOG"
 
+# --- Phase 12: per-employee duty gating (fail-OPEN) --------------------------
+# Each optional step asks schedule_config.py whether its owning employee's
+# sub-cadence matches THIS tick. FAIL-OPEN by contract: absent schedule.yaml, no
+# python3, or ANY error => run the step (return 0), so defaults are reproduced
+# byte-for-byte and maintenance is never silently suppressed. ONLY the explicit
+# skip signal (exit 1) skips. When there is no schedule.yaml we don't even shell
+# out — today's behaviour is untouched.
+_should_run() {  # $1 = step name; return 0 = run, 1 = skip
+  local step="$1" rc
+  [[ -f "$COMPANY/org/schedule.yaml" ]] || return 0   # no config => defaults sacred
+  [[ -f "$SCRIPTS/schedule_config.py" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" \
+      --should-run "$step" --hour "$(date +%H)" --dow "$(date +%w)" >/dev/null 2>&1
+  rc=$?
+  case "$rc" in
+    1) return 1 ;;   # config gated this step off for this tick
+    *) return 0 ;;   # 0 = run; any other code = error => fail-open (run)
+  esac
+}
+
+# Resolve the per-step gating decisions for the deterministic core up front so the
+# log-parse heredoc below can emit a clean skip line instead of a misleading
+# "no output" one. 1 = run, 0 = gated off.
+_run_backup=1;    _should_run backup    || _run_backup=0
+_run_reinforce=1; _should_run reinforce || _run_reinforce=0
+_run_decay=1;     _should_run decay     || _run_decay=0
+_run_verify=1;    _should_run verify    || _run_verify=0
+_run_entropy=1;   _should_run entropy   || _run_entropy=0
+
 # --- 1+2. deterministic core: reinforce + decay + verify + entropy ----------
 # Capture each script's JSON to a temp file, then parse via a heredoc that reads
 # the FILES by path. (Piping data INTO a `python3 <<'PY'` heredoc does not work —
@@ -77,7 +107,10 @@ trap 'rm -f "$DOUT" "$EOUT" "$VOUT" "$ROUT" "$SERR"' EXIT
 # consolidation, or fs damage is now recoverable: untar over memory/.
 # Dry-run never snapshots (nothing will mutate). Snapshot failure is logged
 # loudly but never aborts the deterministic core (never fail the cron).
-if ! $DRY_RUN && [[ -d "$MEM" ]]; then
+if ! $DRY_RUN && (( ! _run_backup )); then
+  echo "- backup: skipped — schedule.yaml gated off tom.backup for this tick" >> "$LOG"
+fi
+if ! $DRY_RUN && (( _run_backup )) && [[ -d "$MEM" ]]; then
   BACKUP_KEEP="$(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
 try:
     from policy_config import load_policy_constants as L
@@ -116,8 +149,10 @@ fi
 # which can miss under cron. Venv absent => one-line skip (logged below), NEVER a
 # failure. Threshold: the script's own conservative default — never lowered here.
 RAG_PY="$COMPANY/.rag-venv/bin/python"
-REINF_STATE="missing"   # missing | novenv | ran — drives the reinforce log line
-if [[ -f "$SCRIPTS/reinforce_memory.py" ]]; then
+REINF_STATE="missing"   # missing | novenv | ran | gated — drives the reinforce log line
+if (( ! _run_reinforce )); then
+  REINF_STATE="gated"
+elif [[ -f "$SCRIPTS/reinforce_memory.py" ]]; then
   if [[ -x "$RAG_PY" ]]; then
     reinf_args=(--memory-dir "$MEM")
     $DRY_RUN || reinf_args+=(--apply)
@@ -129,7 +164,7 @@ if [[ -f "$SCRIPTS/reinforce_memory.py" ]]; then
   fi
 fi
 
-if [[ -f "$SCRIPTS/decay.py" ]]; then
+if (( _run_decay )) && [[ -f "$SCRIPTS/decay.py" ]]; then
   decay_args=(--memory-dir "$MEM" --config "$POLICY")
   $DRY_RUN || decay_args+=(--apply)
   python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>>"$SERR" || true
@@ -137,19 +172,25 @@ fi
 # VERIFY: stamp verified_date on memories whose [session#line] sources trace to a
 # real transcript line (deterministic provenance gate). Before entropy so the KPI
 # reflects the new stamps this round.
-if [[ -f "$SCRIPTS/verify_memory.py" ]]; then
+if (( _run_verify )) && [[ -f "$SCRIPTS/verify_memory.py" ]]; then
   verify_args=(--memory-dir "$MEM" --transcripts-dir "$HOME/.claude/projects")
   $DRY_RUN || verify_args+=(--apply)
   python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>>"$SERR" || true
 fi
-[[ -f "$SCRIPTS/entropy.py" ]] && \
-  python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+if (( _run_entropy )); then
+  [[ -f "$SCRIPTS/entropy.py" ]] && \
+    python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+fi
 
 DRY_FLAG="$($DRY_RUN && echo 1 || echo 0)"
-python3 - "$DOUT" "$EOUT" "$VOUT" "$LOG" "$DRY_FLAG" "$ROUT" "$REINF_STATE" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
+python3 - "$DOUT" "$EOUT" "$VOUT" "$LOG" "$DRY_FLAG" "$ROUT" "$REINF_STATE" \
+    "$_run_decay" "$_run_verify" "$_run_entropy" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
 import sys, json
 dpath, epath, vpath, log, dry = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"
 rpath, rstate = sys.argv[6], sys.argv[7]
+dskip = sys.argv[8] == "0"
+vskip = sys.argv[9] == "0"
+eskip = sys.argv[10] == "0"
 
 def load(p):
     try:
@@ -159,7 +200,9 @@ def load(p):
 
 lines = []
 # P4 Item 2: reinforce ran FIRST — log it first. Every skip/degrade = one line.
-if rstate == "novenv":
+if rstate == "gated":
+    lines.append("- reinforce: skipped — schedule.yaml gated off tony.reinforce for this tick")
+elif rstate == "novenv":
     lines.append("- reinforce: skipped — RAG venv absent (.company/.rag-venv) — decay/verify/entropy unaffected")
 elif rstate == "missing":
     lines.append("- reinforce: skipped — reinforce_memory.py not found beside decay.py")
@@ -177,7 +220,9 @@ else:
         lines.append("- reinforce: no output (errored) — deterministic core continues")
 
 d = load(dpath)
-if d:
+if dskip:
+    lines.append("- decay: skipped — schedule.yaml gated off tony.decay for this tick")
+elif d:
     a = d["actions"]
     lines.append(
         f"- decay{'' if dry else ' --apply'}: scanned {d['scanned']} | "
@@ -192,7 +237,9 @@ else:
     lines.append("- decay: no output (script missing or errored)")
 
 v = load(vpath)
-if v:
+if vskip:
+    lines.append("- verify: skipped — schedule.yaml gated off gibby.verify for this tick")
+elif v:
     lines.append(
         f"- verify{'' if dry else ' --apply'}: newly-verified {len(v['verified'])} | "
         f"already {v['already_verified']} | unverifiable {len(v['unverifiable'])}"
@@ -201,7 +248,9 @@ if v:
         lines.append(f"  - unverifiable (sources don't trace): {v['unverifiable'][:8]}")
 
 e = load(epath)
-if e:
+if eskip:
+    lines.append("- entropy: skipped — schedule.yaml gated off tony.entropy for this tick")
+elif e:
     dim, det = e["dimensions"], e["details"]
     lines.append(
         f"- entropy {e['entropy']} (dup {dim['dup_rate']} | contra {dim['contradiction_score']} | "
@@ -219,21 +268,29 @@ PY
 # Elon's daily survey: a prioritized TODO from current metrics (read-only,
 # deterministic — keeps the CEO load-bearing every day). Writes ops/plans/todo-<date>.md.
 if [[ -f "$SCRIPTS/elon_survey.py" ]]; then
-  python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" 2>>"$SERR" \
-    | python3 -c "import sys, json
+  if _should_run survey; then
+    python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" 2>>"$SERR" \
+      | python3 -c "import sys, json
 try:
     d = json.load(sys.stdin)
     print(f\"- elon survey: {d.get('todos','?')} todo(s) -> ops/plans/todo-${DATE}.md\")
 except Exception:
     print('- elon survey: no output')" >> "$LOG" || true
+  else
+    echo "- elon survey: skipped — schedule.yaml gated off elon.survey for this tick" >> "$LOG"
+  fi
 fi
 
 # Scheduled-work ledger (autoresearch-style): regenerate ops/reports/ledger.md so
 # the Chairman wakes up to a one-row-per-run report — entropy headline, keep/flat/
 # skip/fail verdict, one-line description. Read-only over the logs; deterministic.
 if [[ -f "$SCRIPTS/report.py" ]]; then
-  python3 "$SCRIPTS/report.py" --company "$COMPANY" --write >/dev/null 2>>"$SERR" \
-    && echo "- ledger: refreshed ops/reports/ledger.{md,tsv}" >> "$LOG" || true
+  if _should_run report; then
+    python3 "$SCRIPTS/report.py" --company "$COMPANY" --write >/dev/null 2>>"$SERR" \
+      && echo "- ledger: refreshed ops/reports/ledger.{md,tsv}" >> "$LOG" || true
+  else
+    echo "- ledger: skipped — schedule.yaml gated off tom.report for this tick" >> "$LOG"
+  fi
 fi
 
 # C2: surface any script warnings/errors instead of swallowing them (e.g. the
@@ -243,6 +300,24 @@ if [[ -s "$SERR" ]]; then
     echo "- script warnings/errors:"
     sed 's/^/    /' "$SERR" | head -20
   } >> "$LOG"
+fi
+
+# --- Item 5: regenerate the human-readable roster from the effective config ---
+# Deterministic, read-only over org/schedule.yaml (marked generated, never hand-
+# edited — Chairman's sweep-docs rule). Absent config => the roster shows today's
+# defaults. Write via a temp file so a mid-write kill never leaves a partial. Any
+# failure is swallowed — the roster is never allowed to fail the cron.
+if [[ -f "$SCRIPTS/schedule_config.py" ]]; then
+  ROSTER_DIR="$COMPANY/ops/schedule"
+  mkdir -p "$ROSTER_DIR" 2>/dev/null || true
+  if python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --roster \
+       >"$ROSTER_DIR/roster.md.tmp" 2>/dev/null; then
+    mv "$ROSTER_DIR/roster.md.tmp" "$ROSTER_DIR/roster.md" 2>/dev/null \
+      || rm -f "$ROSTER_DIR/roster.md.tmp"
+    echo "- roster: regenerated ops/schedule/roster.md from schedule.yaml" >> "$LOG"
+  else
+    rm -f "$ROSTER_DIR/roster.md.tmp" 2>/dev/null || true
+  fi
 fi
 
 # --- B3 (Item 4): fail-streak marker helpers -------------------------------
@@ -293,17 +368,30 @@ _auth_logged_in() {                         # echo: yes | no | unknown
   fi
 }
 
+# Phase 12: the agent step is owned by Tony; a company may gate it off (or set its
+# sub-cadence) via schedule.yaml. Fail-OPEN — absent config runs it as today.
+if $RUN_AGENT && ! _should_run agent; then
+  echo "- agent: skipped — schedule.yaml gated off tony.agent for this tick" >> "$LOG"
+  RUN_AGENT=false
+fi
+
 # --- 3. optional headless agent (CONSOLIDATE / VERIFY judgment) -------------
 if $RUN_AGENT; then
   # B1 token-breaker proxy: cap headless-agent runs per day (a proxy for the
   # policy §3 daily token ceiling — the agent step is the only token spend). Past
   # the cap, degrade to deterministic-only so unattended runs can't overspend.
+  # Ground default: policy §3 DAILY_RUNS_PER_DAY (byte-for-byte today when no
+  # schedule.yaml). When a schedule.yaml IS present, its agent.daily_cap governs.
   CAP="$(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
 try:
     from policy_config import load_policy_constants as L
     print(int(L('$POLICY').get('DAILY_RUNS_PER_DAY', 4)))
 except Exception:
     print(4)" 2>/dev/null || echo 4)"
+  if [[ -f "$COMPANY/org/schedule.yaml" && -f "$SCRIPTS/schedule_config.py" ]]; then
+    _cfg_cap="$(python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --agent daily_cap 2>/dev/null)"
+    [[ "$_cfg_cap" =~ ^[0-9]+$ ]] && CAP="$_cfg_cap"
+  fi
   COUNTER="$LOGDIR/.agent_runs_$DATE"
   RUNS="$(cat "$COUNTER" 2>/dev/null || echo 0)"
   [[ "$RUNS" =~ ^[0-9]+$ ]] || RUNS=0
@@ -325,7 +413,11 @@ except Exception:
     # B3 (Phase 5 Item 3): resolve the agent's REAL time budget up front so it
     # can be injected into the prompt (N3: "stop at the time budget" is useless
     # when the budget is never stated) and echoed in the TIMEOUT log line.
-    AGENT_TIMEOUT="${SELF_COMPANY_DAILY_TIMEOUT:-600}"
+    # Env wins; else schedule.yaml's agent.timeout; else today's 600. (Phase 12:
+    # schedule_config returns 600 when config is absent => byte-for-byte today.)
+    _cfg_timeout="$(python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --agent timeout 2>/dev/null)"
+    [[ "$_cfg_timeout" =~ ^[0-9]+$ ]] || _cfg_timeout=600
+    AGENT_TIMEOUT="${SELF_COMPANY_DAILY_TIMEOUT:-$_cfg_timeout}"
     # P4 Item 4 — aim the agent at the MEASURED backlog. The deterministic core
     # above just computed scored dup pairs / review candidates / upgrade candidates
     # ($EOUT/$DOUT); handing the agent that ranked list beats asking a 600s pass to
@@ -447,9 +539,14 @@ EOF
     # the log. SELF_COMPANY_AGENT_STREAM=0 restores the old buffered text mode.
     STREAM_ARGS=(--output-format stream-json --verbose)
     [[ "${SELF_COMPANY_AGENT_STREAM:-1}" == "0" ]] && STREAM_ARGS=()
+    # Model: env wins; else schedule.yaml's agent.model; else today's default.
+    # (Phase 12: schedule_config returns claude-sonnet-4-6 absent config => today.)
+    _cfg_model="$(python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --agent model 2>/dev/null)"
+    [[ -n "$_cfg_model" ]] || _cfg_model="claude-sonnet-4-6"
+    AGENT_MODEL="${SELF_COMPANY_DAILY_MODEL:-$_cfg_model}"
     printf '\n===== agent run %s =====\n' "$ts" >> "$AGENT_LOG"
     SELF_COMPANY_CAPTURE_ACTIVE=1 timeout "$AGENT_TIMEOUT" \
-         "$CLAUDE_BIN" -p "$PROMPT" --model "${SELF_COMPANY_DAILY_MODEL:-claude-sonnet-4-6}" \
+         "$CLAUDE_BIN" -p "$PROMPT" --model "$AGENT_MODEL" \
          ${STREAM_ARGS[@]+"${STREAM_ARGS[@]}"} \
          >>"$AGENT_LOG" 2>&1
     rc=$?
