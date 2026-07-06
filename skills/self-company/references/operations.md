@@ -170,7 +170,7 @@ a cloud agent: the cron does the work; the SessionStart hook relays the summary.
 
 ## Plugin-native hooks (the single declaration point)
 
-Since **v0.2.0** all hooks ship **with the plugin**: they are declared once in
+Since **v0.1.2** all hooks ship **with the plugin**: they are declared once in
 `hooks/hooks.json` at the plugin root, and Claude Code loads them automatically the
 moment the plugin is installed — **no per-repo `install-hook.sh` edit**. Every command
 runs the canonical script via `${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/<script>`,
@@ -202,7 +202,7 @@ the hooks inert in non-company repos — there is no per-hook special-casing.
 **merge** with `settings.json` hooks — so a legacy `install-hook.sh install` entry
 would make Stop(capture)/SessionStart(notify) **double-fire**. Therefore:
 
-- `install-hook.sh install` → **no-op** ("hooks are plugin-native since v0.2.0 —
+- `install-hook.sh install` → **no-op** ("hooks are plugin-native since v0.1.2 —
   nothing to install (see hooks/hooks.json)").
 - `install-hook.sh uninstall` → **removes any legacy self-company hook entries** from
   `.claude/settings.json` (marker-based: `self-company-capture` / `self-company-notify`),
