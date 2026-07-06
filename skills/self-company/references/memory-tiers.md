@@ -322,6 +322,15 @@ charter seed set. Before Phase 6 the set was open-coded per scanner and drifted:
 `absorbed` was recognised by none of them, so the agent's `status: absorbed`
 tombstones stayed active and the same duplicate pairs re-surfaced every run.
 
+The same single-source discipline covers the two other shared seams every
+scanner leans on: `scripts/charter_ids.py` (the blessed charter-seed ids) and —
+since Phase 11 — `scripts/frontmatter.py`, the ONE authoritative
+frontmatter parse / serialize / tokenize implementation. Before Phase 11 that
+parsing seam was open-coded in ten scanners with five incompatible shapes (and a
+real `entropy.py` divergence that could classify the same file's active-set
+membership differently); it is now imported the same best-effort + verbatim-
+fallback way as `tombstone.py`.
+
 ### Behaviour of a tombstone (all three statuses)
 
 - **Excluded from every active scan** — entropy totals + dup/contradiction
@@ -357,4 +366,4 @@ convergence with no new destructive permission granted to an unsupervised agent
 
 **Version**: v4 (memory pipeline + charter class + tombstone convergence)  
 **Last updated**: 2026-07-04  
-**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py / scripts/verify_memory.py / scripts/tombstone.py
+**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py / scripts/verify_memory.py / scripts/tombstone.py / scripts/charter_ids.py / scripts/frontmatter.py
