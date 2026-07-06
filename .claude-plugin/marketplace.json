@@ -9,7 +9,7 @@
       "name": "self-company",
       "source": "./",
       "description": "Multi-agent personal company that learns the Chairman (Uwe)'s habits, preferences, and background across sessions, and continuously fights entropy through structured tiered memory, a verification loop, and decay. On install it creates a git-ignored, project-scoped .company/ skeleton in the current repo (private, not shared across projects).",
-      "version": "0.1.2"
+      "version": "0.1.3"
     }
   ]
 }
