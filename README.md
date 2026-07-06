@@ -23,9 +23,14 @@ automation:
 bash skills/self-company/scripts/init_company.sh
 
 # optional automation, opt-in and local:
-bash skills/self-company/scripts/install-hook.sh install   # CAPTURE + catch-up hooks
 bash skills/self-company/scripts/schedule.sh install        # the scheduled work below
 ```
+
+> Hooks need **no** setup: since v0.2.0 all 7 hooks are **plugin-native** (declared in
+> `hooks/hooks.json`, run via `${CLAUDE_PLUGIN_ROOT}`) and load automatically with the
+> plugin. If you used the pre-v0.2.0 installer, run
+> `install-hook.sh uninstall` once to drop the legacy `.claude/settings.json` entries
+> (plugin hooks merge with settings hooks, so leaving them would double-fire).
 
 ## Update
 
@@ -36,9 +41,9 @@ bash skills/self-company/scripts/schedule.sh install        # the scheduled work
 Updates track `main`. Because code and data are separated, an update refreshes the
 skill's logic while your `.company/` data is untouched.
 
-> **After updating, re-run** `schedule.sh install` and `install-hook.sh install`.
-> The cron and hook lines are absolute-path snapshots taken at install time, so
-> re-running them re-points cron/hooks at the updated skill.
+> **After updating, re-run** `schedule.sh install`. The cron lines are absolute-path
+> snapshots taken at install time, so re-running re-points cron at the updated skill.
+> Hooks need no re-install — they are plugin-native and use `${CLAUDE_PLUGIN_ROOT}`.
 
 ## What runs on a schedule
 
