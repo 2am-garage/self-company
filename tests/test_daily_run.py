@@ -177,6 +177,196 @@ def _fake_rag_venv(company, script_body):
     return py
 
 
+def _fake_rag_venv_multi(company, index_json, argfile):
+    """Plant a fake .company/.rag-venv/bin/python that handles BOTH RAG-venv
+    callers in the deterministic core: it records rag_index.py's argv + emits a
+    canned index JSON, emits a trivial reinforce JSON, and passes EVERYTHING ELSE
+    (e.g. entropy.py's re-exec) through to the real interpreter (SC_RAG_REEXEC is
+    already set on that re-exec, so no loop)."""
+    bindir = os.path.join(company, ".rag-venv", "bin")
+    os.makedirs(bindir, exist_ok=True)
+    py = os.path.join(bindir, "python")
+    with open(py, "w") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'case "${1:-}" in\n'
+            "  *rag_index.py)\n"
+            f'    printf \'%s \' "$@" > "{argfile}"\n'
+            f"    echo '{index_json}'\n"
+            "    ;;\n"
+            "  *reinforce_memory.py)\n"
+            '    echo \'{"applied": true, "threshold": 0.85, "reinforcements": [],'
+            ' "skipped_l2": [], "scanned": 0}\'\n'
+            "    ;;\n"
+            "  *)\n"
+            '    exec python3 "$@"\n'
+            "    ;;\n"
+            "esac\n")
+    os.chmod(py, 0o755)
+    return py
+
+
+def _write_l1(company, mid):
+    """Write a fresh active L1 memory (counts toward RAG_ENABLE_THRESHOLD)."""
+    p = os.path.join(company, "memory", "L1-warm", f"{mid}.md")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write(
+            f"---\nid: {mid}\ntier: L1\nowner: Tony\nsources: [\"[s#1]\"]\n"
+            f"created: 2026-06-01\nlast_reinforced: {_today()}\n"
+            f"reinforce_count: 3\ndecay_score: 1.0\nstatus: active\n---\nbody {mid}\n")
+
+
+class TestDailyRunRagIndex(unittest.TestCase):
+    """Phase 13 Stage A: daily incremental RAG index refresh (A.1) + deps-free
+    threshold activation surface (A.2). HARD invariant: never fail the core."""
+
+    _INDEX_JSON = ('{"embedded": 2, "skipped_unchanged": 3, "deleted_stale": 0,'
+                   ' "table_rows": 5, "l1_l2_count": 5, "warnings": []}')
+
+    def test_index_runs_when_venv_present_incremental_l1l2(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            argfile = os.path.join(d, "ragidx_args.txt")
+            _fake_rag_venv_multi(company, self._INDEX_JSON, argfile)
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- rag-index: embedded 2 | skipped 3 | deleted-stale 0 | rows 5 (L1/L2 5)", text)
+            with open(argfile) as f:
+                args = f.read()
+            self.assertIn("rag_index.py", args)
+            self.assertIn("--memory-dir", args)
+            self.assertIn("--index-dir", args)
+            self.assertNotIn("--rebuild", args)       # incremental (idempotent) — never full rebuild
+            self.assertNotIn("--include-l0", args)     # D-A: L1/L2 only, no L0
+            # index refresh runs AFTER decay (post-consolidation truth)
+            self.assertLess(text.index("- decay"), text.index("- rag-index"))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_venv_absent_one_line_skip_core_completes(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- rag-index: skipped — RAG venv absent", text)
+            self.assertIn("- decay --apply:", text)   # core unaffected
+            self.assertIn("- entropy", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_threshold_surfaces_activation_candidate_when_over(self):
+        # >= RAG_ENABLE_THRESHOLD (50) active L1 + no venv => deps-free
+        # threshold-check surfaces the "activate RAG" candidate.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            for i in range(52):
+                _write_l1(company, f"warm-{i:03d}")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("RAG activation candidate", text)
+            self.assertIn("rag_setup.sh install", text)
+            self.assertIn("- rag-index: skipped — RAG venv absent", text)  # novenv path
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_threshold_not_surfaced_when_under(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            for i in range(3):
+                _write_l1(company, f"warm-{i:03d}")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertNotIn("RAG activation candidate", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_broken_venv_entropy_still_logs_via_jaccard(self):
+        # P13A-1: a BROKEN venv (python present but exits nonzero) used to make
+        # `python3 entropy.py` self-re-exec into that dead python and vanish, so the
+        # entropy line silently disappeared. Now entropy retries in base python
+        # (SC_RAG_REEXEC=1, Jaccard) and always logs its line; core completes.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            bindir = os.path.join(company, ".rag-venv", "bin")
+            os.makedirs(bindir, exist_ok=True)
+            py = os.path.join(bindir, "python")
+            with open(py, "w") as f:
+                f.write("#!/usr/bin/env bash\nexit 1\n")   # broken: present but always dies
+            os.chmod(py, 0o755)
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- entropy", text)          # line NOT dropped despite broken venv
+            self.assertIn("- decay --apply:", text)   # core intact
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_garbage_stdout_venv_entropy_still_logs(self):
+        # P13A-2 (Gibby RA5): a venv python that prints non-JSON to stdout then
+        # exits 0 left garbage in $EOUT, so the emptiness-only retry never fired and
+        # the entropy line vanished at json.load. The retry now keys on VALID entropy
+        # JSON, so the base-python Jaccard pass fires and the line is always present.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            bindir = os.path.join(company, ".rag-venv", "bin")
+            os.makedirs(bindir, exist_ok=True)
+            py = os.path.join(bindir, "python")
+            with open(py, "w") as f:
+                f.write("#!/usr/bin/env bash\n"
+                        'echo "WARNING: fastembed notice"\n'   # non-JSON garbage on stdout
+                        "exit 0\n")                             # ...but exits 0
+            os.chmod(py, 0o755)
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- entropy", text)          # never silently absent
+            self.assertIn("- decay --apply:", text)   # core intact
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_index_failure_never_aborts_core(self):
+        # A refresh that exits nonzero must not abort the already-completed core.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            bindir = os.path.join(company, ".rag-venv", "bin")
+            os.makedirs(bindir, exist_ok=True)
+            py = os.path.join(bindir, "python")
+            with open(py, "w") as f:
+                f.write("#!/usr/bin/env bash\n"
+                        'case "${1:-}" in\n'
+                        "  *rag_index.py) echo boom >&2; exit 2 ;;\n"
+                        '  *reinforce_memory.py) echo \'{"reinforcements": [], "skipped_l2": [],'
+                        ' "scanned": 0, "threshold": 0.85}\' ;;\n'
+                        '  *) exec python3 "$@" ;;\n'
+                        "esac\n")
+            os.chmod(py, 0o755)
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            # nonzero rc => empty $IOUT => graceful "no output" line, core intact
+            self.assertIn("- rag-index:", text)
+            self.assertIn("- entropy", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
 def _fake_claude(d):
     """Plant a fake `claude` CLI that passes the auth probe and dumps the -p
     prompt to $FAKE_CLAUDE_PROMPT_FILE. Returns the dir to prepend to PATH."""
