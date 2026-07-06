@@ -42,9 +42,12 @@ bash skills/self-company/scripts/schedule.sh install        # the scheduled work
 Updates track `main`. Because code and data are separated, an update refreshes the
 skill's logic while your `.company/` data is untouched.
 
-> **After updating, re-run** `schedule.sh install`. The cron lines are absolute-path
-> snapshots taken at install time, so re-running re-points cron at the updated skill.
-> Hooks need no re-install — they are plugin-native and use `${CLAUDE_PLUGIN_ROOT}`.
+> **Updates self-heal the cron.** The cron lines are absolute-path snapshots taken
+> at install time, but the `SessionStart` guard now detects a moved scripts path
+> after a plugin update and re-points cron for you on the next session — no manual
+> step for a routine update. You can still run `schedule.sh install` yourself to
+> refresh immediately. Hooks need no re-install either — they are plugin-native and
+> use `${CLAUDE_PLUGIN_ROOT}`.
 
 ## What runs on a schedule
 

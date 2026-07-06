@@ -9,14 +9,17 @@
 #      NON-BLOCKING: print the violations as a warning and exit 0. daily-run.sh /
 #      schedule.sh fall back to defaults on their own — we must never fail the
 #      session and never install a mis-configured tick.
-#   2. SYNC the tick. Compute a minute-AGNOSTIC signature of the desired daily +
-#      research cron from the config and compare it to
-#      .company/ops/schedule/.installed-tick. If the TICK (or research cadence)
-#      changed, re-run `schedule.sh install` so the edit reaches the live crontab
-#      without the Chairman remembering to re-install, then refresh the marker.
-#      Per-employee SUB-cadence edits do NOT change the signature => no re-install
-#      (Phase-7 A1: the crontab carries an absolute tick snapshot; only the tick
-#      needs syncing, gating is resolved at runtime in daily-run.sh).
+#   2. SYNC. Compute a signature of the desired daily + research cron (minute-
+#      AGNOSTIC) PLUS the canonical scripts dir, and compare it to
+#      .company/ops/schedule/.installed-tick. If the TICK, research cadence, OR the
+#      scripts dir changed, re-run `schedule.sh install` so the edit reaches the
+#      live crontab without the Chairman remembering to re-install, then refresh
+#      the marker. Per-employee SUB-cadence edits do NOT change the signature => no
+#      re-install (Phase-7 A1: the crontab carries an absolute snapshot; only the
+#      tick + script path need syncing, gating is resolved at runtime in daily-run).
+#      Phase 12b: folding the scripts dir in makes a PLUGIN UPDATE/MOVE self-heal
+#      the cron (the update swaps the script files but leaves the stale absolute
+#      path in the crontab) — the same "signature changed -> re-install" path fires.
 #
 # Only syncs a project that is ALREADY scheduled — SessionStart never silently
 # installs cron lines for a company the Chairman hasn't opted in. Honors
@@ -81,17 +84,30 @@ MARKER="$MARKER_DIR/.installed-tick"
 # placeholder minute. Sub-cadence (per-employee) edits do not affect these.
 DAILY_SIG="$(python3 "$CONFIG_PY" --company "$COMPANY" --cron daily --minute M 2>/dev/null)" || DAILY_SIG=""
 RESEARCH_SIG="$(python3 "$CONFIG_PY" --company "$COMPANY" --cron research --minute M 2>/dev/null)" || RESEARCH_SIG=""
-DESIRED="$DAILY_SIG|$RESEARCH_SIG"
+# Phase 12b — cron self-heal on plugin update. The crontab carries an ABSOLUTE
+# snapshot of the scripts dir (schedule.sh A1); a plugin update/move swaps the
+# files but leaves the cron pointing at the stale path (hooks reload, cron does
+# not). Design (a): fold the CANONICAL scripts dir into the signature, so a path
+# change trips the SAME "signature changed -> re-install" path that a tick change
+# does — one mechanism, no new branch. Ground-truth + single-source: we ASK
+# schedule.sh which dir it would embed now (`scripts-dir`, honoring
+# CLAUDE_PLUGIN_ROOT) instead of re-deriving that resolution here (no drift). An
+# older 2-field marker simply differs from this 3-field signature => exactly one
+# self-heal re-install, then it converges (no churn). A failed query yields an
+# empty field, which is also self-consistent after one install (no churn).
+SCRIPTS_NOW="$(bash "$SCHEDULE_SH" scripts-dir "$PROJECT_DIR" 2>/dev/null)" || SCRIPTS_NOW=""
+DESIRED="$DAILY_SIG|$RESEARCH_SIG|$SCRIPTS_NOW"
 
 CURRENT=""
 [ -f "$MARKER" ] && CURRENT="$(cat "$MARKER" 2>/dev/null || true)"
 
 if [ "$DESIRED" != "$CURRENT" ] && [ -f "$SCHEDULE_SH" ]; then
-  # Idempotent: install replaces only THIS project's two lines with the config tick.
+  # Idempotent: install replaces only THIS project's two lines with the current
+  # tick AND the current scripts dir — so both a tick edit and a plugin update heal.
   if bash "$SCHEDULE_SH" install "$PROJECT_DIR" >/dev/null 2>&1; then
     mkdir -p "$MARKER_DIR" 2>/dev/null || true
     printf '%s\n' "$DESIRED" > "$MARKER" 2>/dev/null || true
-    echo "[schedule-guard] tick changed -> re-installed cron for $PROJECT_DIR" >&2
+    echo "[schedule-guard] schedule signature changed (tick/research/scripts path) -> re-installed cron for $PROJECT_DIR" >&2
   fi
 fi
 exit 0

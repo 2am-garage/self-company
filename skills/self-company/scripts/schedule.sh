@@ -43,6 +43,8 @@
 #   schedule.sh status --all               # fleet view (alias of list)
 #   schedule.sh list                       # table: all companies + orphans + TYPE
 #   schedule.sh prune                      # remove only orphan/dead-path lines
+#   schedule.sh scripts-dir  [PROJECT_DIR] # print the CANONICAL scripts dir a cron
+#                                          # line would embed (read-only; no crontab I/O)
 #
 # Tunables (env):
 #   SELF_COMPANY_CRON_MIN      explicit minute override (else auto-staggered)
@@ -378,6 +380,15 @@ case "$CMD" in
   list)
     do_list
     ;;
+  scripts-dir)
+    # Read-only (Phase 12b): print the CANONICAL scripts dir this install WOULD
+    # embed in the cron line — resolved above from CLAUDE_PLUGIN_ROOT / own dir /
+    # legacy .company/scripts, exactly as `install` uses it. hook_schedule_guard.sh
+    # folds this into its signature so a plugin update/move (which changes neither
+    # the tick nor the research cadence, but DOES change this path) trips the
+    # "signature changed -> re-install" self-heal. No crontab I/O.
+    printf '%s\n' "$SCRIPTS_DIR"
+    ;;
   prune)
     before="$(_cron_read)"
     n_before="$(printf '%s\n' "$before" | grep -cE "$SC_MARK_ERE" || true)"
@@ -405,7 +416,7 @@ case "$CMD" in
     fi
     ;;
   *)
-    echo "usage: schedule.sh [install|install-fleet|uninstall|status|list|prune] [PROJECT_DIR|--all]" >&2
+    echo "usage: schedule.sh [install|install-fleet|uninstall|status|list|prune|scripts-dir] [PROJECT_DIR|--all]" >&2
     exit 2
     ;;
 esac
