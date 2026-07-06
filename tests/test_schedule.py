@@ -479,9 +479,11 @@ class TestScheduleGuardSync(ScheduleTestBase):
     def _marker(self, project):
         return os.path.join(project, ".company", "ops", "schedule", ".installed-tick")
 
-    def _run_guard(self, project):
+    def _run_guard(self, project, extra_env=None):
         env = {**os.environ, "SELF_COMPANY_CRONTAB_FILE": self.fake,
                "CLAUDE_PROJECT_DIR": project}
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(["bash", GUARD], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, env=env)
 
@@ -539,6 +541,125 @@ class TestScheduleGuardSync(ScheduleTestBase):
         _run(["install", self.A], self.fake)
         self._run_guard(self.A)
         self.assertIn(self.foreign, self._lines())
+
+
+class TestScheduleGuardSelfHeal(ScheduleTestBase):
+    """Phase 12b — the SessionStart guard self-heals the cron after a PLUGIN
+    UPDATE/MOVE: the crontab carries an absolute scripts-dir snapshot, so when the
+    resolver points at a new dir (simulated via CLAUDE_PLUGIN_ROOT) the guard
+    re-points the daily line with no manual step. All via the fake-crontab seam."""
+
+    REAL_SCRIPTS = os.path.join(REPO, "skills", "self-company", "scripts")
+
+    def _write_cfg(self, project, body):
+        org = os.path.join(project, ".company", "org")
+        os.makedirs(org, exist_ok=True)
+        with open(os.path.join(org, "schedule.yaml"), "w") as f:
+            f.write(body)
+
+    def _marker(self, project):
+        return os.path.join(project, ".company", "ops", "schedule", ".installed-tick")
+
+    def _run_guard(self, project, extra_env=None):
+        env = {**os.environ, "SELF_COMPANY_CRONTAB_FILE": self.fake,
+               "CLAUDE_PROJECT_DIR": project}
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(["bash", GUARD], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, env=env)
+
+    def _daily_line(self, path):
+        return next(ln for ln in self._sc_lines()
+                    if "self-company-daily" in ln and path in ln)
+
+    def _fake_plugin_root(self):
+        """A fake plugin root whose skills/self-company/scripts is a full copy of
+        the real scripts dir — simulates the post-update on-disk layout."""
+        y = os.path.join(self.tmp, "newplugin")
+        dest = os.path.join(y, "skills", "self-company", "scripts")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        subprocess.run(["cp", "-r", self.REAL_SCRIPTS, dest], check=True)
+        return y, dest
+
+    def test_scripts_dir_query_honors_plugin_root(self):
+        # The read-only ground-truth query resolves the dir install would embed.
+        r0 = _run(["scripts-dir", self.A], self.fake)
+        self.assertEqual(r0.returncode, 0, r0.stderr)
+        self.assertEqual(r0.stdout.strip(), self.REAL_SCRIPTS)
+        y, dest = self._fake_plugin_root()
+        r1 = _run(["scripts-dir", self.A], self.fake,
+                  extra_env={"CLAUDE_PLUGIN_ROOT": y})
+        self.assertEqual(r1.stdout.strip(), dest)
+
+    def test_plugin_update_reinstalls_to_new_scripts_dir(self):
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)                       # sync marker to the real dir
+        self.assertIn(self.REAL_SCRIPTS, self._daily_line(self.A))
+        # simulate a plugin update: resolver now points at Y
+        y, dest = self._fake_plugin_root()
+        r = self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(dest, self._daily_line(self.A))          # re-pointed to Y
+        self.assertNotIn(self.REAL_SCRIPTS + "/daily-run.sh", self._daily_line(self.A))
+        self.assertEqual(len(self._sc_lines()), 2)             # no dup / evict
+        self.assertIn(self.foreign, self._lines())             # neighbour intact
+        with open(self._marker(self.A)) as f:
+            self.assertIn(dest, f.read())                      # marker healed
+
+    def test_plugin_update_is_one_shot_no_churn(self):
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)
+        y, dest = self._fake_plugin_root()
+        self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})   # heals
+        # a SECOND run at the SAME new dir must NOT re-install (no churn)
+        r = self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("re-installed", r.stderr)
+        self.assertEqual(len(self._sc_lines()), 2)
+
+    def test_same_path_same_tick_no_reinstall(self):
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)                        # first run heals + marks
+        r = self._run_guard(self.A)                    # second run: nothing changed
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("re-installed", r.stderr)
+
+    def test_tick_change_still_reinstalls(self):
+        # Phase-12 behavior preserved: a tick edit alone still re-installs.
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)
+        self._write_cfg(self.A, "cadence: every 3h\n")
+        r = self._run_guard(self.A)
+        self.assertIn("re-installed", r.stderr)
+        self.assertIn("*/3", self._daily_line(self.A))
+
+    def test_uninstalled_project_not_auto_installed_on_plugin_update(self):
+        # An opted-out company is never auto-scheduled, even on a plugin update.
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        y, dest = self._fake_plugin_root()
+        r = self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._sc_lines(), [])
+        self.assertFalse(os.path.exists(self._marker(self.A)))
+
+    def test_old_two_field_marker_migrates_once(self):
+        # A pre-12b marker (2 fields, no scripts dir) must self-heal exactly once.
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        os.makedirs(os.path.dirname(self._marker(self.A)), exist_ok=True)
+        with open(self._marker(self.A), "w") as f:
+            f.write("M */2 * * *|M 3 * * 0\n")          # legacy 2-field format
+        r = self._run_guard(self.A)
+        self.assertIn("re-installed", r.stderr)         # migrated once
+        with open(self._marker(self.A)) as f:
+            self.assertIn(self.REAL_SCRIPTS, f.read())  # upgraded to 3-field
+        # ...and now converged: a second run does not churn
+        r2 = self._run_guard(self.A)
+        self.assertNotIn("re-installed", r2.stderr)
 
 
 if __name__ == "__main__":
