@@ -357,6 +357,13 @@ Each reinforcement: `reinforce_count++`, `last_reinforced = today`. Promotion "d
 
 > The daily batch is idempotent (`decay.py --apply` re-run is a no-op on already-disposed memory, verified in the red/blue ledger), so running it 4× a day is safe — extra runs simply catch newly-captured L0 sooner.
 
+### 7.8 Durability (backups + offline-gap damper)
+
+Two tunable constants (Phase 5) keep unattended `--apply` mutation reversible and resistant to a long offline gap. Both are read from this section by `policy_config.py`, the same way as §7.7/§7.9 — add a bold-value table row for the constant to override it; left undeclared here, each falls back to the built-in default noted below.
+
+- **`BACKUP_KEEP`** — durability floor, defaults to 14. Before any mutating (`--apply`) pass, `daily-run.sh` snapshots `memory/` to `ops/backups/mem-<ts>.tar.gz` and prunes to the newest few archives (this many), so one bad `--apply` (or a buggy edit) is always recoverable from the last-good snapshot. Set to zero to disable snapshotting entirely (mutating passes then proceed with **no** floor).
+- **`OFFLINE_GAP_DAYS`** — offline-gap damper, defaults to 7. If the gap since the last successful `--apply` run exceeds this many days, `decay.py` clamps the effective "now" to the last run plus this window, so a machine that was off for weeks doesn't over-decay the whole corpus on the first tick back. The damper only ever *reduces* elapsed decay; a missing marker simply means it doesn't engage (never raises).
+
 ### 7.9 Fleet (holding company)
 
 **PARENT-company constant** — applies only to a holding company that schedules its subsidiaries with `schedule.sh install-fleet` and orchestrates them via `scripts/fleet-run.sh`. A standalone (self-scheduled) company never reads it. The isolation invariant still holds: the parent orchestrates SCHEDULING + BUDGET only and never reads/writes a sub's `.company/` except by invoking that sub's own `daily-run.sh`.
@@ -386,5 +393,5 @@ RAG ships dormant:
 
 ---
 
-Version: v5 (RAG dormant; §7.7 scheduling cadence + CAPTURE throttle; §7.9 fleet: FLEET_AGENT_BUDGET)  
+Version: v5 (RAG dormant; §7.7 scheduling cadence + CAPTURE throttle; §7.8 durability: BACKUP_KEEP + OFFLINE_GAP_DAYS; §7.9 fleet: FLEET_AGENT_BUDGET)  
 Last updated: 2026-07-05

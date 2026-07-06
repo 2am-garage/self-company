@@ -122,7 +122,7 @@ access, never the full tool surface:
 
 The authoritative inventory and per-role grants live in **`org/tools.md`** (Tom
 owns it; July keeps each worker's `context.md` grants matched to it). Examples:
-Gibby → Playwright MCP; Tony/Gibby → RAG (`rag_query`); Tony/Bob → `deep-research`.
+Gibby → Playwright MCP; Tony/Gibby → RAG (`rag_query`); Mike/Bob → `deep-research`.
 
 ---
 

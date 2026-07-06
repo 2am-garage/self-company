@@ -350,6 +350,7 @@ Target: entropy declines or stays flat after each maintenance
 | **Real-time** | End of each conversation | cross-dept capture → Gibby | Note observations + quick verify, write to L0 | Haiku + Sonnet |
 | **Daily** | Scheduled | Tony (+ Tom guards budget) | Dedup, decay, promotion assessment | Sonnet |
 | **Weekly** | Scheduled | Tony + Gibby + Phoebe + July | Full verify, rebuild RAG, produce report, measure entropy, worker performance tune | Sonnet |
+| **Weekly (external)** | Scheduled (`research-scan.sh`) | **Mike (R&D)** | Survey the web/ecosystem for improvements, write a cited brief to `ops/research/`, file proposals for Tony/Elon | Sonnet |
 | **Manual** | Chairman calls | Elon (lead) + everyone | Deep cleanup, reorganize, cross-layer review, build pipeline | Opus |
 
 > Parallelizable: multiple agents can work on same stage; cross-stage serial (capture→organize→write→verify has dependencies). Build pipeline (Bob⚔Gibby) triggered per-project by Chairman.
@@ -358,20 +359,26 @@ Target: entropy declines or stays flat after each maintenance
 
 ## 8. RAG (Tony's Domain, Deployed Dormant)
 
-**Status: Deployed (dormant; requires Ollama + LanceDB to activate)**
+**Status: Deployed (dormant; requires the local RAG venv to activate)** — the
+authoritative RAG reference is now **[references/rag.md](../references/rag.md)**; the
+stack below was updated from the original Ollama design to the shipped one.
 
-RAG infrastructure is now built and installed:
-- **Embedding**: Ollama, model 'nomic-embed-text', called via local HTTP (http://localhost:11434/api/embeddings). Uses Python stdlib `urllib` — no 'requests' dependency.
+RAG infrastructure is built and ships dormant:
+- **Embedding**: **fastembed** (ONNX, CPU, fully offline, no daemon), model
+  `BAAI/bge-small-en-v1.5` (384-dim), via `scripts/rag_embed.py`. No Ollama, no HTTP,
+  no network at query time. (The original Ollama/`nomic-embed-text`/768-dim design was
+  superseded — see `references/rag.md` and `policy.md §8`.)
 - **Vector store**: LanceDB (embedded, serverless), index at `.company/memory/index/`. Derivative of markdown truth, always rebuildable.
-- **Scripts**: `rag_index.py` (rebuild index from markdown) and `rag_query.py` (semantic query interface) installed to `.company/scripts/`.
+- **Scripts**: `rag_index.py` / `rag_query.py` (+ `rag_embed.py`, `rag_setup.sh`) run
+  from the skill/plugin per code-data separation — NOT copied into `.company/`.
 - **Trigger**: Rebuild (a) auto when L1+L2 memory count crosses threshold, OR (b) Chairman manual order. Ships dormant.
 - **Owner**: Tony builds/maintains the index; Tony + Gibby query it (Gibby for semantic dup/contradiction search during VERIFY). Others access through Tony.
 
-**Graceful degradation**: If Ollama or LanceDB unavailable, clear actionable message to stderr (what to install/start), exit code 2. No uncaught tracebacks. Can fall back to full-text grep over `.company/memory`.
+**Graceful degradation**: If the RAG venv (fastembed) or LanceDB is unavailable, a clear actionable message to stderr, exit non-zero. No uncaught tracebacks. Falls back to Jaccard / full-text over `.company/memory`.
 
 **Progressive activation**: 
-- **Now (v2.5)**: Cold deployment, not active. Install scripts and docs only.
-- **When Chairman orders** or L1/L2 memory crosses threshold: activate by installing Ollama + LanceDB locally, then trigger `python3 .company/scripts/rag_index.py --rebuild`.
+- **Ships dormant**: not active until the venv is set up and the threshold/order fires.
+- **When Chairman orders** or L1/L2 memory crosses threshold: run `scripts/rag_setup.sh` (creates `.company/.rag-venv` with fastembed), then `python3 scripts/rag_index.py --rebuild`.
 
 **Role**: index, not source of truth. Can be rebuilt anytime from markdown. See [references/rag.md](../references/rag.md) for full technical reference.
 
@@ -393,3 +400,5 @@ RAG infrastructure is now built and installed:
 4. **v1 scope** — First release only Memory/text entropy (L0/L1/L2 + decay + verify), defer Code/Chat entropy to v2?
 
 > Recommendation for v1 focus: `capture → organize → write → verify (loop)` + L0/L1/L2 + decay + real-time/daily triggers. Code/Chat entropy and report automation deferred to later versions. RAG deployed dormant in v2.5 (see §8).
+
+> **Resolved in shipping (kept above as the original design record):** (1) scheduling uses **cron** — `schedule.sh` installs the daily/weekly crontab lines, now namespaced per-project and fleet-aware (Phases 7-8); (2) session boundary + capture use **plugin-native hooks** — declared in `hooks/hooks.json` and auto-loaded on install since v0.1.2, including the `Stop` capture hook (Phase 10, see `references/operations.md`); (3) reports auto-notify via `scripts/notify-status.py`; (4) v1 shipped with Memory/text entropy, with Code/Chat entropy still deferred (see `references/status.md`).
