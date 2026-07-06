@@ -6,6 +6,20 @@
 
 This is the heart of the build pipeline (see §3 Pipeline A). The memory pipeline (Pipeline B) applies the same adversarial spirit in VERIFY, but targets memory provenance.
 
+> **These invariants are now MACHINE-ENFORCED (Phase 9).** Per-company schedule and
+> per-employee duties are configurable via `org/schedule.yaml`, but that config can
+> only tune *when* and *which* duties run — it can **never** reassign a role,
+> uncover the attack surface, or touch the sign-off gate. `schedule_validator.py`
+> encodes the invariants as **rules R1–R6** and REFUSES any config that violates
+> them, falling back to defaults + logging the named rule (a mis-configured
+> competition never runs). R1 attacker≠builder · R2 attack surface must stay covered
+> when a build is active · R3 the 3-consecutive sign-off gate is not tunable ·
+> R4 dispatch topology (Phoebe gateway / July HR-tuning / Tony≠Gibby) preserved ·
+> R5 ledger integrity / immune-memory never disabled · R6 no `role:`/`tier:`/
+> `attacks:` field exists — its presence is a hard reject. The rules used to live
+> only in this prose; they are now checked in code (`schedule_validator.py`, tests
+> in `tests/test_schedule_validator.py`).
+
 ---
 
 ## Role

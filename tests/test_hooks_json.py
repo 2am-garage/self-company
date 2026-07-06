@@ -26,20 +26,23 @@ EXPECTED_EVENTS = {
 }
 
 # The agreed canonical script names each event's command must reference.
+# SessionStart carries TWO groups (plugin hooks merge): notify-status.py and the
+# Phase 12 schedule guard hook_schedule_guard.sh.
 AGREED_SCRIPTS = {
     "capture-trigger.py", "notify-status.py", "hook_memory_inject.py",
     "hook_precompact_capture.sh", "hook_memory_guard.sh", "hook_memory_lint.py",
-    "hook_sessionend_verify.sh",
+    "hook_sessionend_verify.sh", "hook_schedule_guard.sh",
 }
 
+# Each event maps to the SET of canonical scripts its commands may reference.
 EVENT_SCRIPT = {
-    "Stop": "capture-trigger.py",
-    "SessionStart": "notify-status.py",
-    "UserPromptSubmit": "hook_memory_inject.py",
-    "PreCompact": "hook_precompact_capture.sh",
-    "PreToolUse": "hook_memory_guard.sh",
-    "PostToolUse": "hook_memory_lint.py",
-    "SessionEnd": "hook_sessionend_verify.sh",
+    "Stop": {"capture-trigger.py"},
+    "SessionStart": {"notify-status.py", "hook_schedule_guard.sh"},
+    "UserPromptSubmit": {"hook_memory_inject.py"},
+    "PreCompact": {"hook_precompact_capture.sh"},
+    "PreToolUse": {"hook_memory_guard.sh"},
+    "PostToolUse": {"hook_memory_lint.py"},
+    "SessionEnd": {"hook_sessionend_verify.sh"},
 }
 
 
@@ -87,8 +90,14 @@ class HooksJsonStructureTest(unittest.TestCase):
             referenced = [s for s in AGREED_SCRIPTS if s in entry["command"]]
             self.assertEqual(len(referenced), 1,
                              f"{event}: must reference exactly one agreed script, got {referenced}")
-            self.assertEqual(referenced[0], EVENT_SCRIPT[event],
-                             f"{event}: expected {EVENT_SCRIPT[event]}, got {referenced[0]}")
+            self.assertIn(referenced[0], EVENT_SCRIPT[event],
+                          f"{event}: expected one of {EVENT_SCRIPT[event]}, got {referenced[0]}")
+
+    def test_sessionstart_declares_schedule_guard(self):
+        # Phase 12: the schedule guard rides alongside notify-status on SessionStart.
+        cmds = [e["command"] for ev, e in _commands(self.hooks) if ev == "SessionStart"]
+        self.assertTrue(any("notify-status.py" in c for c in cmds), cmds)
+        self.assertTrue(any("hook_schedule_guard.sh" in c for c in cmds), cmds)
 
     def test_scripts_live_under_skill_scripts_dir(self):
         for event, entry in _commands(self.hooks):

@@ -53,8 +53,15 @@ Once `schedule.sh install` is run, two OS cron entries do the unattended work
 
 | Schedule | Job | What it does |
 |---|---|---|
-| every 6h (`00:07 / 06:07 / 12:07 / 18:07`) | `daily-run.sh` | decay stale memories, verify provenance, compute the entropy KPI, a conservative consolidation pass, and one Tony improvement proposal |
-| weekly (`Sun 03:23`) | `research-scan.sh` | Mike surveys the web for skill improvements and files proposals |
+| every 6h (`00:07 / 06:07 / 12:07 / 18:07`) — default, configurable | `daily-run.sh` | decay stale memories, verify provenance, compute the entropy KPI, a conservative consolidation pass, and one Tony improvement proposal |
+| weekly (`Sun 03:23`) — default, configurable | `research-scan.sh` | Mike surveys the web for skill improvements and files proposals |
+
+Those cadences are **defaults**: a company can set its own tick, research schedule,
+agent knobs, and each employee's `cadence`/`duties`/`budget`/`enabled` in
+`org/schedule.yaml` (absent = today's behaviour, unchanged) — that's Layer A. Layer B
+(who attacks vs builds, the sign-off gate) stays in code and is **validator-guarded**:
+any config that would break the red/blue competition is rejected and falls back to
+defaults. A `SessionStart` guard syncs a tick change into the crontab.
 
 Event-driven (not cron): **7 plugin-native hooks** work automatically. `Stop`/`PreCompact`
 capture memories in real time, `SessionStart` surfaces the scheduled-work report on

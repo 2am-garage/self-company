@@ -368,5 +368,178 @@ class TestSingleProjectBackCompat(ScheduleTestBase):
         self.assertIn(".company not found", r.stderr)
 
 
+GUARD = os.path.join(REPO, "skills", "self-company", "scripts", "hook_schedule_guard.sh")
+
+
+class TestScheduleConfigTick(ScheduleTestBase):
+    """Phase 12 — schedule.sh reads the tick from org/schedule.yaml, but only
+    after the validator passes; an invalid config keeps the default tick."""
+
+    def _write_cfg(self, project, body):
+        org = os.path.join(project, ".company", "org")
+        os.makedirs(org, exist_ok=True)
+        with open(os.path.join(org, "schedule.yaml"), "w") as f:
+            f.write(body)
+
+    def _daily_line(self, path):
+        return next(ln for ln in self._sc_lines()
+                    if "self-company-daily" in ln and path in ln)
+
+    def test_valid_cadence_changes_installed_tick(self):
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        r = _run(["install", self.A], self.fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = self._daily_line(self.A)
+        self.assertIn("*/2 * * *", line)          # config tick honored
+        self.assertNotIn("*/6 * * *", line)       # ...not the default
+
+    def test_invalid_config_keeps_default_tick(self):
+        # R1 violation (gibby can't build) -> validator refuses -> default */6.
+        self._write_cfg(self.A, "cadence: every 2h\ngibby: { duties: [build] }\n")
+        r = _run(["install", self.A], self.fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = self._daily_line(self.A)
+        self.assertIn("*/6 * * *", line)
+        self.assertNotIn("*/2", line)
+
+    def test_bad_cadence_falls_back_to_default(self):
+        self._write_cfg(self.A, "cadence: banana\n")
+        r = _run(["install", self.A], self.fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("*/6 * * *", self._daily_line(self.A))
+
+    def test_research_cadence_from_config(self):
+        self._write_cfg(self.A, "research: { enabled: true, cadence: weekly-mon-05 }\n")
+        _run(["install", self.A], self.fake)
+        research = next(ln for ln in self._sc_lines()
+                        if "self-company-research" in ln and self.A in ln)
+        self.assertIn("5 * * 1", research)        # Monday 05:00
+
+    # --- P9-D2: a junk / injected raw cadence must never reach the crontab ------
+    def test_raw_cron_junk_keeps_default_no_bad_line(self):
+        self._write_cfg(self.A, "cadence: GARBAGE foo bar baz qux\n")
+        r = _run(["install", self.A], self.fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("*/6 * * *", self._daily_line(self.A))   # default tick kept
+        self.assertNotIn("GARBAGE", self._read())              # junk never written
+        self.assertEqual(len(self._sc_lines()), 2)             # exactly daily+research
+        self.assertIn(self.foreign, self._lines())             # neighbours intact
+
+    def test_raw_cron_newline_never_injects_extra_line(self):
+        # An embedded newline would split the crontab into an extra (injected) line.
+        self._write_cfg(self.A, 'cadence: "a b c d\\ne"\n')
+        r = _run(["install", self.A], self.fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self._sc_lines()), 2)             # no 3rd injected line
+        self.assertIn("*/6 * * *", self._daily_line(self.A))
+        self.assertIn(self.foreign, self._lines())
+
+    def test_every_self_company_line_has_5_field_time(self):
+        # Structural guard: whatever the config, each installed line begins with a
+        # well-formed 5-field cron time (never junk that `crontab -` would reject).
+        self._write_cfg(self.A, "cadence: GARBAGE foo bar baz qux\n")
+        _run(["install", self.A], self.fake)
+        for ln in self._sc_lines():
+            fields = ln.split()[:5]
+            self.assertEqual(len(fields), 5)
+            for f in fields:
+                self.assertRegex(f, r"^[0-9*/,\-]+$", ln)
+
+    def test_semantically_invalid_cron_keeps_default(self):
+        # P9-D3: an out-of-range but charset-clean cadence must not reach the
+        # crontab — config_py returns rc 2, schedule.sh keeps the default tick.
+        for body in ("cadence: 99 99 99 99 99\n", 'cadence: ",, * * * *"\n',
+                     "cadence: */0 * * * *\n"):
+            self._write_cfg(self.A, body)
+            _run(["uninstall", self.A], self.fake)
+            r = _run(["install", self.A], self.fake)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("*/6 * * *", self._daily_line(self.A), body)
+            self.assertEqual(len(self._sc_lines()), 2, body)
+            # Scope the junk-marker checks to the cron TIME FIELDS (first 5 tokens)
+            # only — the rest of the line embeds the random mkdtemp() project path,
+            # which can itself contain "99" and cause a false failure (P9-D4).
+            cron_fields = " ".join(self._daily_line(self.A).split()[:5])
+            for junk in ("99", ",,", "*/0"):
+                self.assertNotIn(junk, cron_fields, body)
+            self.assertIn(self.foreign, self._lines())
+
+
+class TestScheduleGuardSync(ScheduleTestBase):
+    """Phase 12 Item 4 — the SessionStart guard syncs a TICK change into the
+    crontab (fake backend) but ignores per-employee sub-cadence edits, and never
+    syncs a rejected config."""
+
+    def _write_cfg(self, project, body):
+        org = os.path.join(project, ".company", "org")
+        os.makedirs(org, exist_ok=True)
+        with open(os.path.join(org, "schedule.yaml"), "w") as f:
+            f.write(body)
+
+    def _marker(self, project):
+        return os.path.join(project, ".company", "ops", "schedule", ".installed-tick")
+
+    def _run_guard(self, project):
+        env = {**os.environ, "SELF_COMPANY_CRONTAB_FILE": self.fake,
+               "CLAUDE_PROJECT_DIR": project}
+        return subprocess.run(["bash", GUARD], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, env=env)
+
+    def _daily_line(self, path):
+        return next(ln for ln in self._sc_lines()
+                    if "self-company-daily" in ln and path in ln)
+
+    def test_no_schedule_yaml_is_noop(self):
+        _run(["install", self.A], self.fake)
+        r = self._run_guard(self.A)
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self._marker(self.A)))
+
+    def test_tick_change_reinstalls_and_writes_marker(self):
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        r = self._run_guard(self.A)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(self._marker(self.A)))
+        with open(self._marker(self.A)) as f:
+            self.assertIn("*/2", f.read())
+        self.assertIn("*/2", self._daily_line(self.A))
+
+    def test_subcadence_change_leaves_marker_untouched(self):
+        self._write_cfg(self.A, "cadence: every 2h\ntony: { cadence: every-run }\n")
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)
+        with open(self._marker(self.A)) as f:
+            sig1 = f.read()
+        # change ONLY a per-employee sub-cadence -> tick signature is identical
+        self._write_cfg(self.A, "cadence: every 2h\ntony: { cadence: daily }\n")
+        self._run_guard(self.A)
+        with open(self._marker(self.A)) as f:
+            sig2 = f.read()
+        self.assertEqual(sig1, sig2)
+
+    def test_rejected_config_is_not_synced(self):
+        self._write_cfg(self.A, "gibby: { duties: [build] }\n")
+        _run(["install", self.A], self.fake)
+        r = self._run_guard(self.A)
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self._marker(self.A)))   # refused -> no sync
+        self.assertIn("REJECTED", r.stderr)
+
+    def test_uninstalled_project_not_auto_installed(self):
+        # A company with a config but never scheduled is NOT auto-installed.
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        r = self._run_guard(self.A)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._sc_lines(), [])
+        self.assertFalse(os.path.exists(self._marker(self.A)))
+
+    def test_foreign_line_untouched_by_guard(self):
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)
+        self.assertIn(self.foreign, self._lines())
+
+
 if __name__ == "__main__":
     unittest.main()

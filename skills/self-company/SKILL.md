@@ -174,9 +174,17 @@ namespaced by a `sha1(path)` key so installing one repo never evicts another,
 minutes are auto-staggered (`sha1(path) % 60`) so N companies don't stack on one
 minute, and `list`/`status --all`/`prune`/scoped `uninstall` manage the fleet
 (orphan = a project whose `.company/` is gone). The two cron lines mirror the role
-split: the 6-hourly `daily-run.sh` is Tony's internal maintenance, while the weekly
+split: the (default) 6-hourly `daily-run.sh` is Tony's internal maintenance, while the weekly
 `research-scan.sh` is **Mike's external research pass** — it writes a dated, cited
 brief to `ops/research/` and appends mechanism-level proposals for Tony/Elon.
+**Configurable schedule** — a company can override the tick, research, agent knobs,
+and each employee's `cadence`/`duties`/`budget`/`enabled` in `org/schedule.yaml`
+(absent = today's defaults, byte-for-byte). This is Layer A (knobs); Layer B — who
+is attacker vs builder, the sign-off gate, dispatch topology — stays in code and is
+**validator-guarded**: `schedule_validator.py` (rules R1–R6) rejects any config that
+would break the red/blue competition and falls back to defaults. A `SessionStart`
+guard syncs a tick change to the crontab; `ops/schedule/roster.md` is generated (do
+not hand-edit).
 **Holding company** — for several companies on one machine, `schedule.sh
 install-fleet <parent>` installs ONE cron running `fleet-run.sh` over the
 sub-companies listed in `<parent>/.company/org/subsidiaries.md`: each sub gets the
