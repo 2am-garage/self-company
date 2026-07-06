@@ -2,7 +2,7 @@
 
 A comprehensive overview of trigger timing, participants, actions, and token budgets across the company's hierarchy.
 
-> **Important Declaration**: All automation mechanisms listed in this file (Stop hook, cron scheduling) are v2 proposals and require **explicit Chairman approval before Tom can implement**; by default, no hooks or schedules are automatically installed.
+> **Important Declaration**: The **hooks** in this file (Stop CAPTURE, catch-up, etc.) are **plugin-native since v0.1.2** — Claude Code loads them automatically on install (`hooks/hooks.json`), and a `.company` opt-in guard keeps them inert in non-company repos, so no per-repo install step is needed. **Cron scheduling** (daily/weekly) is still opt-in and requires **explicit Chairman approval before Tom installs it**.
 
 ---
 
@@ -41,31 +41,36 @@ Three steps chained in series across stages (with dependencies):
 
 Real-time CAPTURE (Haiku) tokens **count toward the daily ceiling** (no separate exemption); however, real-time triggers themselves are not blocked by ceiling exhaustion — CAPTURE after conversation end runs normally and is not stopped by hitting the day's budget limit. Tom monitors; if sustained overages occur (e.g., marathon session accumulation), he alerts.
 
-### Implementation Mechanism — Stop Hook Proposal
+### Implementation Mechanism — Stop Hook (plugin-native since v0.1.2)
 
-**[Proposal]** Use **Claude Code Stop hook** to automatically trigger CAPTURE and real-time verification when a conversation ends.
+Real-time CAPTURE is wired as a **Claude Code `Stop` hook**. Since **v0.1.2** it is
+**plugin-native**: declared once in `hooks/hooks.json` at the plugin root and run via
+`${CLAUDE_PLUGIN_ROOT}/.../capture-trigger.py`, so Claude Code loads it automatically on
+install — there is **no per-repo `install-hook.sh` edit** and no `settings.json` wiring to add.
 
-**Implementation**:
-1. Tom adds a Stop hook to the repo's `.claude/settings.json` (shared) or `settings.local.json` (private), in the current Claude Code hook format:
-   ```json
-   {
-     "hooks": {
-       "Stop": [
-         { "hooks": [ { "type": "command",
-           "command": "python3 \"$CLAUDE_PROJECT_DIR/.company/scripts/capture-trigger.py\" --company \"$CLAUDE_PROJECT_DIR/.company\"" } ] }
-       ]
-     }
-   }
-   ```
-2. `capture-trigger.py` reads the transcript path from the hook's stdin JSON and runs Haiku CAPTURE → L0 drafts. `$CLAUDE_PROJECT_DIR` is provided by Claude Code so the path resolves regardless of cwd.
+`capture-trigger.py` reads the transcript path from the hook's stdin JSON and runs Haiku
+CAPTURE → L0 drafts. Recursion-guarded (`stop_hook_active` + guard env), cooldown-throttled,
+and degrades to a clean no-op if anything is missing.
 
-> **Status: ships and installable.** `capture-trigger.py` is in `scripts/` (copied to `.company/scripts/` by init). It is wired as a Claude Code **Stop hook** to run CAPTURE (Haiku) at session end — it reads the transcript, extracts Chairman observations, and writes L0 drafts with sources. Recursion-guarded (`stop_hook_active` + guard env) and degrades to a clean no-op if anything is missing.
+**Global-fire + opt-in guard.** Plugin hooks fire in **every** repo the Chairman opens, so
+the hook's first action is an opt-in guard: no `$CLAUDE_PROJECT_DIR/.company` marker → silent
+`exit 0`. That single check keeps it inert in non-company repos, so no explicit "enable"
+step is required.
 
-**Install mechanism (ships in the skill):** `bash .company/scripts/install-hook.sh install` merges the Stop hook into the project's `.claude/settings.json` (idempotent, preserves existing settings). `uninstall` / `status` manage it. It writes `settings.json` — NOT `settings.local.json` — because Claude Code's permission auto-writer rewrites `settings.local.json` and would clobber an externally-added hook.
+> **`install-hook.sh` is deprecated.** `install` is a no-op ("hooks are plugin-native since
+> v0.1.2 — nothing to install, see `hooks/hooks.json`"); `uninstall` only removes legacy
+> `.claude/settings.json` hook entries left by the pre-v0.1.2 installer (which would otherwise
+> **double-fire** against the plugin hooks); `status` reports plugin-native. See
+> `references/operations.md` for the full hook table.
 
-**When to Enable**: Chairman must explicitly approve before Tom installs the hook. Automation is **not pre-installed by default** (opt-in via the command above).
+**Companion hooks.** Beyond `Stop`, the plugin now ships six more hooks: `SessionStart`
+(catch-up push of unattended runs), `UserPromptSubmit` (ask-time memory injection),
+`PreCompact` (capture-rescue before compaction), `PreToolUse` (deny `rm` under
+`.company/memory`), `PostToolUse` (lint memory writes), and `SessionEnd` (verify fresh
+captures) — **7 plugin-native hooks** in total.
 
-**Note**: If the Chairman does not enable real-time CAPTURE yet, it can still be triggered manually (using conversation prefix `(cross-dept)` to name or Phoebe manually initiating).
+**Note**: CAPTURE can also be triggered manually (conversation prefix `(cross-dept)` or
+Phoebe manually initiating).
 
 ---
 
@@ -419,11 +424,11 @@ Manual triggers are not limited by daily / weekly ceiling (Chairman is highest p
 
 ---
 
-## Trigger Mechanism Overview (v2 Proposal Summary)
+## Trigger Mechanism Overview
 
-| Trigger Level | Detection | Tool | Chairman Approval Status |
+| Trigger Level | Detection | Tool | Status |
 |---|---|---|---|
-| **Real-Time** | Stop hook (session end) | Claude Code `.claude/settings.json` | **Pending approval**; not pre-installed |
+| **Real-Time** | `Stop` hook (session end) | Plugin-native (`hooks/hooks.json`) | **Plugin-native since v0.1.2**; auto-loads on install, `.company`-guarded |
 | **Daily (4×/6h)** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
 | **Weekly Mon 02:00** | Cron / `/schedule` | CronCreate or `/schedule` skill | **Pending approval**; not pre-installed |
 | **Manual** | Natural language / prefix | Elon judgment + Phoebe dispatch | On-the-fly decision (Chairman says ok) |
