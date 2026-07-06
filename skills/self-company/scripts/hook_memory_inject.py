@@ -54,6 +54,32 @@ except Exception:  # pragma: no cover - defensive; keep the hook alive
         return str(fm.get("status") or "").strip().lower() in (
             "archived", "defunct", "absorbed")
 
+# Phase 11 Item 2: the fragile frontmatter delimiter + key:value split lives in
+# ONE shared module (frontmatter.py). Best-effort import + verbatim fallback,
+# same pattern as the tombstone import above.
+try:
+    from frontmatter import parse as _fm_parse
+except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
+    def _fm_parse(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return {}, text
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                end = i
+                break
+        if end is None:
+            return {}, text
+        fm = {}
+        for line in lines[1:end]:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            k, v = s.split(':', 1)
+            fm[k.strip()] = v.strip()
+        return fm, '\n'.join(lines[end + 1:])
+
 EVENT = "UserPromptSubmit"
 
 # Scoring knobs (env-overridable for tuning/tests; sane stdlib defaults).
@@ -136,23 +162,15 @@ def latest_prompt(transcript_path):
 
 # --- minimal stdlib frontmatter parse (no yaml) -------------------------------
 def _parse(text):
-    """Return (frontmatter_dict, body_str). Malformed -> ({}, "")."""
-    if not text.startswith("---"):
+    """Return (frontmatter_dict, body_str) via the shared parser (Phase 11).
+    Malformed / no `---` block -> ({}, ""), matching the old inline sentinel: the
+    shared parser returns the text unchanged when it finds no fenced block, which
+    we map back to ({}, ""). Body is `.strip()`ped exactly as before so a
+    whitespace-only body still reads as empty."""
+    fm, body = _fm_parse(text)
+    if not fm and body == text:
         return {}, ""
-    lines = text.split("\n")
-    fm, body_start = {}, None
-    for i, line in enumerate(lines[1:], start=1):
-        if line.startswith("---"):
-            body_start = i + 1
-            break
-        s = line.strip()
-        if not s or s.startswith("#") or ":" not in s:
-            continue
-        key, val = s.split(":", 1)
-        fm[key.strip()] = val.strip()
-    if body_start is None:
-        return {}, ""
-    return fm, "\n".join(lines[body_start:]).strip()
+    return fm, body.strip()
 
 
 def _int(v, default=1):

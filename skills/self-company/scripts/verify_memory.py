@@ -87,6 +87,59 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
         return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
 
 
+# Phase 11: the fragile frontmatter PARSING SEAM (delimiter + key:value split) is
+# consolidated into ONE shared module (frontmatter.py, same dir) so the legacy
+# per-scanner parsers can't drift — the `.strip() == '---'` delimiter is the
+# single source. Best-effort import + verbatim fallback (same pattern as
+# tombstone.py / charter_ids.py). verify keeps its own `(None, text)`
+# no-frontmatter sentinel and all downstream tracing/stamping logic on top.
+try:
+    from frontmatter import (split as _fm_split, parse as _fm_parse,
+                             serialize as _fm_serialize,
+                             SOURCE_ITEM_RE, tokenize_sources)
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: frontmatter.py)
+    import re as _fm_re
+    SOURCE_ITEM_RE = _fm_re.compile(r'"[^"]*"')
+
+    def tokenize_sources(raw):
+        return SOURCE_ITEM_RE.findall(raw or "")
+
+    def _fm_split(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return [], text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                return lines[1:i], '\n'.join(lines[i + 1:])
+        return [], text
+
+    def _fm_parse(text):
+        raw_fm_lines, body = _fm_split(text)
+        fm = {}
+        for line in raw_fm_lines:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            key, val = s.split(':', 1)
+            fm[key.strip()] = val.strip()
+        return fm, body
+
+    def _fm_serialize(fm, body, order=None):
+        keys = []
+        if order:
+            for k in order:
+                if k in fm and k not in keys:
+                    keys.append(k)
+        for k in fm:
+            if k not in keys:
+                keys.append(k)
+        out = ['---']
+        for k in keys:
+            out.append(f"{k}: {fm[k]}")
+        out.append('---')
+        return '\n'.join(out) + '\n' + body
+
+
 def is_charter_claim(fm):
     """True if the frontmatter SELF-DECLARES charter provenance (via
     `provenance: charter` or a `charter:<slug>` source). This says nothing about
@@ -100,24 +153,15 @@ def is_blessed_charter(mem_id):
 
 
 def parse_frontmatter(text):
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
+    # Phase 11: split/parse via the shared module (`.strip()=='---'` delimiter).
+    # verify's historical contract returns a `(None, text)` sentinel when there
+    # is no frontmatter block; the shared parse returns `({}, text)` for that
+    # case (an empty, falsy dict). Every caller gates on `not fm` and discards
+    # body on that path, so mapping the empty parse back to `(None, text)` is
+    # behaviour-identical.
+    fm, body = _fm_parse(text)
+    if not fm:
         return None, text
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end is None:
-        return None, text
-    fm = {}
-    for ln in lines[1:end]:
-        s = ln.strip()
-        if not s or s.startswith("#") or ":" not in s:
-            continue
-        k, v = s.split(":", 1)
-        fm[k.strip()] = v.strip()
-    body = "\n".join(lines[end + 1:])
     return fm, body
 
 

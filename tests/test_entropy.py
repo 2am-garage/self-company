@@ -452,5 +452,56 @@ class TestVenvReexecResolution(unittest.TestCase):
             self.assertEqual(data["total_memories"], 1)
 
 
+class TestFrontmatterDelimiterFix(unittest.TestCase):
+    """Phase 11 Item 2: entropy migrated to the shared frontmatter parser, which
+    FIXES the old `startswith('---')` delimiter bug. A `----` line no longer
+    accepts a malformed opener or truncates the block — entropy now agrees with
+    decay/verify/reinforce (all use the correct `.strip()=='---'` delimiter)."""
+
+    def test_internal_rule_now_parses_full_frontmatter(self):
+        # A `----` line INSIDE the frontmatter (before the real closing ---) used
+        # to TRUNCATE parsing there; the shared parser reads the whole block.
+        import entropy
+        text = ("---\n"
+                "id: pref-band-001\n"
+                "tier: L1\n"
+                "----\n"
+                "sources: [\"[sessJ#5]\"]\n"
+                "reinforce_count: 4\n"
+                "status: active\n"
+                "---\n"
+                "body\n")
+        fm = entropy.parse_frontmatter(text)
+        # fields AFTER the `----` are now parsed (were lost/defaulted before)
+        self.assertEqual(fm["sources"], ["[sessJ#5]"])
+        self.assertEqual(fm["reinforce_count"], "4")
+
+    def test_quadruple_dash_opener_rejected(self):
+        # `----` is NOT a valid opening fence; the malformed memory is rejected
+        # (empty dict) — matching decay/verify/reinforce which all skip it.
+        import entropy
+        text = "----\nid: pref-opener-001\ntier: L0\n---\nbody\n"
+        self.assertEqual(entropy.parse_frontmatter(text), {})
+
+    def test_wellformed_body_rule_unaffected(self):
+        # A well-formed memory whose BODY contains a `----` rule parses normally
+        # (the closing fence is found first) — no behavior change here.
+        import entropy
+        text = ("---\nid: proj-notes-001\ntier: L0\nstatus: active\n---\n"
+                "Section one.\n\n----\n\nSection two.\n")
+        fm = entropy.parse_frontmatter(text)
+        self.assertEqual((fm["id"], fm["tier"]), ("proj-notes-001", "L0"))
+
+    def test_scanners_agree_on_malformed_opener(self):
+        # The point of the fix: entropy's active-set membership now matches
+        # decay/verify/reinforce on a malformed-opener memory (all reject it).
+        import entropy, decay, verify_memory, reinforce_memory
+        text = "----\nid: pref-opener-001\ntier: L0\n---\nbody\n"
+        self.assertEqual(entropy.parse_frontmatter(text), {})           # rejected
+        self.assertIsNone(decay.parse_frontmatter(text)["id"])          # no id
+        self.assertIsNone(verify_memory.parse_frontmatter(text)[0])     # None sentinel
+        self.assertEqual(reinforce_memory.parse_frontmatter(text), (None, -1))
+
+
 if __name__ == "__main__":
     unittest.main()

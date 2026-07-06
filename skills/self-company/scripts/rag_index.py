@@ -32,6 +32,23 @@ except Exception:  # pragma: no cover - authoritative copy: tombstone.py
 
     def is_tombstoned(fm):
         return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+
+# Phase 11 Item 2: the fragile frontmatter delimiter + key:value split seam lives
+# in ONE shared module (frontmatter.py). rag keeps its OWN typed interpretation
+# (tier/status validation, sources list parse, _parse_errors) on top; only the
+# fence-location + body-split is delegated. Best-effort import + verbatim
+# fallback, same pattern as the tombstone import above.
+try:
+    from frontmatter import split as _fm_split
+except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
+    def _fm_split(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return [], text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                return lines[1:i], '\n'.join(lines[i + 1:])
+        return [], text
 import urllib.error
 
 # ============================================================================
@@ -120,23 +137,23 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
         "_parse_errors": []
     }
 
+    # Fence-location + body-split delegated to the shared parser (Phase 11).
+    # rag keeps its own opening/closing error accounting: the shared split
+    # collapses no-opening and no-closing to ([], text), so re-derive the two
+    # distinct messages from the same delimiter rag always used.
     lines = content.split('\n')
     if not lines or lines[0].strip() != '---':
         result["_parse_errors"].append("No opening --- found")
         return result
 
-    end_idx = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == '---':
-            end_idx = i
-            break
-
-    if end_idx is None:
+    raw_fm_lines, body = _fm_split(content)
+    if not raw_fm_lines and body == content:
+        # opening fence present (checked above) but no matching close
         result["_parse_errors"].append("No closing --- found")
         return result
 
     # Parse frontmatter lines
-    for line in lines[1:end_idx]:
+    for line in raw_fm_lines:
         line = line.strip()
         if not line or line.startswith('#'):
             continue
@@ -190,8 +207,8 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
         except Exception as e:
             result["_parse_errors"].append(f"Error parsing {key}: {e}")
 
-    # Extract body (everything after closing ---)
-    result["_body"] = '\n'.join(lines[end_idx + 1:])
+    # Extract body (everything after closing ---), as located by the shared split.
+    result["_body"] = body
 
     return result
 

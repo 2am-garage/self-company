@@ -181,6 +181,61 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
     def is_tombstoned(fm):
         return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
 
+# Phase 11: the fragile frontmatter PARSING SEAM is consolidated into ONE shared
+# module (frontmatter.py, same dir). This ALSO fixes entropy's long-standing bug:
+# the inline parser gated fences on `startswith('---')`, so it accepted a
+# malformed `---xyz` opener and TRUNCATED frontmatter at any body line beginning
+# with `---` (e.g. a `----` markdown rule), classifying a memory differently from
+# every other scanner. The shared `.strip() == '---'` delimiter fixes it. Best-
+# effort import + verbatim fallback (same pattern as tombstone.py / charter_ids.py).
+# entropy keeps its OWN sources-as-list conversion, defunct->archived, and 6-key
+# defaults layered on top.
+try:
+    from frontmatter import (split as _fm_split, parse as _fm_parse,
+                             serialize as _fm_serialize,
+                             SOURCE_ITEM_RE, tokenize_sources)
+except Exception:  # pragma: no cover - defensive fallback (authoritative copy: frontmatter.py)
+    import re as _fm_re
+    SOURCE_ITEM_RE = _fm_re.compile(r'"[^"]*"')
+
+    def tokenize_sources(raw):
+        return SOURCE_ITEM_RE.findall(raw or "")
+
+    def _fm_split(text):
+        lines = text.split('\n')
+        if lines[0].strip() != '---':
+            return [], text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                return lines[1:i], '\n'.join(lines[i + 1:])
+        return [], text
+
+    def _fm_parse(text):
+        raw_fm_lines, body = _fm_split(text)
+        fm = {}
+        for line in raw_fm_lines:
+            s = line.strip()
+            if not s or s.startswith('#') or ':' not in s:
+                continue
+            key, val = s.split(':', 1)
+            fm[key.strip()] = val.strip()
+        return fm, body
+
+    def _fm_serialize(fm, body, order=None):
+        keys = []
+        if order:
+            for k in order:
+                if k in fm and k not in keys:
+                    keys.append(k)
+        for k in fm:
+            if k not in keys:
+                keys.append(k)
+        out = ['---']
+        for k in keys:
+            out.append(f"{k}: {fm[k]}")
+        out.append('---')
+        return '\n'.join(out) + '\n' + body
+
 # Decay thresholds (must match decay.py)
 HL_BASE = 7.0
 HL_GROWTH = 0.5
@@ -212,36 +267,24 @@ def parse_frontmatter(text):
     Minimal YAML-like frontmatter parser.
     Extracts key: value pairs between --- markers.
     Returns dict with safe defaults for missing fields.
+
+    Phase 11: the delimiter + key:value split now goes through the shared
+    `frontmatter.parse` (the correct `.strip()=='---'` fence — see the module
+    import note above for the bug this fixes). entropy keeps its own layer on
+    top: `sources` is stored as a parsed LIST (quotes stripped) rather than the
+    raw string, `defunct` is normalised to `archived`, and the 6 defaults are
+    injected. No-frontmatter -> `{}` (no defaults), exactly as before.
     """
-    lines = text.split('\n')
-    if len(lines) < 2 or not lines[0].startswith('---'):
+    fm_raw, _body = _fm_parse(text)
+    if not fm_raw:
         return {}
 
-    result = {}
-    in_fm = False
-    fm_lines = []
+    result = dict(fm_raw)
 
-    for line in lines[1:]:
-        if line.startswith('---'):
-            in_fm = True
-            break
-        fm_lines.append(line)
-
-    if not in_fm:
-        return {}
-
-    for line in fm_lines:
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-
-        # Handle sources: [a, b] array syntax
-        if line.startswith('sources:'):
-            sources_str = line[8:].strip()
-            result['sources'] = _parse_sources_array(sources_str)
-        elif ':' in line:
-            key, val = line.split(':', 1)
-            result[key.strip()] = val.strip()
+    # entropy represents `sources` as a parsed list (quotes stripped), not the
+    # raw `[...]` string — keep that representation via its own array parser.
+    if 'sources' in result:
+        result['sources'] = _parse_sources_array(result['sources'])
 
     # `defunct` is a legacy alias for `archived` (the daily agent writes it
     # when its sandboxed `rm` can't delete a merged-away stub). Mirror
