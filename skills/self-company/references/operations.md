@@ -180,6 +180,12 @@ expression's charset AND per-field semantics; `schedule.sh` trusts that verdict)
 
 ### Holding company (fleet orchestrator) — one cron for N sub-companies
 
+> **OPTIONAL layer — most users can skip this whole section.** Fleet is a separate,
+> fully-decoupled orchestration layer for running *several* companies on one machine; the
+> single-company path (init → daily-run → schedule) never touches it. `fleet.py` /
+> `fleet-run.sh` live in `scripts/` alongside everything else and are only engaged when you
+> explicitly run `schedule.sh install-fleet`. If you run one company, ignore this.
+
 Instead of N independent crons each paying full maintenance every tick, a **parent
 company** can drive its sub-companies from a single schedule. `fleet-run.sh` is the
 parent's one cron entry; `schedule.sh install-fleet <parent>` installs it (a

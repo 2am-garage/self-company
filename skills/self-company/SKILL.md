@@ -165,56 +165,18 @@ stages, iron disciplines, worked examples). Start a spec from
 
 ## Operations
 
-Day-to-day running of the company has four moving parts. **Triggers** — the company
-starts working four ways: the Chairman calls, the clock fires (`daily-run.sh` cron),
-an external event pushes (`fire-trigger.sh`), or the session hands off a task
-(session vs headless dispatch, per the §5.5 chain). **Scheduling** — `schedule.sh`
-treats the crontab as a keyed set of companies: each project's cron lines are
-namespaced by a `sha1(path)` key so installing one repo never evicts another,
-minutes are auto-staggered (`sha1(path) % 60`) so N companies don't stack on one
-minute, and `list`/`status --all`/`prune`/scoped `uninstall` manage the fleet
-(orphan = a project whose `.company/` is gone). The two cron lines mirror the role
-split: the (default) 6-hourly `daily-run.sh` is Tony's internal maintenance, while the weekly
-`research-scan.sh` is **Mike's external research pass** — it writes a dated, cited
-brief to `ops/research/` and appends mechanism-level proposals for Tony/Elon.
-**Configurable schedule** — a company can override the tick, research, agent knobs,
-and each employee's `cadence`/`duties`/`budget`/`enabled` in `org/schedule.yaml`
-(absent = today's defaults, byte-for-byte). This is Layer A (knobs); Layer B — who
-is attacker vs builder, the sign-off gate, dispatch topology — stays in code and is
-**validator-guarded**: `schedule_validator.py` (rules R1–R6) rejects any config that
-would break the red/blue competition and falls back to defaults. A `SessionStart`
-guard syncs a tick change to the crontab; `ops/schedule/roster.md` is generated (do
-not hand-edit).
-**Holding company** — for several companies on one machine, `schedule.sh
-install-fleet <parent>` installs ONE cron running `fleet-run.sh` over the
-sub-companies listed in `<parent>/.company/org/subsidiaries.md`: each sub gets the
-cheap deterministic pass every tick, but the expensive consolidation agent is spent
-only on subs whose entropy rose, capped by `FLEET_AGENT_BUDGET` — the parent
-orchestrates scheduling + budget only, never a sub's memory. **Durability** — before
-any mutating pass `daily-run.sh` snapshots `memory/` to `ops/backups/` (rotated to
-`BACKUP_KEEP`); decay's "drop" is a soft-delete tombstone (recoverable within the
-grace window), and an offline-gap damper stops a long machine outage from
-mass-purging the store on the first tick back.
-**Hooks** — since v0.1.2 all **7 hooks are plugin-native**: declared once in
-`hooks/hooks.json` (plugin root) and run via `${CLAUDE_PLUGIN_ROOT}`, so Claude Code
-loads them on install with no `install-hook.sh` edit. They are `Stop` (capture),
-`SessionStart` (catch-up push), `UserPromptSubmit` (ask-time memory injection, 30s
-stdlib), `PreCompact` (capture-rescue), `PreToolUse` (deny rm under `.company/memory`),
-`PostToolUse` (lint memory writes), `SessionEnd` (verify fresh captures). Plugin hooks
-fire in **every** repo, so each script's first action is an opt-in guard — no
-`$CLAUDE_PROJECT_DIR/.company` marker → silent `exit 0`. `install-hook.sh` is a
-**legacy-cleaner only** (nothing to install — the old `install` no-op was removed in
-Phase 14): `uninstall` cleans legacy `settings.json` entries that would otherwise
-double-fire (plugin hooks merge with settings hooks); `status` reports plugin-native.
-**Catch-Up** — the `SessionStart`
-hook (`notify-status.py --emit-hook`) pushes one summary when unattended runs moved
-something substantive; push only, never Discord. **Ledger** — `report.py` writes
-`ops/reports/ledger.md`, an autoresearch-style table with entropy as the headline
-metric and a `keep`/`flat`/`skip`/`fail` verdict. **Views** — on demand, `report.py`
-and `org-status.py` render inline; `supervisor.py` is the live child-process harness.
+The company runs on **triggers** (Chairman call · 6-hourly `daily-run.sh` cron ·
+`fire-trigger.sh` event · session handoff), a keyed per-project **crontab**
+(`schedule.sh`, tunable in `org/schedule.yaml`), and **7 plugin-native hooks**
+(`hooks/hooks.json`, each opt-in-guarded to a `.company` repo). A durability floor
+(pre-mutation `memory/` snapshots, soft-delete tombstones, offline-gap damper) and
+reporting (`report.py` ledger, catch-up `SessionStart` push, on-demand views) round it
+out. An **optional holding-company fleet** layer (`fleet.py`/`fleet-run.sh`) drives N
+sub-companies from one parent cron — single-company users can ignore it.
 
-Read **[references/operations.md](references/operations.md)** when you need to run
-or wire the company's triggers, daily cron, catch-up push, or reports.
+Read **[references/operations.md](references/operations.md)** for the full detail — how to
+run or wire the triggers, daily cron, scheduling/config, hooks, catch-up push, reports, and
+the optional fleet.
 
 ---
 
@@ -280,38 +242,26 @@ Example: "I recorded your preference for pytest based on our last conversation; 
 
 ## More Details
 
-For company design details, see:
+Load these on demand — none is needed to ACT until you're doing the specific thing it covers.
 
-- **[Design Document](design/self-company-design.md)** — authoritative architecture
-  - §0 design philosophy: Markdown truth, verify loop, entropy KPI, decay, token budget
-  - §1 org structure: eight agents, responsibilities, toolkit, context slicing
-  - §3 core flows: build pipeline A + memory pipeline B
-  - §4 memory tiers + decay: L0/L1/L2, consolidation, decay logic
-  - §5 entropy management: three dimensions (text/context/code)
+- **[design/self-company-design.md](design/self-company-design.md)** — authoritative architecture (§0 philosophy · §1 org · §3 flows · §4 tiers+decay · §5 entropy).
 
-- **v2 Memory Pipeline Implementation Guide**
-  - **[references/pipeline.md](references/pipeline.md)** — playbook for four stages CAPTURE → ORGANIZE → WRITE → VERIFY (who, when, inputs/outputs, exact steps, handoff format)
-  - **[references/memory-tiers.md](references/memory-tiers.md)** — L0/L1/L2 definitions, consolidation promotion rules, decay formula and thresholds, half-life tables, alignment with scripts
-  - **[references/execution-model.md](references/execution-model.md)** — orchestration vs execution tiers, worker sub-agent isolation (least-privilege context), parallel vs serial dispatch
+**References**
+- [pipeline.md](references/pipeline.md) — CAPTURE → ORGANIZE → WRITE → VERIFY stages (who/when/steps/handoff).
+- [memory-tiers.md](references/memory-tiers.md) — L0/L1/L2, promotion rules, decay formula + half-life tables.
+- [execution-model.md](references/execution-model.md) — orchestration vs isolated workers (least-privilege context), dispatch.
+- [operations.md](references/operations.md) — triggers, scheduling/config, hooks, catch-up push, ledger, views, supervisor.
+- [red-blue-protocol.md](references/red-blue-protocol.md) — Bob (Blue) ⚔ Gibby (Red) build-and-attack loop.
+- [rag.md](references/rag.md) — RAG index (LanceDB + fastembed, local/offline); ships dormant, `rag_setup.sh install` to activate.
+- [status.md](references/status.md) — completion checklists + deferred items.
 
-- **Operations & protocols**
-  - **[references/operations.md](references/operations.md)** — triggers (call/clock/event/session), session vs headless dispatch, catch-up push hook, scheduled-work ledger, on-demand views + live supervisor
-  - **[references/red-blue-protocol.md](references/red-blue-protocol.md)** — Bob (Blue) ⚔ Gibby (Red) build-and-attack loop
-  - **[references/rag.md](references/rag.md)** — RAG index design and usage (dormant until Ollama + LanceDB installed)
-  - **[references/status.md](references/status.md)** — completion status (v1 / v2 / v2.5 checklists, deferred items)
+**Scripts** (stdlib only; canonical in `scripts/`, run in place — never copied into `.company/`)
+- `decay.py` / `entropy.py` — the decay disposal pass and the entropy KPI pass (`--memory-dir .company/memory`, JSON; decay `--apply` mutates).
+- `frontmatter.py` / `tombstone.py` / `charter_ids.py` / `policy_config.py` — shared single-source libraries hard-imported across the scanners/hooks (frontmatter delimiter contract: `line.strip() == '---'`, opening fence on line 0).
+- `rag_index.py` / `rag_query.py` / `rag_embed.py` — the RAG index build / semantic query / local-embed layer (see rag.md).
+- `daily-run.sh` / `schedule.sh` — the maintenance + cron-scheduling runtime; `fleet.py` / `fleet-run.sh` — the **optional** holding-company layer.
 
-- **Executable Python scripts** (standard library only; canonical source in `scripts/`, run in place from the skill/plugin — NOT copied into `.company/`)
-  - **[scripts/decay.py](scripts/decay.py)** — scan markdown frontmatter, compute decay_score, produce disposal candidates (drop/archive/demote/upgrade_candidates) per threshold, JSON output; `--apply` flag modifies files. Run `python3 scripts/decay.py --memory-dir .company/memory`
-  - **[scripts/entropy.py](scripts/entropy.py)** — measure entropy across four dimensions (duplication, contradiction, stale, unverified), weighted sum, read-only JSON output + diagnostic candidate list. Run `python3 scripts/entropy.py --memory-dir .company/memory`
-  - **[scripts/frontmatter.py](scripts/frontmatter.py)** — the single shared **frontmatter** source: `split`/`parse`/`serialize` + `tokenize_sources`, imported by all frontmatter parsers across the skill (every scanner, hook, and one-shot utility) via the try-import + verbatim-fallback pattern (like `tombstone.py`/`charter_ids.py`). Delimiter contract is `line.strip() == '---'` — the opening fence must be line 0 (a leading-blank file has no frontmatter), and a `----` body rule does NOT truncate; parses raw `key: value` with no defaults injected — each caller keeps its own defaults/validation/serialize order. Not a CLI (library only).
-  - **[scripts/rag_index.py](scripts/rag_index.py)** — build/rebuild RAG index from markdown memory (requires Ollama + LanceDB). Dormant by default; activate on Chairman order or when memory crosses threshold. See `references/rag.md`.
-  - **[scripts/rag_query.py](scripts/rag_query.py)** — semantic query interface for RAG index (Tony queries during maintenance; Gibby queries during VERIFY for dup/contradiction detection). Offline only, privacy hard rule.
-
-- **Company folder** (`./.company/` — hidden, git-ignored)
-  - `org/` — company settings (policy with tunable constants, triggers, worker personas/context)
-  - `memory/` — Chairman memory assets (L0/L1/L2 layered, each with frontmatter)
-  - `ops/` — operational traces (logs/plans/schedule)
-  - `reports/` — this-period reports (entropy/memory deltas)
+- **Company folder** (`./.company/`, git-ignored) — `org/` (policy, triggers, personas/context) · `memory/` (L0/L1/L2) · `ops/` (logs/plans/schedule) · `reports/`.
 
 ---
 
