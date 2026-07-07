@@ -16,8 +16,8 @@ import unittest
 import _helpers
 
 REPO_ROOT = _helpers.REPO_ROOT
-HOOKS_JSON = os.path.join(REPO_ROOT, "hooks", "hooks.json")
-INSTALL_HOOK = os.path.join(REPO_ROOT, "skills", "self-company", "scripts", "install-hook.sh")
+HOOKS_JSON = os.path.join(REPO_ROOT, "plugin", "hooks", "hooks.json")
+INSTALL_HOOK = os.path.join(REPO_ROOT, "plugin", "skills", "self-company", "scripts", "install-hook.sh")
 
 # The 7 events the plugin must declare.
 EXPECTED_EVENTS = {

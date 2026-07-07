@@ -15,7 +15,7 @@ import _helpers  # noqa: F401 — sets sys.path
 import policy_config
 
 REPO_ROOT = _helpers.REPO_ROOT
-REAL_POLICY = os.path.join(REPO_ROOT, "skills", "self-company", "assets", "company-template", "org", "policy.md")
+REAL_POLICY = os.path.join(REPO_ROOT, "plugin", "skills", "self-company", "assets", "company-template", "org", "policy.md")
 
 
 class TestRealPolicy(unittest.TestCase):

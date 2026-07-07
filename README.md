@@ -7,7 +7,7 @@ entropy through tiered memory, a verification loop, and decay. Private and
 project-scoped — all data lives in a git-ignored `.company/` folder that never
 leaves your machine.
 
-Full skill docs: [`skills/self-company/SKILL.md`](skills/self-company/SKILL.md).
+Full skill docs: [`plugin/skills/self-company/SKILL.md`](plugin/skills/self-company/SKILL.md).
 
 ## Install (as a plugin)
 
@@ -21,10 +21,10 @@ automation:
 
 ```bash
 # creates ./.company/ (git-ignored data: memory, ops, org config)
-bash skills/self-company/scripts/init_company.sh
+bash plugin/skills/self-company/scripts/init_company.sh
 
 # optional automation, opt-in and local:
-bash skills/self-company/scripts/schedule.sh install        # the scheduled work below
+bash plugin/skills/self-company/scripts/schedule.sh install        # the scheduled work below
 ```
 
 > Hooks need **no** setup: since v0.1.2 all 7 hooks are **plugin-native** (declared in
@@ -83,10 +83,10 @@ shared token budget:
 
 ```bash
 # list every scheduled company / spot dead installs
-bash skills/self-company/scripts/schedule.sh list
+bash plugin/skills/self-company/scripts/schedule.sh list
 
 # holding-company mode: one cron drives the sub-companies in .company/org/subsidiaries.md
-bash skills/self-company/scripts/schedule.sh install-fleet <parent-repo>
+bash plugin/skills/self-company/scripts/schedule.sh install-fleet <parent-repo>
 ```
 
 The parent runs the cheap deterministic pass for every sub-company each tick and spends
