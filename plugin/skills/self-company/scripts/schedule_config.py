@@ -6,8 +6,9 @@ Phase 12: each company declares its OWN schedule and per-employee duties as DATA
 here, instead of the timing/work being hardcoded in schedule.sh / daily-run.sh.
 This module is the ONE place that:
   * knows the config SCHEMA (which top-level + per-employee keys exist),
-  * knows the fixed ROLE topology (which duties each employee may own — Layer B,
-    NOT configurable; the validator imports these tables so there is one source),
+  * imports the fixed ROLE topology from employee.py (which duties each employee
+    may own — Layer B, NOT configurable; that module is the single source both
+    this reader and the validator import, Phase 16),
   * translates a friendly `cadence` into a 5-field cron expression, and
   * answers daily-run.sh's "should STEP run on THIS tick?" gating question.
 
@@ -40,49 +41,24 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The fixed role topology (Layer B) is authoritative in employee.py — the single
+# source of truth, imported here and by schedule_validator.py so there is exactly
+# one home for it (Phase 16). Config may enable/disable an employee and pick which
+# of THEIR OWN duties run; it can never grant a duty outside these sets. Editing
+# the topology is a code change over there, deliberately — not a config knob.
+from employee import (  # noqa: E402
+    EMPLOYEES, ALLOWED_DUTIES, ATTACK_DUTIES, BUILD_DUTIES, VERIFY_DUTIES,
+    STEP_OWNER, Employee,
+)
+
 CONFIG_SUBPATH = "org/schedule.yaml"
 
-# ---------------------------------------------------------------- Layer B tables
-# The fixed role topology. Config may enable/disable an employee and pick which of
-# THEIR OWN duties run — it can never grant a duty outside this set. The validator
-# imports these so the invariant lives in exactly one place (modularize, don't
-# special-case). Editing these is a code change, deliberately — not a config knob.
-EMPLOYEES = ("tony", "gibby", "bob", "mike", "elon", "phoebe", "tom", "july")
-
-ALLOWED_DUTIES = {
-    "tony":   {"reinforce", "decay", "entropy", "rag_index", "propose", "agent"},
-    "gibby":  {"verify", "attack"},          # Red Team — attack, never build
-    "bob":    {"build"},                     # Blue Team — build, never attack/verify
-    "mike":   {"research"},                  # external weekly survey
-    "elon":   {"survey"},                    # elon_survey -> daily todo
-    "tom":    {"backup", "report", "schedule"},
-    "phoebe": set(),                         # gateway — no scheduled deterministic duty
-    "july":   set(),                         # HR tuning — no scheduled deterministic duty
-}
-
-# Red/blue role classes (used by the validator's R1/R2). An employee must never
-# hold duties from more than one competing class; the attack surface must stay
-# covered whenever the build surface is active.
-ATTACK_DUTIES = {"attack"}
-BUILD_DUTIES = {"build"}
-VERIFY_DUTIES = {"verify"}
-
-# Which daily-run.sh deterministic step each employee owns (for --should-run
-# gating and the roster). Steps NOT here (e.g. red/blue attack/build) are not part
-# of the scheduled batch — they are dispatched competition work.
-STEP_OWNER = {
-    "backup":    "tom",
-    "reinforce": "tony",
-    "decay":     "tony",
-    "verify":    "gibby",
-    "entropy":   "tony",
-    "rag_index": "tony",   # Phase 13 A.1: daily incremental LanceDB index refresh
-    "survey":    "elon",
-    "report":    "tom",
-    "agent":     "tony",
-}
-
-# Per-employee config keys that are allowed. Anything else is rejected by the
+# ---------------------------------------------------------------- config schema
+# The config SCHEMA (which YAML keys the reader/validator accept or forbid) stays
+# here — it is about the config FILE, not about who an employee IS (that is the
+# topology, now in employee.py). Per-employee config keys that are allowed;
+# anything else is rejected by the
 # validator (this is how R3/R4/R5/R6 fall out of ONE structural rule).
 EMPLOYEE_KEYS = {"cadence", "duties", "budget", "enabled"}
 TOP_KEYS = {"cadence", "research", "agent"} | set(EMPLOYEES)
@@ -399,19 +375,15 @@ def _cadence_matches(cadence, hour, dow, tick_hours=DEFAULT_TICK_HOURS):
 
 def should_run(company, step, hour, dow):
     """Should deterministic STEP run on this tick? Fail-OPEN: any doubt -> True,
-    so a bad config or missing owner never silently suppresses maintenance."""
+    so a bad config or missing owner never silently suppresses maintenance.
+
+    Routes through the Employee model (Phase 16): resolve the step's owner and ask
+    THAT employee — which reuses this module's effective()/_cadence_matches, so the
+    verdict is byte-identical to the pre-model owner-centric lookup."""
     owner = STEP_OWNER.get(step)
     if owner is None:
         return True
-    eff = effective(company)
-    e = eff["employees"].get(owner)
-    if not e:
-        return True
-    if not e["enabled"]:
-        return False
-    if step not in e["duties"]:
-        return False
-    return _cadence_matches(e["cadence"], hour, dow)
+    return Employee.load(owner, company).should_run(step, hour, dow)
 
 
 # ================================================================ roster

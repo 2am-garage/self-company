@@ -29,8 +29,8 @@ Rules (each sourced from references/red-blue-protocol.md):
 
 R3–R6 fall out of ONE general structural rule — "every key must be in the known
 schema, and a forbidden footgun key is a hard reject" — plus the fixed role tables
-in schedule_config.py. That is the modular design: not six special-cased clauses
-but a whitelist + a fixed topology.
+in employee.py (the authoritative Layer-B topology). That is the modular design:
+not six special-cased clauses but a whitelist + a fixed topology.
 
 Exit codes: 0 = valid, 3 = invalid (violations printed to stdout, one per line).
 Never raises; a parse failure is reported as a violation, not a crash.
@@ -44,7 +44,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import schedule_config as sc  # shared schema + role tables (one source of truth)
+import schedule_config as sc  # config SCHEMA + parser (allowed/forbidden keys)
+import employee as emp        # authoritative Layer-B role topology (single source)
 
 
 def _load(company, config):
@@ -110,7 +111,7 @@ def validate(raw, parse_error=None):
             v.append(f"R4: unknown top-level key '{k}' — not in the schema")
 
     # Per-employee blocks: only known keys, and duties within the fixed role set.
-    for name in sc.EMPLOYEES:
+    for name in emp.EMPLOYEES:
         block = raw.get(name)
         if block is None:
             continue
@@ -129,14 +130,14 @@ def validate(raw, parse_error=None):
         dset = {str(d) for d in duties}
         # R1a — a duty outside this employee's fixed role set (Gibby can't build,
         # Bob can't attack/verify, Tony can't build, ...).
-        stray = dset - sc.ALLOWED_DUTIES[name]
+        stray = dset - emp.ALLOWED_DUTIES[name]
         for d in sorted(stray):
             v.append(
                 f"R1: '{name}' may not own duty '{d}' — outside {name}'s fixed role "
-                f"(allowed: {sorted(sc.ALLOWED_DUTIES[name]) or 'none'})"
+                f"(allowed: {sorted(emp.ALLOWED_DUTIES[name]) or 'none'})"
             )
         # R1b — no single employee holds BOTH an attack-class and a build-class duty.
-        if (dset & sc.ATTACK_DUTIES) and (dset & sc.BUILD_DUTIES):
+        if (dset & emp.ATTACK_DUTIES) and (dset & emp.BUILD_DUTIES):
             v.append(f"R1: '{name}' holds both attack and build duties — attacker != builder")
 
     # R2 — if the build surface is active, the attack surface must be covered.
@@ -153,18 +154,18 @@ def validate(raw, parse_error=None):
         dd = block.get("duties")
         if isinstance(dd, list):
             return {str(d) for d in dd}
-        return set(sc.ALLOWED_DUTIES[name])
+        return set(emp.ALLOWED_DUTIES[name])
 
     bob, gib = _emp("bob"), _emp("gibby")
     bob_enabled = bob.get("enabled", True) is not False
     bob_duties = _duties_of(bob, "bob")
-    bob_builds = bob_enabled and bool(sc.BUILD_DUTIES & bob_duties)
+    bob_builds = bob_enabled and bool(emp.BUILD_DUTIES & bob_duties)
     if bob_builds:
         gib_enabled = gib.get("enabled", True) is not False
         gib_duties = _duties_of(gib, "gibby")
         if not gib_enabled:
             v.append("R2: Bob builds but Gibby is disabled — attack surface uncovered")
-        elif not (sc.ATTACK_DUTIES & gib_duties):
+        elif not (emp.ATTACK_DUTIES & gib_duties):
             # Covers an EXPLICIT empty gibby duty list too (P9-D1 regression).
             v.append("R2: Bob builds but Gibby has no 'attack' duty — attack surface uncovered")
 
