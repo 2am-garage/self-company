@@ -40,10 +40,28 @@ Pure stdlib.
 
 import argparse
 import json
+import math
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _env_num(name, default, cast):
+    """Parse an env-tunable number, falling back to `default` on absence OR garbage.
+
+    P13B-1: these knobs are parsed at MODULE LEVEL — outside main()'s backstop
+    try/except — so a malformed value (e.g. SELF_COMPANY_INJECT_RAG_TIMEOUT=abc)
+    would raise at IMPORT and break the always-on hook on every prompt. This hook's
+    hard rule is "ANY error -> exit 0 silently, never break the Chairman's prompt",
+    so a bad tuning value must degrade to the default, never crash."""
+    try:
+        return cast(os.environ[name])
+    except (KeyError, ValueError, TypeError):
+        return default
 
 # --- import the SINGLE tombstone vocabulary (best-effort, same dir) -----------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -83,13 +101,28 @@ except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontm
 EVENT = "UserPromptSubmit"
 
 # Scoring knobs (env-overridable for tuning/tests; sane stdlib defaults).
-TOP_K = int(os.environ.get("SELF_COMPANY_INJECT_TOPK", "4"))
+TOP_K = _env_num("SELF_COMPANY_INJECT_TOPK", 4, int)
 TOP_K_CAP = 5                     # hard ceiling regardless of env
 CONTEXT_CHAR_CAP = 600           # total additionalContext budget (~token-capped)
 PER_MEM_CHARS = 180              # per-memory body trim
 MIN_OVERLAP = 1                  # relevance floor: >=1 shared keyword or silent
-HIGH_RC = int(os.environ.get("SELF_COMPANY_INJECT_HIGH_RC", "2"))  # L1 gate
+HIGH_RC = _env_num("SELF_COMPANY_INJECT_HIGH_RC", 2, int)  # L1 gate
 TIER_WEIGHT = {"L2": 1.0, "L1": 0.6}
+
+# --- Phase 13 Stage B (B.1): RAG semantic-retrieval knobs ---------------------
+# The semantic path is ADDITIVE: it augments retrieval ONLY when the local RAG
+# stack is present; the keyword path (rank()) stays the guaranteed-fast floor and
+# the no-venv/degrade path. All bounded so the 30s hook budget is never approached.
+RAG_QUERY_TIMEOUT = _env_num("SELF_COMPANY_INJECT_RAG_TIMEOUT", 7.0, float)  # s
+# Ask for more hits than we inject: some will be filtered out as stale/tombstoned/
+# out-of-scope when re-validated against the live candidate set, so over-fetch to
+# still have enough survivors to fill the cap.
+RAG_QUERY_TOPK = max(TOP_K_CAP, TOP_K) * 2
+# Semantic relevance floor (cosine): honor the hook's "relevance-gated — never
+# pollute the prompt" hard rule. Below this, a hit is treated as off-topic noise
+# and dropped; if nothing clears the floor we fall back to the keyword path (which
+# has its own MIN_OVERLAP gate) so an off-topic prompt still injects nothing.
+RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.30, float)
 
 # Small stopword set so incidental common words don't manufacture "relevance".
 _STOP = frozenset("""
@@ -249,6 +282,143 @@ def rank(prompt, candidates):
             for (_s, _o, _r, t, fm, body, path) in scored[:min(TOP_K, TOP_K_CAP)]]
 
 
+def _debug(reason):
+    """Optional one-line degrade reason on stderr (never stdout — the hook's stdout
+    is reserved for the injection JSON). Silent unless SELF_COMPANY_INJECT_DEBUG is
+    set, so normal hook logs stay clean. Honors the two-reason convention: the
+    force-off case (SC_NO_RAG) names the env var; a genuine absence says so."""
+    if os.environ.get("SELF_COMPANY_INJECT_DEBUG"):
+        try:
+            print(f"[hook_memory_inject] semantic fallback: {reason}", file=sys.stderr)
+        except Exception:
+            pass
+
+
+def semantic_top(company, prompt, candidates):
+    """RAG-augmented candidate selection (Phase 13 Stage B.1).
+
+    When the local RAG stack (the project's `.company/.rag-venv` + a non-empty
+    LanceDB index) is available, ask `rag_query.py` for the memories SEMANTICALLY
+    closest to `prompt`, then map those hits back to the LIVE candidate files.
+    Returns a list in the SAME shape rank() returns — [(tier, fm, body, path), ...]
+    — or **None** to signal "fall back to the keyword path". None is returned for
+    ANY of: SC_NO_RAG set, no venv, absent/empty index, empty prompt, subprocess
+    timeout, rag_query nonzero/garbage output, or zero usable (post-revalidation)
+    hits. NEVER raises — any error degrades to None (keyword floor).
+
+    Re-validation (critical): the index is L1/L2 only (Phase 13 D-A) and refreshes
+    only daily (Stage A), so its rows are CANDIDATES to re-verify, not truth. We
+    accept a hit ONLY if its `path` is in the CURRENT live candidate set built by
+    load_candidates() — which already guarantees the file exists, is not
+    tombstoned, has a body, and is in-scope (L2, or high-rc L1; never L0). A
+    stale / deleted / tombstoned / out-of-scope / L0 path simply never matches and
+    is dropped. We inject the LIVE body (rag_index stores no body), never an
+    indexed copy.
+    """
+    # Force-off (two-reason convention: name the env var explicitly).
+    if os.environ.get("SC_NO_RAG"):
+        _debug("SC_NO_RAG set (semantic disabled)")
+        return None
+    if not prompt:
+        # No query text -> semantic search is meaningless; let the keyword path's
+        # recency fallback handle the empty-prompt case.
+        return None
+
+    # Require THIS project's venv python explicitly (cron/hook-safe, mirrors
+    # daily-run). Absent -> no subprocess at all, so the no-venv path stays
+    # byte-for-byte the keyword floor and adds only a stat() of overhead.
+    rag_py = Path(company) / ".rag-venv" / "bin" / "python"
+    if not os.access(str(rag_py), os.X_OK):
+        _debug("RAG venv absent")
+        return None
+    index_dir = Path(company) / "memory" / "index"
+    try:
+        if not index_dir.exists() or not any(index_dir.iterdir()):
+            _debug("index absent/empty")
+            return None
+    except OSError:
+        return None
+
+    query_script = os.path.join(_SCRIPT_DIR, "rag_query.py")
+    if not os.path.exists(query_script):
+        return None
+
+    try:
+        proc = subprocess.run(
+            [str(rag_py), query_script, "--query", prompt,
+             "--top-k", str(RAG_QUERY_TOPK), "--index-dir", str(index_dir)],
+            capture_output=True, text=True, timeout=RAG_QUERY_TIMEOUT,
+            # SC_RAG_REEXEC=1: rag_py IS the venv python, so rag_query must not
+            # re-exec again. Bounds the process tree to one killable child so the
+            # timeout is hard.
+            env={**os.environ, "SC_RAG_REEXEC": "1"})
+    except subprocess.TimeoutExpired:
+        _debug(f"rag_query timeout ({RAG_QUERY_TIMEOUT}s) -> keyword fallback")
+        return None
+    except Exception:
+        _debug("rag_query spawn failed")
+        return None
+
+    if proc.returncode != 0:
+        _debug(f"rag_query exit {proc.returncode}")
+        return None
+    try:
+        hits = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        _debug("rag_query non-JSON output")
+        return None
+    if not isinstance(hits, list) or not hits:
+        _debug("rag_query zero hits")
+        return None
+
+    # Map hits (best-first, as rag_query sorts them) back to LIVE candidates.
+    # Key on a NORMALIZED (realpath) path: rag_index stores the path as seen at
+    # index time (absolute $MEM in the pipeline) while load_candidates builds it
+    # from the hook's resolved company dir — normalizing both sides defends
+    # against abs-vs-rel / symlink / '..' differences so a healthy match is not
+    # silently missed. (realpath does not require the path to exist.)
+    def _norm(p):
+        try:
+            return os.path.realpath(str(p))
+        except Exception:
+            return str(p)
+
+    by_path = {_norm(path): (tier, fm, body, path)
+               for (tier, fm, body, path) in candidates}
+    out, seen = [], set()
+    for h in hits:
+        if not isinstance(h, dict):
+            continue
+        try:
+            score = float(h.get("score"))
+        except (TypeError, ValueError):
+            continue
+        # A non-finite score (NaN/inf) would slip past `score < RAG_MIN_SCORE`
+        # (nan < x is False) and bypass the relevance gate. Treat it as below-floor
+        # so the gate stays honest. (Re-validation already blocks any stale leak,
+        # so this is gate-integrity, not a security fix.)
+        if not math.isfinite(score) or score < RAG_MIN_SCORE:  # relevance-gated
+            continue
+        raw = h.get("path")
+        if not raw:
+            continue
+        key = _norm(raw)
+        if key in seen:                    # skip dupes (belt-and-suspenders)
+            continue
+        live = by_path.get(key)            # re-validate against live corpus
+        if live is None:                   # stale / deleted / tombstoned / L0 / out-of-scope
+            continue
+        seen.add(key)
+        out.append(live)
+        if len(out) >= min(TOP_K, TOP_K_CAP):
+            break
+
+    if not out:
+        _debug("no usable semantic hits after re-validation")
+        return None
+    return out
+
+
 def build_context(top):
     """Compact, token-capped 'Relevant Chairman memory:' block, or "" if empty."""
     if not top:
@@ -270,7 +440,16 @@ def build_context(top):
 
 
 def run(company_arg, transcript_arg):
-    """Core: returns additionalContext string ("" => inject nothing)."""
+    """Core: returns additionalContext string ("" => inject nothing).
+
+    Blend (Phase 13 Stage B.1) = **semantic-first with keyword fallback**, NOT a
+    union. Rationale: keyword overlap counts and cosine similarities are on
+    different scales, so a union would need arbitrary normalization/interleaving
+    and could blow the tight char/cap budget; semantic-first keeps exactly ONE of
+    two code paths producing the top list, the budget clean, and the degrade path
+    trivial to reason about (Gibby-friendly). The keyword path stays byte-for-byte
+    as the guaranteed-fast floor AND the no-venv/timeout/no-index degrade — so with
+    no RAG stack, behavior is identical to before this change."""
     company = resolve_company(company_arg)
     if company is None:                            # opt-in guard: off-company
         return ""
@@ -278,7 +457,11 @@ def run(company_arg, transcript_arg):
     if not candidates:
         return ""
     prompt = latest_prompt(transcript_arg)
-    return build_context(rank(prompt, candidates))
+    # Semantic first; None => any degrade condition => the original keyword path.
+    top = semantic_top(company, prompt, candidates)
+    if top is None:
+        top = rank(prompt, candidates)
+    return build_context(top)
 
 
 def _read_stdin_hook():
