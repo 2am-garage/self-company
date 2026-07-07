@@ -207,6 +207,49 @@ expression's charset AND per-field semantics; `schedule.sh` trusts that verdict)
   `daily-run.sh` from the effective config on every run — do NOT hand-edit it (edit
   `org/schedule.yaml` instead; the file is marked generated).
 
+### July's capability audit (`july_audit.py`) — the capability steward step
+
+July has a load-bearing, recurring job: keep every worker's **functional
+capability profile** — the `tools` / `mcp` / `skills` / `plugins` declared in
+`org/employees/<name>/context.md` — both **accurate** against the real environment
+and **right-sized** (least-privilege) as the toolchain evolves. This runs as a
+deterministic `daily-run.sh` step (`july_audit`, owned by **July** in the
+`employee.py` topology; gate `_should_run july_audit`; set `july: { cadence:
+weekly }` in `schedule.yaml` — recommended, it's low-churn). Built ON the Phase-16
+`Employee` model: profiles are read via `Employee.load(name).capabilities()`.
+
+**PROPOSE-ONLY (P17-D2).** july_audit **never edits any `context.md`**. The lesson
+from two same-class breaks: available capabilities **cannot be enumerated to
+ground truth** from the filesystem — a live, bundled grant like the `deep-research`
+skill is not physically discoverable under `~/.claude`, so ANY irreversible
+auto-removal on a filesystem view is unsafe. So every finding is a **proposal** the
+Chairman/Elon approve; Elon → Phoebe → Tom apply any approved edit.
+
+- **Detect** available capabilities (read-only, graceful): the builtin tool set;
+  MCP servers (`.mcp.json` / `.claude/settings*.json` / `~/.claude.json`); skills
+  (`.claude/skills` + marketplace); installed plugins (`.claude/plugins`). The
+  detector returns `(available, complete, source)`: an **absent / empty /
+  malformed** view ⇒ availability `None` ("unknown"), and a malformed candidate
+  **poisons** the whole dimension — that dimension is then **skipped**, never a
+  crash. `complete` records whether the view was trustworthy-complete; it is
+  reported as **context on each proposal**, not a mutation gate (there is no
+  mutation).
+- **Classify** per worker, per churny dimension (mcp/skills/plugins; `tools` is
+  reported, not classified): **STALE** (declared but not found in the enumerable
+  environment) → **propose removal**, tagged with the view's completeness so the
+  human can tell "genuinely gone" from "non-enumerable"; **CAPABILITY GAP**
+  (available + role plausibly needs it) → **propose grant**; **OVER-GRANT**
+  (declared + available + role doesn't need it) → **propose removal**.
+- **Guardrails.** Managers (Elon/Phoebe/July) are **never audited**. Nothing is
+  auto-applied — no `context.md` is edited under any input. Capability grants are
+  **orthogonal to red/blue duty assignment** (which `schedule_validator` R1–R6
+  owns) — July may not reassign duties, and any proposal touching the **Gibby/Bob
+  pair is marked "human review required."** Emits a stable JSON report
+  (`july-capability-audit/1`); with `--apply` it WRITES the proposals to
+  `ops/plans/capability-audit-<date>.md` (Elon adjudicates → Phoebe dispatches →
+  Tom edits the profile) and logs to `org/employees/july/log.md`. Never fails the
+  run.
+
 ### Holding company (fleet orchestrator) — one cron for N sub-companies
 
 > **OPTIONAL layer — most users can skip this whole section.** Fleet is a separate,

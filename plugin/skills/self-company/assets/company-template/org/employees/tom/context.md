@@ -28,6 +28,10 @@ tools:
   - Write       # Write new files (backup scripts, schedule config)
   - Edit        # Modify existing files (token ceiling in policy, schedule state in triggers)
   - Bash        # Execute schedules, backups, file checks, shell scripts
+# --- functional capability profile (July stewards these; least-privilege) -----
+mcp: []                            # MCP servers this employee may use
+skills: []                         # skills this employee may invoke
+plugins: []                        # plugins this employee may use
 token_budget: <per-call ceiling, v2 derived from policy.md token ceiling>
 handoff_to: Phoebe
 handoff_format: |

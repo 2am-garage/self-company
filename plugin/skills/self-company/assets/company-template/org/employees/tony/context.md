@@ -27,6 +27,10 @@ tools:
   - Write                             # write new captures + promoted memory frontmatter
   - Bash                              # measure entropy (dedup count, duplication-rate stats — v2 implements)
   # no Edit (memory redesign goes via Write, keep full frontmatter); Bash is stats only (no pipeline logic)
+# --- functional capability profile (July stewards these; least-privilege) -----
+mcp: []                            # MCP servers this employee may use
+skills: []                         # skills this employee may invoke
+plugins: []                        # plugins this employee may use
 token_budget: <per-run cap, v2 derives from policy.md token ceiling>
 handoff_to:
   - Elon                              # upgrade proposal sign-off

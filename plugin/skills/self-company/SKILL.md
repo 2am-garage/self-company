@@ -54,7 +54,7 @@ in the current repo — project-scoped and not shared across projects.
 
 **Key roles**:
 - **Phoebe = execution gateway** — any actual hands-on work goes through her dispatch planning first to ensure no missing steps, no lost dependencies.
-- **July = worker team lead** — daily tuning of the five workers' personas/performance, half a tier above them; doesn't touch manager tier.
+- **July = worker team lead + capability steward** — tunes the five workers' personas/performance AND runs a scheduled capability audit (their tools/MCP/skills/plugins, kept accurate against the environment and right-sized to least-privilege); half a tier above them, doesn't touch manager tier.
 
 ---
 
@@ -64,7 +64,7 @@ in the current repo — project-scoped and not shared across projects.
 |---|---|---|
 | **Elon** | CEO | Set direction, upgrade adjudication, lead manual deep cleanups |
 | **Phoebe** | PM | Execution gateway: convert intent → spec/plan, dispatch tasks, track progress, fill gaps, set dependencies |
-| **July** | HR | Tune five workers' personas/prompts/performance, half a tier above them |
+| **July** | HR | Tune five workers' personas/prompts/performance; **capability steward** — weekly audit of each worker's tools/MCP/skills/plugins, proposes stale/gap/over-grant fixes for approval (least-privilege; never auto-edits a profile) |
 | **Bob** | Build Engineer | Produce code/files per Phoebe's spec |
 | **Gibby** | QA Engineer | Attack Bob's output by every means, loop until clean |
 | **Tony** | Improvement Engineer | Think: measure entropy, evaluate health, write upgrade proposals for Elon |

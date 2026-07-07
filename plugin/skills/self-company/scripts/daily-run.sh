@@ -374,6 +374,46 @@ except Exception:
   fi
 fi
 
+# July's capability-steward audit (Phase 17): deterministic, PROPOSE-ONLY. Audits
+# each worker's tools/MCP/skills/plugins against the environment and writes STALE/
+# GAP/OVER-GRANT findings as PROPOSALS to ops/plans/ (Elon adjudicates → Phoebe →
+# Tom applies any approved edit). It NEVER edits a context.md (P17-D2: filesystem
+# availability can't be ground truth, so no auto-mutation). Managers untouched;
+# red/blue-pair items marked human-review. Env-source absence => "unknown" + skip,
+# never a crash. Low-churn: set `july: { cadence: weekly }` in schedule.yaml
+# (recommended); gated here by should_run.
+if [[ -f "$SCRIPTS/july_audit.py" ]]; then
+  if _should_run july_audit; then
+    JOUT="$(mktemp)"
+    japply=(--company "$COMPANY")
+    $DRY_RUN || japply+=(--apply)     # dry-run: print only; --apply: write proposals + log
+    python3 "$SCRIPTS/july_audit.py" "${japply[@]}" >"$JOUT" 2>>"$SERR" || true
+    python3 - "$JOUT" >> "$LOG" <<'PY' || echo "- capability audit: ran (log-parse error) — core unaffected" >> "$LOG"
+import sys, json
+try:
+    r = json.load(open(sys.argv[1]))
+except Exception:
+    print("- capability audit: no output (errored) — core unaffected"); sys.exit(0)
+if r.get("error"):
+    print(f"- capability audit: no-op — {r['error']}"); sys.exit(0)
+s = r.get("summary", {})
+unk = s.get("unknown_dimensions") or []
+print("- capability audit: audited {w} workers | proposals {p} "
+      "(stale {st}, gap {g}, over {o}) — propose-only{u}".format(
+          w=s.get("workers_audited", "?"), p=s.get("proposals_total", 0),
+          st=s.get("stale_total", 0), g=s.get("gap_total", 0),
+          o=s.get("over_grant_total", 0),
+          u=(" | unknown env: " + ",".join(unk)) if unk else ""))
+pp = r.get("proposals_path")
+if pp:
+    print(f"  - capability proposals -> {pp} (Elon adjudicates; no profile auto-edited)")
+PY
+    rm -f "$JOUT"
+  else
+    echo "- capability audit: skipped — schedule.yaml gated off july.july_audit for this tick" >> "$LOG"
+  fi
+fi
+
 # Scheduled-work ledger (autoresearch-style): regenerate ops/reports/ledger.md so
 # the Chairman wakes up to a one-row-per-run report — entropy headline, keep/flat/
 # skip/fail verdict, one-line description. Read-only over the logs; deterministic.

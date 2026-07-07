@@ -22,6 +22,10 @@ tools:
   - Read
   - Write
   - Edit                                      # edit spec/plan/dispatch list
+# --- functional capability profile (manager tier; July does NOT audit this) ---
+mcp: []                                     # MCP servers this employee may use
+skills: []                                  # skills this employee may invoke
+plugins: []                                 # plugins this employee may use
 token_budget: <per-call cap; v2 derived from policy.md token ceiling>
 handoff_to:
   - Elon                                      # progress reports, direction confirmation, decisions
