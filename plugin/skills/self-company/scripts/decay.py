@@ -667,8 +667,7 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                     report["warnings"].append(
                         f"{path}: charter-guard: refusing to reap blessed "
                         f"charter seed id={mem['id']}; charter seed found "
-                        f"below L2 — migrate it to L2-cold/profile/ "
-                        f"(scripts/migrate_charter_seeds.py)")
+                        f"below L2 — move it to L2-cold/profile/")
                     continue
                 # Phase 5 Item 2 (N2): the grace window runs from the LATER of
                 # last_reinforced / invalid_at — a tombstoned drop stays
@@ -722,13 +721,13 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             # Non-blessed memories that merely self-declare charter fall
             # through and decay normally (anti-abuse preserved).
             # The warning fires only while a seed still sits below L2 — it
-            # signals the one-time L2-cold/profile/ migration hasn't run yet.
+            # signals a charter seed hasn't been placed in L2-cold/profile/ yet.
             if action in ("drop", "demote", "archive") and is_blessed_charter(mem):
                 report["warnings"].append(
                     f"{path}: charter-guard: refusing to {action} blessed "
                     f"charter seed id={mem['id']} (tier {mem['tier']}); "
-                    f"charter seed found below L2 — migrate it to "
-                    f"L2-cold/profile/ (scripts/migrate_charter_seeds.py)")
+                    f"charter seed found below L2 — move it to "
+                    f"L2-cold/profile/")
                 action = "keep"
 
             # D5: enforce one tier-move per file (by id) per run. If this id was

@@ -434,52 +434,6 @@ class TestCharterGuard(unittest.TestCase):
                 self.assertIn("provenance: charter", f.read())
 
 
-class TestCharterMigration(unittest.TestCase):
-    """migrate_charter_seeds.py — dry-run default, idempotent, anti-abuse."""
-
-    def test_dry_run_default_mutates_nothing(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "L0-working", "org-hierarchy.md")
-            _write_charter_seed(path, id="org-hierarchy")
-            data = _helpers.run_json("migrate_charter_seeds.py",
-                                     "--memory-dir", d)
-            self.assertFalse(data["applied"])
-            self.assertEqual(data["summary"].get("migrate"), 1)
-            self.assertTrue(os.path.exists(path))
-            self.assertFalse(os.path.exists(
-                os.path.join(d, "L2-cold", "profile", "org-hierarchy.md")))
-
-    def test_apply_moves_then_rerun_is_noop(self):
-        with tempfile.TemporaryDirectory() as d:
-            src = os.path.join(d, "L0-working", "merge-gate.md")
-            dst = os.path.join(d, "L2-cold", "profile", "merge-gate.md")
-            _write_charter_seed(src, id="merge-gate")
-            data = _helpers.run_json("migrate_charter_seeds.py",
-                                     "--memory-dir", d, "--apply")
-            self.assertEqual(data["summary"].get("migrate"), 1)
-            self.assertFalse(os.path.exists(src))
-            with open(dst, encoding="utf-8") as f:
-                txt = f.read()
-            self.assertIn("tier: L2", txt)
-            self.assertIn("category: profile", txt)
-            data2 = _helpers.run_json("migrate_charter_seeds.py",
-                                      "--memory-dir", d, "--apply")
-            self.assertEqual(data2["summary"].get("noop"), 1)
-            self.assertNotIn("migrate", data2["summary"])
-
-    def test_id_reuse_without_charter_provenance_not_touched(self):
-        # A random memory that reuses a seed id but carries no charter
-        # provenance is NOT migrated (is_blessed_charter gate).
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "L0-working", "merge-gate.md")
-            _helpers.write_memory(path, id="merge-gate",
-                                  sources='["[s#1]"]')
-            data = _helpers.run_json("migrate_charter_seeds.py",
-                                     "--memory-dir", d, "--apply")
-            self.assertNotIn("migrate", data["summary"])
-            self.assertTrue(os.path.exists(path))
-
-
 class TestFrontmatterMigration(unittest.TestCase):
     """Phase 11 Item 2: decay routes its parse/serialize through the shared
     frontmatter module while keeping its own defaults/validation/key-order.

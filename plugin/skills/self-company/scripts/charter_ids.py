@@ -9,8 +9,7 @@ duplicate (verify_memory.py, entropy.py) and decay.py was about to add a third
 copy for its data-loss guard — this consolidates all of them (Phase 4, Item 1).
 
 Consumers (all in this directory, imported the same best-effort way the
-policy_config loader is): verify_memory.py, entropy.py, decay.py,
-migrate_charter_seeds.py.
+policy_config loader is): verify_memory.py, entropy.py, decay.py.
 
 ANTI-ABUSE contract (Chairman-approved, Phase 2 Item 6): a memory is honoured
 as charter-class ONLY when it BOTH self-declares charter provenance

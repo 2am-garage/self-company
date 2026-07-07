@@ -3,12 +3,12 @@
 frontmatter — SINGLE authoritative source for the fragile markdown-frontmatter
 PARSING SEAM (delimiter + key:value split + body split + source tokenization).
 
-Before Phase 11 this seam was open-coded in TEN separate parsers (decay.py,
+Before Phase 11 this seam was open-coded in NINE separate parsers (decay.py,
 entropy.py, verify_memory.py, reinforce_memory.py, capture-trigger.py,
-rag_index.py, hook_memory_lint.py, hook_memory_inject.py, backfill_rc.py,
+rag_index.py, hook_memory_lint.py, hook_memory_inject.py,
 list_uncategorized.py) with five incompatible shapes — and they had genuinely
 drifted. In particular entropy.py gated the fences on `startswith('---')` while
-the other nine used `.strip() == '---'`, so entropy alone would accept a
+the other eight used `.strip() == '---'`, so entropy alone would accept a
 malformed `---xyz` opener and TRUNCATE frontmatter at any body line beginning
 with `---` (e.g. a `----` markdown rule). Two scanners could therefore classify
 the SAME file's active-set membership differently. This module consolidates the
