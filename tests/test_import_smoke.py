@@ -23,7 +23,7 @@ import _helpers
 
 CONVERTED = [
     "decay", "entropy", "verify_memory", "capture-trigger", "reinforce_memory",
-    "rag_index", "backfill_rc", "list_uncategorized", "hook_memory_lint",
+    "rag_index", "list_uncategorized", "hook_memory_lint",
     "hook_memory_inject",
 ]
 
