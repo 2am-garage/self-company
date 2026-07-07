@@ -120,6 +120,10 @@ or another desk. This keeps attention focused, holds entropy out of the main
 thread, and lets independent workers run in parallel (serial handoff for chains
 like Bob→Gibby).
 
+**Per-employee memory** — analysts/planners (Tony, Mike, Elon, Phoebe, July) keep a
+per-employee RAG store and `recall` relevant past experience at dispatch; executors
+(Bob, Gibby, Tom) use flat `log.md` / red-blue ledger memory (no RAG).
+
 Full spec: **[references/execution-model.md](references/execution-model.md)**.
 
 ---
