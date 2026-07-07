@@ -149,12 +149,14 @@ class InstallHookMigrationTest(unittest.TestCase):
             json.dump(legacy, f, indent=2)
         return settings
 
-    def test_install_is_noop(self):
+    def test_install_command_removed_is_usage_error(self):
+        # Phase 14 Bucket 3: the dead `install` no-op branch was removed (hooks are
+        # plugin-native). `install` is no longer a recognized command -> usage error
+        # (exit 2), and it must never create settings.json.
         with tempfile.TemporaryDirectory() as d:
             rc, out, err = _run_install_hook("install", d)
-            self.assertEqual(rc, 0, err)
-            self.assertIn("plugin-native", out.lower())
-            self.assertIn("nothing to install", out.lower())
+            self.assertEqual(rc, 2)
+            self.assertIn("usage:", err.lower())
             self.assertFalse(os.path.exists(os.path.join(d, ".claude", "settings.json")))
 
     def test_uninstall_removes_legacy_entries(self):
