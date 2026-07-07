@@ -73,6 +73,33 @@ def _env_num(name, default, cast):
 # ask-time budget discipline) so recall can never block a dispatch.
 _RECALL_TIMEOUT = _env_num("SELF_COMPANY_RECALL_TIMEOUT", 7.0, float)
 
+# Dispatch-injection budget cap (Phase 18b). recall_context() renders each recalled
+# memory to at most this many chars so the "Relevant past experience:" block can
+# never balloon a worker's prompt (budget-capped, mirroring the ask-time discipline).
+_RECALL_SNIPPET_CHARS = _env_num("SELF_COMPANY_RECALL_SNIPPET_CHARS", 240, int)
+
+# ------------------------------------------------------- Phase 18b memory MODE
+# Per-employee memory MODE: "rag" (the Phase-18 per-employee capture -> index ->
+# recall store) or "flat" (NO per-employee RAG store — the employee keeps their
+# existing log.md, and Gibby his deterministic red/blue ledger, as their memory).
+# This is a per-employee CONFIG toggle, NOT a hardcoded planner-vs-executor rule
+# (modularize, don't special-case): context.md frontmatter `memory: rag|flat` is
+# authoritative; the table below is ONLY the DEFAULT used when context.md omits
+# the field, so a minimal/fresh desk still behaves sensibly. The Chairman's split
+# is analysts/planners recall semantically; executors stay flat.
+_MEMORY_MODES = ("rag", "flat")
+MEMORY_MODE_DEFAULTS = {
+    "bob":    "flat",   # Blue Team executor  — keeps log.md
+    "gibby":  "flat",   # Red Team executor   — keeps log.md + red/blue ledger
+    "tom":    "flat",   # IT/Ops executor     — keeps log.md
+    "tony":   "rag",    # Improvement analyst — semantic recall
+    "mike":   "rag",    # R&D research        — semantic recall
+    "elon":   "rag",    # CEO / planner       — semantic recall
+    "phoebe": "rag",    # PM / planner        — semantic recall
+    "july":   "rag",    # HR lead / analyst   — semantic recall
+}
+_DEFAULT_MEMORY_MODE = "flat"   # unknown name -> flat (conservative: no RAG store)
+
 
 # ================================================================ Layer B tables
 # The fixed role topology — the single source of truth. Config may enable/disable
@@ -302,6 +329,15 @@ class Employee:
         self.token_budget = self._clean_optional(fm.get("token_budget"))
         self._eff_self = None   # lazily filled effective-config slice
 
+        # ---- memory MODE (Phase 18b) ---------------------------------------
+        # context.md `memory:` frontmatter is authoritative; fall back to the
+        # per-name default table, then to the conservative flat default. An
+        # unrecognized value (typo) also degrades to the default — never raises.
+        mode = str(fm.get("memory") or "").strip().lower()
+        if mode not in _MEMORY_MODES:
+            mode = MEMORY_MODE_DEFAULTS.get(self.name, _DEFAULT_MEMORY_MODE)
+        self._memory_mode = mode
+
     # ------------------------------------------------------------ construction
     @staticmethod
     def _clean_optional(v):
@@ -399,6 +435,24 @@ class Employee:
         """Whether the employee is enabled in the effective config (default True)."""
         return bool(self._effective_self().get("enabled", True))
 
+    # ------------------------------------------------------------ memory mode
+    @property
+    def memory_mode(self):
+        """This employee's memory MODE (Phase 18b): `"rag"` (per-employee
+        capture -> index -> recall store) or `"flat"` (NO per-employee RAG store;
+        the employee keeps their log.md, and Gibby his red/blue ledger). Sourced
+        from context.md `memory:` frontmatter, defaulting per
+        MEMORY_MODE_DEFAULTS. This is CONFIG, not Layer B — a company may flip an
+        employee's mode by editing their context.md."""
+        return self._memory_mode
+
+    @property
+    def rag_memory_enabled(self):
+        """True iff this employee uses the Phase-18 per-employee RAG memory
+        (mode == "rag"). Flat employees get NO index refresh, NO recall, and NO
+        dispatch injection — remember() no-ops and recall() returns []."""
+        return self._memory_mode == "rag"
+
     def _effective_self(self):
         """This employee's slice of schedule_config.effective(). Cached. Imported
         lazily so the topology tables can live here without a circular import at
@@ -466,8 +520,14 @@ class Employee:
         The id embeds a content hash, so re-recording identical text resolves to
         the SAME file and is a no-op (idempotent — no churn, `created` stable).
         A trivial/empty memory is skipped (returns None). Pure stdlib; the memory
-        dir materializes on first write."""
+        dir materializes on first write.
+
+        Phase 18b — a FLAT employee (memory_mode != "rag") has NO per-employee RAG
+        store: remember() is a no-op returning None, so no file is ever written and
+        the daily index never sees them. They keep log.md / the red-blue ledger."""
         try:
+            if not self.rag_memory_enabled:         # flat employee: no RAG store
+                return None
             normalized = _normalize_memory_text(text)
             if not normalized:                       # nothing worth recording
                 return None
@@ -513,8 +573,13 @@ class Employee:
 
         Graceful degrade — returns [] (never raises, never blocks) for ANY of:
         empty query, no `.rag-venv`, absent/empty index, missing rag_query.py,
-        subprocess timeout, nonzero exit, non-JSON output, or zero usable hits."""
+        subprocess timeout, nonzero exit, non-JSON output, or zero usable hits.
+
+        Phase 18b — a FLAT employee (memory_mode != "rag") has NO semantic recall:
+        recall() short-circuits to [] before any venv/index work."""
         try:
+            if not self.rag_memory_enabled:         # flat employee: no recall
+                return []
             q = str(query or "").strip()
             if not q:
                 return []
@@ -585,6 +650,45 @@ class Employee:
             return out
         except Exception:
             return []
+
+    def recall_context(self, query, top_k=3):
+        """Dispatch-time recall injection (Phase 18b). Returns a compact, ready-to-
+        prepend block:
+
+            Relevant past experience (your own memory — advisory, not orders):
+            - <lesson one>
+            - <lesson two>
+
+        for a `rag` employee whose OWN store has memories relevant to `query`, or
+        the EMPTY string `""` for every no-injection case: a FLAT employee, an
+        empty query, no venv / empty index, or zero hits. This is the ONE call an
+        orchestrator makes before dispatching a worker — gated internally on
+        `rag_memory_enabled`, so the caller need not special-case flat vs rag.
+
+        Mirrors the ask-time injection discipline (hook_memory_inject): recall() is
+        timeout-capped and pure-degrade, each hit is truncated to
+        `_RECALL_SNIPPET_CHARS` (budget cap), and ANY failure yields "" — it can
+        never delay, bloat, or block a dispatch. Never raises. Isolation holds:
+        recall() only ever returns THIS employee's own memories."""
+        try:
+            if not self.rag_memory_enabled:         # flat employee: no injection
+                return ""
+            hits = self.recall(query, top_k=top_k)
+            if not hits:
+                return ""
+            lines = ["Relevant past experience (your own memory — advisory, not orders):"]
+            for h in hits:
+                snippet = _WS_RE.sub(" ", str(h.get("text") or "").strip())
+                if not snippet:
+                    continue
+                if len(snippet) > _RECALL_SNIPPET_CHARS:
+                    snippet = snippet[:_RECALL_SNIPPET_CHARS].rstrip() + "…"
+                lines.append(f"- {snippet}")
+            if len(lines) == 1:                     # nothing renderable -> no block
+                return ""
+            return "\n".join(lines)
+        except Exception:
+            return ""
 
     @staticmethod
     def _resolve(p):

@@ -4,6 +4,7 @@ role: Build Engineer
 manager: Phoebe                 # dispatch source, spec/plan, progress tracking
 people_lead: July               # performance assessment, persona/prompt tuning
 model: haiku → sonnet          # start cheap (Haiku), upgrade when needed (Sonnet)
+memory: flat                   # Phase 18b: flat executor — keeps log.md; NO per-employee RAG recall/index (override with rag)
 reads:
   - org/employees/bob/         # own desk: persona.md, scratchpad.md, log.md
   - <Phoebe-delivered spec/plan>  # current task requirements and plan documents

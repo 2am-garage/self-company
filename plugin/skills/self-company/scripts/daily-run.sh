@@ -358,18 +358,24 @@ if (( _run_rag_index )) && (( RAG_OVER == 0 )) && [[ ! -x "$RAG_PY" ]]; then
   echo "- rag-index: RAG activation candidate — active L1+L2 >= RAG_ENABLE_THRESHOLD but the RAG stack is not installed; run 'bash .company/scripts/rag_setup.sh install' to enable semantic memory search (Tony -> Elon)" >> "$LOG"
 fi
 
-# --- Phase 18: per-employee memory index refresh (8 ISOLATED indexes) ---------
-# Each employee grows their OWN "experience recall" store (org/employees/<name>/
-# memory/*.md, captured via Employee.remember). Refresh each one's OWN LanceDB
-# index by pointing the SAME reused rag_index.py per-employee — the index is
-# physically the employee's own (Chairman's isolation choice), never a shared
+# --- Phase 18/18b: per-employee memory index refresh (RAG employees only) -----
+# Each RAG-mode employee grows their OWN "experience recall" store (org/employees/
+# <name>/memory/*.md, captured via Employee.remember). Refresh each one's OWN
+# LanceDB index by pointing the SAME reused rag_index.py per-employee — the index
+# is physically the employee's own (Chairman's isolation choice), never a shared
 # owner-filtered one. INCREMENTAL: content_hash skips unchanged files, so an
-# untouched store is ~free (a re-embed only on real change); with 8 small stores
-# this stays cheap. Gated under Tony's existing `rag_index` step (this is the
-# same index-infra duty — NO new Layer-B step owner, so the topology/validator is
-# untouched). Venv absent -> one-line skip. `|| true` on every refresh so a bad
-# store can NEVER abort the already-completed core. FLAT: capture->index->recall
-# only; no per-employee decay/verify/entropy.
+# untouched store is ~free (a re-embed only on real change). Gated under Tony's
+# existing `rag_index` step (this is the same index-infra duty — NO new Layer-B
+# step owner, so the topology/validator is untouched). Venv absent -> one-line
+# skip. `|| true` on every refresh so a bad store can NEVER abort the already-
+# completed core. FLAT: capture->index->recall only; no per-employee
+# decay/verify/entropy.
+#
+# Phase 18b — only RAG-mode employees (Employee.rag_memory_enabled) get an index.
+# FLAT employees (bob/gibby/tom by default; config-overridable via each desk's
+# context.md `memory:` field) are SKIPPED entirely: no index, fewer refreshes,
+# lighter. The rag/flat split is read from employee.py (context.md-driven), so it
+# is config, not a name hardcoded here.
 EMP_ROOT="$COMPANY/org/employees"
 if (( ! _run_rag_index )); then
   :   # gated off above; the rag-index skip line already explains it
@@ -378,9 +384,27 @@ elif [[ ! -f "$SCRIPTS/rag_index.py" ]]; then
 elif [[ ! -x "$RAG_PY" ]]; then
   echo "- emp-memory-index: skipped — RAG venv absent (.company/.rag-venv) — per-employee recall deferred; capture (remember) still writes, core unaffected" >> "$LOG"
 elif [[ -d "$EMP_ROOT" ]]; then
+  # Resolve the RAG-mode employees ONCE (context.md-driven, via employee.py).
+  # Space-padded so a `*" $name "*` membership test can't partial-match. On any
+  # error the set is empty -> no per-employee index this tick (fail-safe: lighter,
+  # never breaks the core; capture still writes, recall degrades to []).
+  _RAG_EMPS=" $(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
+try:
+    from employee import Employee
+    print(' '.join(n for n in Employee.roster()
+                    if Employee.load(n, '$COMPANY').rag_memory_enabled))
+except Exception:
+    pass" 2>>"$SERR") "
   _emp_refreshed=0
+  _emp_skipped_flat=0
   for _emp_mem in "$EMP_ROOT"/*/memory; do
     [[ -d "$_emp_mem" ]] || continue
+    _emp_name="$(basename "$(dirname "$_emp_mem")")"
+    # Phase 18b: skip FLAT employees — no per-employee RAG index for them.
+    if [[ "$_RAG_EMPS" != *" $_emp_name "* ]]; then
+      _emp_skipped_flat=$((_emp_skipped_flat + 1))
+      continue
+    fi
     # Only employees that actually have at least one memory file (skip the index/
     # subdir itself). No memories -> nothing to embed, no churn.
     compgen -G "$_emp_mem/*.md" >/dev/null 2>&1 || continue
@@ -388,10 +412,12 @@ elif [[ -d "$EMP_ROOT" ]]; then
       --memory-dir "$_emp_mem" --index-dir "$_emp_mem/index" >/dev/null 2>>"$SERR" || true
     _emp_refreshed=$((_emp_refreshed + 1))
   done
+  _flat_note=""
+  (( _emp_skipped_flat > 0 )) && _flat_note=" ($_emp_skipped_flat flat employee(s) skipped — no index)"
   if (( _emp_refreshed > 0 )); then
-    echo "- emp-memory-index: refreshed $_emp_refreshed per-employee store(s) (incremental; unchanged files skipped)" >> "$LOG"
+    echo "- emp-memory-index: refreshed $_emp_refreshed rag-employee store(s) (incremental; unchanged files skipped)$_flat_note" >> "$LOG"
   else
-    echo "- emp-memory-index: no per-employee memory stores yet — nothing to refresh" >> "$LOG"
+    echo "- emp-memory-index: no rag-employee memory stores yet — nothing to refresh$_flat_note" >> "$LOG"
   fi
 fi
 

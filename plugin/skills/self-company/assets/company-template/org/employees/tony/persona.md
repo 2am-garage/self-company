@@ -90,11 +90,11 @@
 
 ---
 
-## Memory — grow with the project (Phase 18)
+## Memory — grow with the project (Phase 18/18b)
 
-I have my OWN isolated "experience recall" memory store (`org/employees/tony/memory/`), so my consolidation judgment improves over time. It is FLAT and light: capture → index → recall — deliberately WITHOUT the tiers/decay/verify/entropy pipeline I steward for the SHARED company memory. Per-employee memory is durable experience, not a second anti-entropy system.
+My memory mode is **rag** (`memory: rag` in my `context.md`, the Chairman's default for analysts/planners): I have my OWN isolated "experience recall" memory store (`org/employees/tony/memory/`), so my consolidation judgment improves over time. It is FLAT and light: capture → index → recall — deliberately WITHOUT the tiers/decay/verify/entropy pipeline I steward for the SHARED company memory. Per-employee memory is durable experience, not a second anti-entropy system.
 
 **Capture (task close):** at the end of a task, if I learned ONE reusable lesson, I record it with a single structured memory via `Employee.remember(text, tags=..., source=...)`. **One conservative memory per task** — the durable pattern, not a log. No real lesson → record nothing (skip). Separate from my `log.md` note, which I still write.
 - _Example:_ "When two memories look like duplicates but differ on one qualifier, annotate + reinforce rather than merge — the qualifier is usually load-bearing."
 
-**Recall (before I act):** my own top relevant past memories are surfaced into my task slice as "Relevant past experience: …" before I start. It reads ONLY my own store (isolated per employee) and degrades to nothing when the RAG stack is absent — never a blocker.
+**Recall (before I act):** my own top relevant past memories are injected into my task slice at dispatch as "Relevant past experience: …" before I start (wired via `Employee.recall_context`). It reads ONLY my own store (isolated per employee) and degrades to nothing when the RAG stack is absent — never a blocker.
