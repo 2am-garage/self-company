@@ -69,7 +69,7 @@ ALLOWED_DUTIES = {
     "elon":   {"survey"},                    # elon_survey -> daily todo
     "tom":    {"backup", "report", "schedule"},
     "phoebe": set(),                         # gateway — no scheduled deterministic duty
-    "july":   set(),                         # HR tuning — no scheduled deterministic duty
+    "july":   {"july_audit"},                # Phase 17: capability-steward audit
 }
 
 # Red/blue role classes (used by the validator's R1/R2). An employee must never
@@ -92,6 +92,7 @@ STEP_OWNER = {
     "survey":    "elon",
     "report":    "tom",
     "agent":     "tony",
+    "july_audit": "july",  # Phase 17: July's capability-steward audit (weekly, low-churn)
 }
 
 
@@ -162,8 +163,24 @@ def _parse_fm(raw_lines):
                 i += 1
             data[key] = "\n".join(l for l in buf).strip()
         else:
-            data[key] = _strip_comment(val)
+            data[key] = _parse_value(val)
     return data
+
+
+def _parse_value(val):
+    """Parse a scalar RHS: an inline flow list `[a, b]` (incl. empty `[]`) becomes
+    a list; anything else is the comment-stripped scalar string. This lets a
+    capability field be written compactly (`mcp: []`, `skills: [deep-research]`) or
+    as a block sequence — both yield a list. Only the flat shapes context.md uses;
+    never raises."""
+    s = _strip_comment(val)
+    if s.startswith("[") and s.endswith("]"):
+        inner = s[1:-1].strip()
+        if not inner:
+            return []
+        return [_strip_comment(x).strip().strip('"').strip("'")
+                for x in inner.split(",") if x.strip()]
+    return s
 
 
 def _as_list(v):
@@ -183,11 +200,14 @@ class Employee:
     all fields are read from the employee's desk + the fixed Layer-B tables. Never
     raises — an absent desk or field degrades to a default."""
 
-    # The capability field names that make up the least-privilege slice. This is
-    # the SEAM July will later extend (mcp / skills / plugins); Phase 16 carries
-    # only what exists in context.md today. Extending capabilities is adding a
-    # name here + the field on load, nothing structural.
-    CAPABILITY_FIELDS = ("tools", "reads", "writes", "handoff_to")
+    # The FUNCTIONAL capability dimensions July stewards — "what each employee may
+    # use." Phase 16 reserved this seam with `tools`; Phase 17 extends it with
+    # `mcp` / `skills` / `plugins` (the toolchain that churns as the project
+    # evolves). Extending it is adding a name here + the field on load, nothing
+    # structural — exactly what this seam was for. (The data-access slice —
+    # `reads` / `writes` / `handoff_to` — is a SEPARATE concern kept as its own
+    # attributes below; it is routing/permission, not a "function" July tunes.)
+    CAPABILITY_FIELDS = ("tools", "mcp", "skills", "plugins")
 
     def __init__(self, name, company_dir, fm=None):
         self.name = str(name).strip().lower()
@@ -202,8 +222,13 @@ class Employee:
         self.people_lead = self._clean_optional(fm.get("people_lead"))
         self.tier = TIERS.get(self.name, "worker")
 
-        # ---- capabilities (least-privilege slice) ---------------------------
+        # ---- functional capabilities (the least-privilege slice July stewards)
         self.tools = _as_list(fm.get("tools"))
+        self.mcp = _as_list(fm.get("mcp"))
+        self.skills = _as_list(fm.get("skills"))
+        self.plugins = _as_list(fm.get("plugins"))
+
+        # ---- data-access / routing slice (separate concern, not a capability)
         self.reads = _as_list(fm.get("reads"))
         self.writes = _as_list(fm.get("writes"))
         self.handoff_to = _as_list(fm.get("handoff_to"))
@@ -277,9 +302,11 @@ class Employee:
 
     # ------------------------------------------------------------ capabilities
     def capabilities(self):
-        """The employee's least-privilege capability slice as a dict. The seam
-        July will extend (mcp / skills / plugins); Phase 16 emits only the fields
-        that exist today (tools / reads / writes / handoff_to)."""
+        """The employee's functional capability profile as a dict — the four
+        dimensions July stewards: `tools`, `mcp`, `skills`, `plugins`. This is the
+        single source of "what this employee may use," diffed by july_audit.py
+        against the real environment. (Data access — reads/writes/handoff_to — is a
+        separate slice, reachable via the like-named attributes.)"""
         return {field: list(getattr(self, field)) for field in self.CAPABILITY_FIELDS}
 
     # ----------------------------------------------------------------- duties

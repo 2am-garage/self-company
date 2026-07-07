@@ -36,6 +36,12 @@ tools:
   - mcp__playwright__browser_wait_for
   - mcp__playwright__browser_evaluate
   # pytest / linter / type checker are called via Bash, no separate tool needed
+# --- functional capability profile (July stewards these; least-privilege) -----
+# Gibby's Playwright browser automation is delivered as MCP-backed tools (listed
+# under tools: above); the server itself is recorded here.
+mcp: [playwright]                  # browser-automation MCP server (verification)
+skills: []                         # skills this employee may invoke
+plugins: []                        # plugins this employee may use
 token_budget: <per-call cap; in v2 derived from policy.md token ceiling>
 handoff_to:
   - Bob (reject with defects)

@@ -55,7 +55,7 @@
 #   elon  : survey                    (daily prioritized TODO)
 #   tom   : backup, report, schedule
 #   phoebe: (gateway — no scheduled deterministic duty)
-#   july  : (HR tuning — no scheduled deterministic duty)
+#   july  : july_audit               (capability steward — audit tools/MCP/skills/plugins)
 #
 # Examples (uncomment/adapt):
 # tony:  { cadence: every-run, duties: [reinforce, decay, entropy, rag_index, propose, agent], budget: 20000 }
@@ -64,3 +64,4 @@
 # mike:  { cadence: weekly, duties: [research] }
 # elon:  { cadence: daily, duties: [survey] }
 # tom:   { cadence: every-run, duties: [backup, report] }
+# july:  { cadence: weekly, duties: [july_audit] }   # recommended: audit weekly (low-churn)

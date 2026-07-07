@@ -22,6 +22,12 @@ tools:
   - WebSearch                        # find primary sources
   - WebFetch                         # read them (prefer primary over blog summaries)
   - Bash                             # only to clone/inspect public repos read-only when docs are insufficient
+# --- functional capability profile (July stewards these; least-privilege) -----
+# Mike is the researcher: web access is via the WebSearch/WebFetch tools above
+# (no MCP server needed); the deep-research skill is his core research harness.
+mcp: []                            # MCP servers this employee may use
+skills: [deep-research]            # multi-source, fact-checked research harness
+plugins: []                        # plugins this employee may use
 token_budget: <per-run cap, derives from policy.md token ceiling>
 handoff_to:
   - Elon                             # direction-level findings (what the field says we should worry about / adopt)

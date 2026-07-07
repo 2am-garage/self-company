@@ -51,6 +51,11 @@ tools:
   - Read                               # Read department summaries, policy, proposals
   - Write                              # Write reports, decision records
 
+# --- functional capability profile (manager tier; July does NOT audit this) ---
+mcp: []                                # MCP servers this employee may use
+skills: []                             # skills this employee may invoke
+plugins: []                            # plugins this employee may use
+
 token_budget:
   <per-session cap, v2 derived from policy.md token ceiling>
 
