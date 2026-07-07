@@ -48,6 +48,10 @@
 - ✅ **Phase 9 — Mike online (R&D split)** — the weekly `research-scan.sh` runs headless **as Mike**, surveying the external world (literature / ecosystem / comparable harnesses) and writing **cited, applicability-ranked briefs** to `ops/research/` (plus improvement proposals to `ops/plans/`). Division of labor: **Tony measures inside, Mike surveys outside**.
 - ✅ **Phase 11 — Frontmatter consolidation** — the fragile markdown-frontmatter parse/serialize/tokenize seam, previously open-coded across ten scanners (with a real `entropy.py` divergence bug), is now single-sourced in `scripts/frontmatter.py`, imported the same best-effort + verbatim-fallback way as `tombstone.py` / `charter_ids.py`.
 
+### v0.1.6 Plugin-subdir Restructure Completed (Phase 15)
+
+- ✅ **Phase 15 — ship-exclude `tests/`+`evals/` via a `plugin/` subdir** — Claude Code plugin packaging has no ship-ignore (the whole `source` dir installs), so the plugin content (`skills/`, `hooks/`, `plugin.json`) moved into `plugin/` and the marketplace `source` became `./plugin`; `tests/` + `evals/` stay at the repo root and no longer download to users. All via `git mv` (history preserved). Scripts/hooks resolve unchanged — they locate code via `${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/…` and `CLAUDE_PLUGIN_ROOT` now points at `plugin/`, whose internal layout mirrors the old one. Only repo-root-relative references changed (`tests/_helpers` SCRIPTS_DIR, a few test path literals, the CI `bash -n` path, `dev-link-skill.sh`, docs). Existing installs self-heal their absolute cron path to `…/plugin/skills/…` via the Phase-12b SessionStart guard.
+
 ### v0.1.5 Connect RAG + Skill Lightening Completed (Phases 13-14)
 
 - ✅ **Phase 13 — Connect RAG across the tiers** — the built-but-unwired LanceDB index is now live (Chairman: connect RAG, don't delete it). **Stage A** wires an incremental index refresh into `daily-run.sh` (fresh L1/L2, idempotent, never fails the core). **Stage B** is the killer app: `hook_memory_inject.py` now selects ask-time memories by MEANING, not just keyword overlap — it queries `rag_query.py` (project venv, ~7s timeout) and injects the semantically-relevant memories, re-validated against the live candidate set. Semantic-first with the keyword path as the guaranteed-fast floor and the no-venv/timeout degrade (byte-for-byte identical when RAG is unavailable); never injects a stale/tombstoned/out-of-scope memory; the 30s hook budget is never approached. (B.2 semantic dedup-at-capture deferred — the daily reinforce batch already absorbs transient dups, and a false-positive dedup on a write path risks silent loss.)
@@ -67,7 +71,6 @@
 - ⏳ Code/Chat entropy — code drift detection, session distillation
 - ⏳ NLI/cross-encoder second signal for the cosine [0.74, 0.81] overlap band
 - ⏳ Real token accounting (policy §3 currently documented as a runs/day proxy)
-- ⏳ Phase 15 — ship-exclude `tests/`+`evals/` from the installed bundle via a `source: "./plugin"` repo restructure (no plugin-native exclude exists; own carefully-verified phase)
 - ⏳ RAG B.2 — semantic dedup-at-capture (deferred: daily reinforce already absorbs transient dups; false-positive on a write path risks silent loss)
 - ⏳ Persona boilerplate single-sourcing (deferred: isolated workers load only their persona)
 - ⏳ July (HR) periodic worker-performance review — Chairman decision pending

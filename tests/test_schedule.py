@@ -19,7 +19,7 @@ import unittest
 import _helpers
 
 REPO = _helpers.REPO_ROOT
-SH = os.path.join(REPO, "skills", "self-company", "scripts", "schedule.sh")
+SH = os.path.join(REPO, "plugin", "skills", "self-company", "scripts", "schedule.sh")
 
 
 def _run(args, fake, extra_env=None):
@@ -368,7 +368,7 @@ class TestSingleProjectBackCompat(ScheduleTestBase):
         self.assertIn(".company not found", r.stderr)
 
 
-GUARD = os.path.join(REPO, "skills", "self-company", "scripts", "hook_schedule_guard.sh")
+GUARD = os.path.join(REPO, "plugin", "skills", "self-company", "scripts", "hook_schedule_guard.sh")
 
 
 class TestScheduleConfigTick(ScheduleTestBase):
@@ -549,7 +549,7 @@ class TestScheduleGuardSelfHeal(ScheduleTestBase):
     resolver points at a new dir (simulated via CLAUDE_PLUGIN_ROOT) the guard
     re-points the daily line with no manual step. All via the fake-crontab seam."""
 
-    REAL_SCRIPTS = os.path.join(REPO, "skills", "self-company", "scripts")
+    REAL_SCRIPTS = os.path.join(REPO, "plugin", "skills", "self-company", "scripts")
 
     def _write_cfg(self, project, body):
         org = os.path.join(project, ".company", "org")

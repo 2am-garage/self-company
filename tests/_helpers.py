@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPTS_DIR = os.path.join(REPO_ROOT, "skills", "self-company", "scripts")
+SCRIPTS_DIR = os.path.join(REPO_ROOT, "plugin", "skills", "self-company", "scripts")
 
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)

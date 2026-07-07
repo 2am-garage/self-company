@@ -318,7 +318,7 @@ class TestOfflineGapDamper(unittest.TestCase):
 class TestCLIProvenance(unittest.TestCase):
     def test_config_block_reports_policy_source(self):
         real_policy = os.path.join(
-            _helpers.REPO_ROOT, "skills", "self-company", "assets", "company-template", "org", "policy.md")
+            _helpers.REPO_ROOT, "plugin", "skills", "self-company", "assets", "company-template", "org", "policy.md")
         with tempfile.TemporaryDirectory() as d:
             data = _helpers.run_json(
                 "decay.py", "--memory-dir", d, "--now", "2026-06-25",
@@ -329,7 +329,7 @@ class TestCLIProvenance(unittest.TestCase):
     def test_policy_table_tuning_changes_behavior(self):
         # The P1 guarantee: editing the §7 TABLE actually changes outcomes.
         real_policy = os.path.join(
-            _helpers.REPO_ROOT, "skills", "self-company", "assets", "company-template", "org", "policy.md")
+            _helpers.REPO_ROOT, "plugin", "skills", "self-company", "assets", "company-template", "org", "policy.md")
         with open(real_policy, encoding="utf-8") as f:
             policy_text = f.read()
         tuned = policy_text.replace("| `L0_DROP_THRESHOLD` | **0.25**",

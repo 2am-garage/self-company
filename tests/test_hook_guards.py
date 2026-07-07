@@ -20,7 +20,7 @@ import tempfile
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPTS = os.path.join(REPO_ROOT, "skills", "self-company", "scripts")
+SCRIPTS = os.path.join(REPO_ROOT, "plugin", "skills", "self-company", "scripts")
 GUARD = os.path.join(SCRIPTS, "hook_memory_guard.sh")
 LINT = os.path.join(SCRIPTS, "hook_memory_lint.py")
 

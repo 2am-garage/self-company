@@ -9,6 +9,35 @@ How to run and wire the company's day-to-day operations. Four areas:
 
 ---
 
+## Repository layout — what ships vs. what stays home
+
+Since **Phase 15** the shippable plugin lives entirely under a `plugin/` subdirectory,
+and the marketplace `source` points at `./plugin`. So `CLAUDE_PLUGIN_ROOT` resolves to
+that `plugin/` dir, under which the internal structure is unchanged
+(`skills/self-company/…`, `hooks/hooks.json`) — every script's
+`${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/<script>` path and the `hooks.json`
+declarations needed **no** change.
+
+```
+repo-root/
+  .claude-plugin/marketplace.json   # source: "./plugin"  (stays at repo root)
+  plugin/                           # == CLAUDE_PLUGIN_ROOT when installed
+    .claude-plugin/plugin.json
+    hooks/hooks.json
+    skills/self-company/…           # SKILL.md, scripts/, references/, assets/, design/
+  tests/                            # dev-only — NOT shipped to users
+  evals/                            # dev-only — NOT shipped to users
+  .github/, README.md, MISSION.md   # repo scaffolding — NOT shipped
+```
+
+Only the `plugin/` subtree is delivered on install, so **`tests/` and `evals/` no longer
+ship to users** — they were previously siblings of `skills/` under the packaged root and
+rode along with every install. The test suite still runs from the repo (its
+`REPO_ROOT/plugin/skills/self-company/…` joins locate the moved scripts); it is simply
+excluded from the plugin payload.
+
+---
+
 ## Triggers — three ways the company starts working
 
 | # | Trigger | Mechanism | Fired by |
