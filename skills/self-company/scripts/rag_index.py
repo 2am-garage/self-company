@@ -24,32 +24,17 @@ from typing import Dict, Any, Optional, List
 import urllib.request
 
 # Phase 6 Item 1: shared tombstone vocabulary (archived/defunct/absorbed) so a
-# tombstoned memory can never leak into the RAG index. Best-effort import.
+# tombstoned memory can never leak into the RAG index. The sibling modules live in
+# THIS directory; put it on sys.path FIRST so the hard imports below resolve under
+# every entry point (direct run, venv re-exec, cron, test harness).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
-except Exception:  # pragma: no cover - authoritative copy: tombstone.py
-    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 
-    def is_tombstoned(fm):
-        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
-
-# Phase 11 Item 2: the fragile frontmatter delimiter + key:value split seam lives
-# in ONE shared module (frontmatter.py). rag keeps its OWN typed interpretation
+# Phase 11 Item 2: the fragile frontmatter delimiter + key:value split seam is the
+# ONE shared module (frontmatter.py). rag keeps its OWN typed interpretation
 # (tier/status validation, sources list parse, _parse_errors) on top; only the
-# fence-location + body-split is delegated. Best-effort import + verbatim
-# fallback, same pattern as the tombstone import above.
-try:
-    from frontmatter import split as _fm_split
-except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
-    def _fm_split(text):
-        lines = text.split('\n')
-        if lines[0].strip() != '---':
-            return [], text
-        for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
-                return lines[1:i], '\n'.join(lines[i + 1:])
-        return [], text
+# fence-location + body-split is delegated to the shared split().
+from frontmatter import split as _fm_split
 import urllib.error
 
 # ============================================================================

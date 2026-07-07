@@ -23,39 +23,16 @@ import sys
 MEM_MARKER = ".company/memory/"
 VALID_TIERS = {"L0", "L1", "L2"}
 
-# Reuse the SINGLE authoritative tombstone vocabulary (best-effort import with a
-# verbatim fallback — same pattern as verify_memory / entropy / decay).
-try:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from tombstone import TOMBSTONE_STATUSES
-except Exception:  # pragma: no cover - fallback copy
-    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
+# The SINGLE authoritative tombstone vocabulary + the frontmatter PARSING SEAM are
+# shared sibling modules in THIS directory; put it on sys.path FIRST so the hard
+# imports below resolve under every entry point (the PostToolUse hook, direct run,
+# the test harness). They always ship together, so the imports never fail.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tombstone import TOMBSTONE_STATUSES
 
-# Phase 11 Item 2: the fragile frontmatter delimiter + key:value split lives in
-# ONE shared module (frontmatter.py). Best-effort import + verbatim fallback,
-# same pattern as the tombstone vocabulary above.
-try:
-    from frontmatter import parse as _fm_parse
-except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
-    def _fm_parse(text):
-        lines = text.split('\n')
-        if lines[0].strip() != '---':
-            return {}, text
-        end = None
-        for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
-                end = i
-                break
-        if end is None:
-            return {}, text
-        fm = {}
-        for line in lines[1:end]:
-            s = line.strip()
-            if not s or s.startswith('#') or ':' not in s:
-                continue
-            k, v = s.split(':', 1)
-            fm[k.strip()] = v.strip()
-        return fm, '\n'.join(lines[end + 1:])
+# Phase 11 Item 2: the fragile frontmatter delimiter + key:value split is the ONE
+# shared module (frontmatter.py).
+from frontmatter import parse as _fm_parse
 
 VALID_STATUSES = {"active"} | set(TOMBSTONE_STATUSES)
 REQUIRED = ("id", "tier", "status", "sources")

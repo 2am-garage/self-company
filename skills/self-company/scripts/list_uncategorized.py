@@ -35,40 +35,16 @@ import os
 import sys
 from pathlib import Path
 
-# Phase 6 Item 1: shared tombstone vocabulary (archived/defunct/absorbed).
+# Phase 6 Item 1: shared tombstone vocabulary (archived/defunct/absorbed). The
+# sibling modules live in THIS directory; put it on sys.path FIRST so the hard
+# imports below resolve under every entry point (direct run, cron, test harness).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from tombstone import is_tombstoned
-except Exception:  # pragma: no cover - authoritative copy: tombstone.py
-    def is_tombstoned(fm):
-        return str(fm.get("status") or "").strip().lower() in ("archived", "defunct", "absorbed")
+from tombstone import is_tombstoned
 
-# Phase 11: the fragile frontmatter PARSING SEAM lives in ONE shared module
-# (frontmatter.py). Best-effort import + verbatim fallback, same pattern as the
-# tombstone import above. This tool keeps only the keys it needs off the top of
-# the shared full-parse (id/tier/status/category).
-try:
-    from frontmatter import parse as _fm_parse
-except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
-    def _fm_parse(text):
-        lines = text.split('\n')
-        if lines[0].strip() != '---':
-            return {}, text
-        end = None
-        for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
-                end = i
-                break
-        if end is None:
-            return {}, text
-        fm = {}
-        for line in lines[1:end]:
-            s = line.strip()
-            if not s or s.startswith('#') or ':' not in s:
-                continue
-            k, v = s.split(':', 1)
-            fm[k.strip()] = v.strip()
-        return fm, '\n'.join(lines[end + 1:])
+# Phase 11: the fragile frontmatter PARSING SEAM is the ONE shared module
+# (frontmatter.py). This tool keeps only the keys it needs off the top of the
+# shared full-parse (id/tier/status/category).
+from frontmatter import parse as _fm_parse
 
 # Valid categories (kept in sync with decay.py::L2_CATEGORIES and
 # capture-trigger.py::CATEGORIES).
