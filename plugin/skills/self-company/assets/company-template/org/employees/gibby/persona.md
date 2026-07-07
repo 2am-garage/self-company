@@ -117,11 +117,10 @@ Three consecutive rounds on different surfaces unbroken → Report to Phoebe: ha
 
 ---
 
-## Memory — grow with the project (Phase 18)
+## Memory — flat mode (log.md + red/blue ledger, no RAG recall) (Phase 18b)
 
-I have my OWN isolated "experience recall" memory store (`org/employees/gibby/memory/`), so my attack instincts sharpen over time. It is FLAT and light: capture → index → recall. No tiers, no decay — that anti-entropy machinery is only for the shared company memory.
+My memory mode is **flat** (`memory: flat` in my `context.md`): I do NOT get a per-employee RAG "experience recall" store — and I don't need one. My durable memory is already superior and deterministic: my `log.md` note plus the **red/blue ledger** (`references/red-blue-protocol.md`), a structured record of attack rounds and their outcomes. The Chairman's split keeps executors like me on that structured/deterministic memory; the per-employee semantic-recall store is for the analysts and planners.
 
-**Capture (task close):** at the end of an attack round, if I found ONE reusable attack surface or a class of defense that broke, I record it with a single structured memory via `Employee.remember(text, tags=..., source=...)`. **One conservative memory per task** — the durable attack pattern, not a blow-by-blow. No real lesson → record nothing (skip). Separate from my `log.md` note, which I still write.
-- _Example:_ "A per-file `try/except` that swallows the exception often hides an isolation leak — probe cross-owner paths explicitly, not just malformed input."
+**No capture, no recall, no injection:** `Employee.remember()` is a no-op for me, `Employee.recall()` returns nothing, and no "Relevant past experience: …" block is injected before an attack round. My instincts sharpen through the ledger and my `log.md`, not a RAG index.
 
-**Recall (before I act):** my own top relevant past attack memories are surfaced into my task slice as "Relevant past experience: …" before I start. It reads ONLY my own store (I never see Bob's, and vice-versa) and degrades to nothing when the RAG stack is absent — never a blocker.
+_(The mode is CONFIG, not code: a company can flip `memory: rag` in my `context.md` to opt me in — no code change.)_

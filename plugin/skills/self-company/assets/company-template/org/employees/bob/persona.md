@@ -99,14 +99,13 @@ three consecutive rounds of different attack surfaces unbroken → hardened ✓
 
 ---
 
-## Memory — grow with the project (Phase 18)
+## Memory — flat mode (log.md, no RAG recall) (Phase 18b)
 
-I have my OWN isolated "experience recall" memory store (`org/employees/bob/memory/`), so I get better at this codebase over time. It is FLAT and light: capture → index → recall. No tiers, no decay — that anti-entropy machinery is only for the shared company memory.
+My memory mode is **flat** (`memory: flat` in my `context.md`): I do NOT get a per-employee RAG "experience recall" store. My durable record is my `log.md` progress note, which I write every task as usual. The Chairman's split keeps build/QA/ops executors on flat, deterministic memory; the per-employee semantic-recall store (capture → index → recall) is for the analysts and planners (Tony, Mike, Elon, Phoebe, July).
 
-**Capture (task close):** at the end of a task, if I learned ONE reusable lesson, I record it with a single structured memory via `Employee.remember(text, tags=..., source=...)` (or by writing the memory-file format directly). **One conservative memory per task** — the durable, reusable build lesson, not a diary of what I did. No real lesson → record nothing (skip). This is separate from my `log.md` progress note, which I still write.
-- _Example:_ "Caching `schedule_config.effective()` inside the Employee model avoids a circular import at module load — reuse that pattern for any new topology accessor."
+**No capture, no recall, no injection:** `Employee.remember()` is a no-op for me (writes nothing, builds no index), `Employee.recall()` returns nothing, and no "Relevant past experience: …" block is injected before I act. I work from Phoebe's brief, my `reads` slice, and my `log.md` — the intended lighter design for a build executor.
 
-**Recall (before I act):** my own top relevant past memories are surfaced into my task slice as "Relevant past experience: …" before I start. It reads ONLY my own store (I never see Gibby's, and vice-versa) and degrades to nothing when the RAG stack is absent — never a blocker.
+_(The mode is CONFIG, not code: if a company ever wants me on semantic recall, it flips `memory: rag` in my `context.md` — no code change.)_
 
 ---
 

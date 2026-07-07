@@ -126,57 +126,84 @@ Gibby → Playwright MCP; Tony/Gibby → RAG (`rag_query`); Mike/Bob → `deep-r
 
 ---
 
-## 7. Per-employee memory: recall at dispatch, capture at close (Phase 18)
+## 7. Per-employee memory: mode (rag/flat), recall at dispatch, capture at close (Phase 18 / 18b)
 
-Each worker has their OWN isolated "experience recall" memory store
-(`org/employees/<name>/memory/`, with the employee's OWN LanceDB index under
-`memory/index`), so **workers grow with the project**: Bob recalls his past
-builds, Gibby his past attack surfaces. It is FLAT and light — **capture → index
-→ recall** — with NO per-employee tiers/decay/verify/entropy; the anti-entropy
-machinery stays on the SHARED company memory only. The RAG stack
-(`rag_embed`/`rag_index`/`rag_query`) is reused as-is, pointed per employee; the
-`Employee` model (`scripts/employee.py`) owns the two seams:
+**Not every employee needs RAG memory.** Each employee carries a per-employee
+memory **MODE** — a CONFIG toggle in their `context.md` frontmatter
+(`memory: rag|flat`), surfaced as `Employee.memory_mode` /
+`Employee.rag_memory_enabled` (Phase 18b). It is a config knob, not a
+planner-vs-executor rule hardcoded in the logic (modularize, don't special-case):
+`context.md` is authoritative, and `employee.py` holds only a DEFAULT table used
+when a desk omits the field.
+
+| Mode | Employees (default) | What they use as memory |
+|---|---|---|
+| **`flat`** (RAG off) | **Bob, Gibby, Tom** | their existing `log.md` — and, for Gibby, the deterministic red/blue **ledger** (already a superior structured memory). NO per-employee RAG store, NO index, NO recall, NO dispatch injection. |
+| **`rag`** (RAG on) | **Tony, Mike, Elon, Phoebe, July** | the per-employee capture → index → recall store below, PLUS their `log.md`. |
+
+The Chairman's split: executors keep flat memory (deterministic/structured is
+enough); analysts and planners get semantic recall. A company can flip any
+employee by editing their `context.md` `memory:` field — no code change.
+
+For a **`rag`** employee, the store lives at `org/employees/<name>/memory/` with
+the employee's OWN LanceDB index under `memory/index`, so **workers grow with the
+project**: Tony recalls his past diagnoses, Mike his past research. It is FLAT and
+light — **capture → index → recall** — with NO per-employee tiers/decay/verify/
+entropy; the anti-entropy machinery stays on the SHARED company memory only. The
+RAG stack (`rag_embed`/`rag_index`/`rag_query`) is reused as-is, pointed per
+employee; the `Employee` model (`scripts/employee.py`) owns the seams (all gated
+on `rag_memory_enabled` — a `flat` employee no-ops every one of them):
 
 - **`Employee.remember(text, *, tags=None, source=None)`** — writes ONE
   structured memory file (`id / owner / tier / created / tags / source` +
   body) to the employee's own store. Pure stdlib, never raises; dedup by content
-  hash makes a re-record idempotent.
+  hash makes a re-record idempotent. **Flat employee → no-op returning `None`**
+  (no file, so the index never sees them).
 - **`Employee.recall(query, top_k=3)`** — shells `rag_query.py` against the
   employee's OWN index, re-validates each hit against the live memory files
   (isolation backstop: only files physically inside this employee's store are
   ever returned), and returns the relevant memories. Timeout-capped; degrades to
   `[]` on no venv / empty index / any error — never raises, never blocks.
+  **Flat employee → `[]`** (short-circuits before any venv/index work).
+- **`Employee.recall_context(query, top_k=3)`** — the dispatch-injection helper:
+  returns a compact, ready-to-prepend **"Relevant past experience: …"** block
+  (each hit truncated to a char budget) for a `rag` employee with relevant
+  memories, or the EMPTY string `""` for every no-injection case (flat employee,
+  empty query, no venv / empty index, zero hits). Gated internally on
+  `rag_memory_enabled`, so the caller need not branch on mode.
 
-**Recall at dispatch (the payoff).** Before a worker acts, the orchestration tier
-calls `Employee.load(name, company).recall(<task brief>)` and, if it returns
-anything, prepends a compact **"Relevant past experience: …"** block to the
-worker's prompt slice (alongside persona + reads-slice + brief, §2). This mirrors
-the ask-time injection discipline (`hook_memory_inject`): tight timeout, capped
-size, and a clean fall-back to no-injection when the RAG stack is absent, so it
-can never delay or block a dispatch. Isolation holds: a worker only ever receives
-memories from its OWN store.
+**Recall at dispatch (the payoff, now wired).** Before a `rag` worker acts, the
+orchestration tier calls `Employee.load(name, company).recall_context(<task
+brief>)` and prepends the returned block to the worker's prompt slice (alongside
+persona + reads-slice + brief, §2). Because the worker prompt is assembled by the
+orchestration tier itself (the Agent/Task dispatch in §4), `recall_context()` **is**
+that wiring point — one call, config-gated, with the whole ask-time injection
+discipline (`hook_memory_inject`) baked in: tight timeout, capped size, and a
+clean fall-back to no-injection when the RAG stack is absent or the employee is
+flat, so it can never delay or block a dispatch. For a **flat** worker it returns
+`""` — no injection. Isolation holds: a worker only ever receives memories from
+its OWN store.
 
-**Capture at close.** A worker's final act, after its handoff brief, is to record
-**ONE** structured memory of the single reusable lesson from the task, via
+**Capture at close.** A `rag` worker's final act, after its handoff brief, is to
+record **ONE** structured memory of the single reusable lesson from the task, via
 `remember()` (its persona's "Memory — grow with the project" section states this).
 Conservative by rule: one durable lesson per task, *skip entirely* if the task
 carried no real lesson — durable experience, not chatter. This is separate from
-the worker's `log.md` progress note.
+the worker's `log.md` progress note. A **flat** worker skips capture (its
+`remember()` no-ops) and relies on `log.md` / the red-blue ledger instead.
 
-**Index refresh.** `daily-run.sh` refreshes all 8 stores' indexes incrementally
-under Tony's existing `rag_index` step (content-hash skip → an unchanged store is
-~free; venv absent → one-line skip; `|| true` → never fails the core). No new
-Layer-B step owner is introduced, so the role topology and the R1–R6 validator are
-untouched.
-
-> **Follow-up (flagged):** the recall-at-dispatch *injection* is specified here and
-> the `recall()` seam ships now; wiring it into the concrete dispatch call-site
-> (the Agent/Task prompt assembly in §4) is a small follow-on once the store has
-> real captures to recall. Until then, an orchestrator can call `recall()`
-> explicitly before dispatch.
+**Index refresh.** `daily-run.sh` refreshes the **`rag` employees'** stores
+incrementally under Tony's existing `rag_index` step (content-hash skip → an
+unchanged store is ~free; venv absent → one-line skip; `|| true` → never fails the
+core). **Flat employees are skipped entirely** — no index, fewer refreshes,
+lighter. The refresh reads the rag/flat split from `employee.py`
+(`rag_memory_enabled`, context.md-driven), so it stays config-gated, not
+name-hardcoded. No new Layer-B step owner is introduced, so the role topology and
+the R1–R6 validator are untouched.
 
 ---
 
-Version: v1.2 (2026-07-07) — + per-employee memory (recall at dispatch, capture at close).
+Version: v1.3 (2026-07-07) — + per-employee memory MODE (rag/flat) + recall-at-dispatch wired via `Employee.recall_context`.
+Prior: v1.2 (2026-07-07) — + per-employee memory (recall at dispatch, capture at close).
 Prior: v1.1 (2026-06-29) — orchestration/execution split, sub-agent isolation, parallel dispatch, tools registry.
-Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice), `scripts/employee.py` (`remember`/`recall`).
+Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice + `memory:` mode), `scripts/employee.py` (`memory_mode`/`remember`/`recall`/`recall_context`).
