@@ -4,6 +4,7 @@ role: PM (Product Manager)
 manager: Elon
 people_lead: null
 model: sonnet
+memory: rag                    # Phase 18b: rag planner — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   - org/employees/phoebe/                     # own desk (persona / context / scratchpad / log)
   - memory/L1-warm/                           # memory summary (TBD: see §1d context-slice table — Chairman intent/requirement tier)

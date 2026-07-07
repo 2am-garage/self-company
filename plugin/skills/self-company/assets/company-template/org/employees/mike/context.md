@@ -4,6 +4,7 @@ role: R&D (Researcher)
 manager: Phoebe                      # dispatch source and progress tracking
 people_lead: July                    # performance tuning and persona maintenance
 model: sonnet
+memory: rag                    # Phase 18b: rag research — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   - org/employees/mike/              # my own desk (persona, context, scratchpad, log)
   - ops/plans/                       # roadmap, specs, backlog (know what the company is deciding, so research lands where it matters)

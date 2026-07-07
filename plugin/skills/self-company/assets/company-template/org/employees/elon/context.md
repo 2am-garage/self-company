@@ -6,6 +6,7 @@ people_lead: ~
 model: |
   sonnet (standard decisions)
   opus (deep thinking during manual deep cleanups)
+memory: rag                    # Phase 18b: rag planner — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   # My own desk
   - org/employees/elon/

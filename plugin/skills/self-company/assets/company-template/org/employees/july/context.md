@@ -4,6 +4,7 @@ role: HR / People Lead
 manager: Phoebe                  # task dispatch / progress tracking (performance information reporting to Elon, not dispatch)
 people_lead: null
 model: sonnet
+memory: rag                    # Phase 18b: rag analyst — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   - org/employees/july/
   - org/employees/bob/persona.md

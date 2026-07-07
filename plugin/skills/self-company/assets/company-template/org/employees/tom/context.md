@@ -4,6 +4,7 @@ role: IT / Ops Engineer
 manager: Phoebe
 people_lead: July
 model: sonnet
+memory: flat                   # Phase 18b: flat executor — keeps log.md; NO per-employee RAG recall/index
 reads:
   - org/                              # Company org state (not memory)
   - org/employees/tom/                # Own desk

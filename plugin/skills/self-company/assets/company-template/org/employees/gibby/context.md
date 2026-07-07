@@ -4,6 +4,7 @@ role: QA Engineer
 manager: Phoebe
 people_lead: July
 model: sonnet
+memory: flat                   # Phase 18b: flat executor — keeps log.md + red/blue ledger; NO per-employee RAG recall/index
 reads:
   - org/employees/gibby/
   - <Bob's output files (as specified by Phoebe in dispatch)>
