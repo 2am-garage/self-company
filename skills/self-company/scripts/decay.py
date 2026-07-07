@@ -77,7 +77,7 @@ except Exception:  # pragma: no cover - defensive fallback (authoritative copy: 
 # import + verbatim fallback, same pattern as tombstone.py / charter_ids.py. The
 # module does PARSE/SPLIT/SERIALIZE/TOKENIZE ONLY; decay keeps its OWN 13-key
 # defaults, tier/status/category validation, defunct->archived normalization,
-# `_parse_errors`, and serialize key order layered on top.
+# and serialize key order layered on top.
 try:
     from frontmatter import (split as _fm_split, parse as _fm_parse,
                              serialize as _fm_serialize,
@@ -189,19 +189,16 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
         "invalid_at": None,
         "verified_date": None,
         "verified_by": None,
-        "_body": "",
-        "_parse_errors": []
+        "_body": ""
     }
 
     # Find frontmatter block via the shared parser (delimiter `.strip()=='---'`).
     # `_fm_split` returns `([], text)` for BOTH a missing opening fence and a
     # missing closing fence — decay's original early-returns (defaults + empty
-    # body) collapse to a single "no frontmatter block" bail-out. The specific
-    # _parse_errors note is internal only (never surfaced in the JSON report),
-    # so the two messages merge without any behavioral change.
+    # body) collapse to a single "no frontmatter block" bail-out; both cases
+    # simply return the defaults, with no behavioral difference.
     fm_lines, body = _fm_split(content)
     if not fm_lines:
-        result["_parse_errors"].append("No frontmatter block found")
         return result
 
     # Parse frontmatter lines (validation/interpretation layer kept verbatim).
@@ -211,7 +208,6 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
             continue
 
         if ':' not in line:
-            result["_parse_errors"].append(f"Malformed line: {line}")
             continue
 
         key, val_str = line.split(':', 1)
@@ -224,16 +220,12 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
             elif key == "tier":
                 if val_str in ("L0", "L1", "L2"):
                     result["tier"] = val_str
-                else:
-                    result["_parse_errors"].append(f"Invalid tier: {val_str}")
             elif key == "category":
                 # CAPTURE tags each L0 memory with category ∈ L2_CATEGORIES so
                 # profile/project memories promote into the right L2-cold subdir.
                 # Unknown/missing -> None (promote falls back to path-carry/default).
                 if val_str in L2_CATEGORIES:
                     result["category"] = val_str
-                elif val_str:
-                    result["_parse_errors"].append(f"Invalid category: {val_str}")
             elif key == "owner":
                 result["owner"] = val_str if val_str else None
             elif key == "provenance":
@@ -255,8 +247,6 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                     # decay treats it identically via is_tombstoned (out of the
                     # active lifecycle, reapable past grace).
                     result["status"] = val_str
-                else:
-                    result["_parse_errors"].append(f"Invalid status: {val_str}")
             elif key == "sources":
                 # Simple parse: [a, b, c] or empty []
                 if val_str.startswith('[') and val_str.endswith(']'):
@@ -265,8 +255,6 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                         result["sources"] = [s.strip() for s in inner.split(',')]
                     else:
                         result["sources"] = []
-                else:
-                    result["_parse_errors"].append(f"Malformed sources: {val_str}")
             elif key == "created":
                 result["created"] = val_str if val_str else None
             elif key == "last_reinforced":
@@ -275,12 +263,12 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                 try:
                     result["reinforce_count"] = int(val_str)
                 except ValueError:
-                    result["_parse_errors"].append(f"Non-int reinforce_count: {val_str}")
+                    pass
             elif key == "decay_score":
                 try:
                     result["decay_score"] = float(val_str)
                 except ValueError:
-                    result["_parse_errors"].append(f"Non-float decay_score: {val_str}")
+                    pass
             elif key == "invalid_at":
                 # Phase 5 Item 2 (N2): tombstone marker — the date a "drop"
                 # soft-deleted this record (status: archived + invalid_at).
@@ -290,8 +278,11 @@ def parse_frontmatter(content: str) -> Dict[str, Any]:
                 result["verified_date"] = val_str if val_str else None
             elif key == "verified_by":
                 result["verified_by"] = val_str if val_str else None
-        except Exception as e:
-            result["_parse_errors"].append(f"Error parsing {key}: {e}")
+        except Exception:
+            # A malformed value for one key is skipped; the field keeps its
+            # default and parsing continues (previously also noted in an internal,
+            # never-surfaced _parse_errors list, removed Phase 14).
+            pass
 
     # Extract body (everything after the closing fence, exactly as split returns).
     result["_body"] = body
