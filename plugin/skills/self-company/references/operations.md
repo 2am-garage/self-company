@@ -250,6 +250,30 @@ Chairman/Elon approve; Elon → Phoebe → Tom apply any approved edit.
   Tom edits the profile) and logs to `org/employees/july/log.md`. Never fails the
   run.
 
+### Per-employee memory index refresh (Phase 18) — the 8 isolated stores
+
+Each worker has their OWN isolated "experience recall" memory store
+(`org/employees/<name>/memory/`) captured via `Employee.remember()` and recalled
+via `Employee.recall()` (see `references/execution-model.md §7`). `daily-run.sh`
+keeps each store's OWN LanceDB index (`memory/index`) fresh by pointing the SAME
+reused `rag_index.py` at each employee: `--memory-dir org/employees/<name>/memory
+--index-dir org/employees/<name>/memory/index`. The index is **physically the
+employee's own** (the Chairman's isolation choice — never a shared owner-filtered
+index). Properties, by construction:
+
+- **Incremental & cheap.** `content_hash` skips unchanged files, so an untouched
+  store re-embeds nothing; 8 small stores stay ~free.
+- **Gated under Tony's existing `rag_index` step** — the same index-infra duty. No
+  new Layer-B step owner is added, so the role topology and the R1–R6 validator
+  stay byte-identical.
+- **Graceful.** RAG venv absent → one-line skip (`emp-memory-index: skipped — RAG
+  venv absent …`); capture (`remember`) still writes regardless (stdlib). Every
+  refresh is `|| true`, so a bad store can never abort the already-completed core.
+- **Flat & light.** Capture → index → recall only. No per-employee
+  decay/verify/entropy/tiers — that anti-entropy machinery stays on the SHARED
+  company memory. A per-employee memory carries a fixed `tier: L2` purely so the
+  unmodified indexer picks it up (one constant value, nothing promotes/decays it).
+
 ### Holding company (fleet orchestrator) — one cron for N sub-companies
 
 > **OPTIONAL layer — most users can skip this whole section.** Fleet is a separate,

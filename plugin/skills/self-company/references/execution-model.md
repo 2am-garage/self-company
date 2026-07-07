@@ -126,5 +126,57 @@ Gibby → Playwright MCP; Tony/Gibby → RAG (`rag_query`); Mike/Bob → `deep-r
 
 ---
 
-Version: v1.1 (2026-06-29) — orchestration/execution split, sub-agent isolation, parallel dispatch, tools registry.
-Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice).
+## 7. Per-employee memory: recall at dispatch, capture at close (Phase 18)
+
+Each worker has their OWN isolated "experience recall" memory store
+(`org/employees/<name>/memory/`, with the employee's OWN LanceDB index under
+`memory/index`), so **workers grow with the project**: Bob recalls his past
+builds, Gibby his past attack surfaces. It is FLAT and light — **capture → index
+→ recall** — with NO per-employee tiers/decay/verify/entropy; the anti-entropy
+machinery stays on the SHARED company memory only. The RAG stack
+(`rag_embed`/`rag_index`/`rag_query`) is reused as-is, pointed per employee; the
+`Employee` model (`scripts/employee.py`) owns the two seams:
+
+- **`Employee.remember(text, *, tags=None, source=None)`** — writes ONE
+  structured memory file (`id / owner / tier / created / tags / source` +
+  body) to the employee's own store. Pure stdlib, never raises; dedup by content
+  hash makes a re-record idempotent.
+- **`Employee.recall(query, top_k=3)`** — shells `rag_query.py` against the
+  employee's OWN index, re-validates each hit against the live memory files
+  (isolation backstop: only files physically inside this employee's store are
+  ever returned), and returns the relevant memories. Timeout-capped; degrades to
+  `[]` on no venv / empty index / any error — never raises, never blocks.
+
+**Recall at dispatch (the payoff).** Before a worker acts, the orchestration tier
+calls `Employee.load(name, company).recall(<task brief>)` and, if it returns
+anything, prepends a compact **"Relevant past experience: …"** block to the
+worker's prompt slice (alongside persona + reads-slice + brief, §2). This mirrors
+the ask-time injection discipline (`hook_memory_inject`): tight timeout, capped
+size, and a clean fall-back to no-injection when the RAG stack is absent, so it
+can never delay or block a dispatch. Isolation holds: a worker only ever receives
+memories from its OWN store.
+
+**Capture at close.** A worker's final act, after its handoff brief, is to record
+**ONE** structured memory of the single reusable lesson from the task, via
+`remember()` (its persona's "Memory — grow with the project" section states this).
+Conservative by rule: one durable lesson per task, *skip entirely* if the task
+carried no real lesson — durable experience, not chatter. This is separate from
+the worker's `log.md` progress note.
+
+**Index refresh.** `daily-run.sh` refreshes all 8 stores' indexes incrementally
+under Tony's existing `rag_index` step (content-hash skip → an unchanged store is
+~free; venv absent → one-line skip; `|| true` → never fails the core). No new
+Layer-B step owner is introduced, so the role topology and the R1–R6 validator are
+untouched.
+
+> **Follow-up (flagged):** the recall-at-dispatch *injection* is specified here and
+> the `recall()` seam ships now; wiring it into the concrete dispatch call-site
+> (the Agent/Task prompt assembly in §4) is a small follow-on once the store has
+> real captures to recall. Until then, an orchestrator can call `recall()`
+> explicitly before dispatch.
+
+---
+
+Version: v1.2 (2026-07-07) — + per-employee memory (recall at dispatch, capture at close).
+Prior: v1.1 (2026-06-29) — orchestration/execution split, sub-agent isolation, parallel dispatch, tools registry.
+Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice), `scripts/employee.py` (`remember`/`recall`).
