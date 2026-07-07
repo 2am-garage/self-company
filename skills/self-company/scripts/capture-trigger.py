@@ -35,6 +35,13 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+# Bucket 2 (Phase 14): the shared sibling modules (policy_config, tombstone,
+# frontmatter) live in THIS directory. Put it on sys.path FIRST so the hard
+# imports below resolve under every entry point — the Stop hook, direct run, cron,
+# or an import by the test harness (mirrors schedule_validator.py). They always
+# ship together, so those imports never fail.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 # Shared policy loader (org/policy.md §7) — best-effort import, mirroring
 # decay.py: if the module is somehow missing we fall back to the built-in
 # defaults rather than ever crashing the Stop hook.
@@ -43,65 +50,16 @@ try:
 except Exception:  # pragma: no cover - defensive
     _resolve_config = None
 
-# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) lives in
-# ONE shared place (tombstone.py, same dir) so scanners can't drift. Best-effort
-# import + verbatim fallback, mirroring the policy loader above.
-try:
-    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
-except Exception:  # pragma: no cover - defensive fallback (authoritative copy: tombstone.py)
-    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
-
-    def is_tombstoned(fm):
-        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) is the ONE
+# shared set in tombstone.py (same dir), so scanners can't drift.
+from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 
 # Phase 11 Item 2 / C2: the fragile frontmatter PARSE/SPLIT/SERIALIZE seam AND
-# the `sources:` token extractor now live in ONE shared module (frontmatter.py,
-# same dir) so the ten scanners can't drift. Best-effort import + verbatim
-# fallback, mirroring the tombstone import above. This dedupes the SOURCE_ITEM_RE
-# copy that used to sit inline below (byte-identical to reinforce_memory.py's).
-try:
-    from frontmatter import parse as _fm_parse, serialize as _fm_serialize, \
-        SOURCE_ITEM_RE, tokenize_sources  # noqa: F401
-except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
-    SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
-
-    def tokenize_sources(raw):
-        return SOURCE_ITEM_RE.findall(raw or "")
-
-    def _fm_split(text):
-        lines = text.split('\n')
-        if lines[0].strip() != '---':
-            return [], text
-        for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
-                return lines[1:i], '\n'.join(lines[i + 1:])
-        return [], text
-
-    def _fm_parse(text):
-        raw_fm_lines, body = _fm_split(text)
-        fm = {}
-        for line in raw_fm_lines:
-            s = line.strip()
-            if not s or s.startswith('#') or ':' not in s:
-                continue
-            key, val = s.split(':', 1)
-            fm[key.strip()] = val.strip()
-        return fm, body
-
-    def _fm_serialize(fm, body, order=None):
-        keys = []
-        if order:
-            for k in order:
-                if k in fm and k not in keys:
-                    keys.append(k)
-        for k in fm:
-            if k not in keys:
-                keys.append(k)
-        out = ['---']
-        for k in keys:
-            out.append(f"{k}: {fm[k]}")
-        out.append('---')
-        return '\n'.join(out) + '\n' + body
+# the `sources:` token extractor are the ONE shared module (frontmatter.py, same
+# dir) so the ten scanners can't drift. This also single-sources the SOURCE_ITEM_RE
+# that used to sit inline here (byte-identical to reinforce_memory.py's copy).
+from frontmatter import (parse as _fm_parse, serialize as _fm_serialize,
+                         SOURCE_ITEM_RE, tokenize_sources)  # noqa: F401
 
 RECURSION_GUARD = "SELF_COMPANY_CAPTURE_ACTIVE"
 DEFAULT_MODEL = os.environ.get("SELF_COMPANY_CAPTURE_MODEL", "claude-haiku-4-5-20251001")

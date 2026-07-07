@@ -20,6 +20,13 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
+# Bucket 2 (Phase 14): the shared sibling modules (policy_config, charter_ids,
+# tombstone, frontmatter) live in THIS directory. Put it on sys.path FIRST so the
+# hard imports below resolve under every entry point — direct run, cron, venv
+# re-exec, a hook, or an import by another module / the test harness (mirrors
+# schedule_validator.py). They always ship together, so the imports never fail.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 # Shared policy loader — single source of truth for tunable constants
 # (reads org/policy.md §7). Best-effort import: if the module is somehow
 # missing, fall back to built-in defaults rather than crashing the batch.
@@ -28,101 +35,29 @@ try:
 except Exception:  # pragma: no cover - defensive
     _resolve_config = None
 
-# Blessed charter seed set — shared single source (charter_ids.py), same
-# best-effort import pattern as the policy loader. The fallback below is a
-# VERBATIM copy kept only for crash-safety: the charter guard protects against
-# permanent data loss (unlink of the 8 axioms) and must never be disabled by a
-# missing sibling module. Authoritative copy lives in charter_ids.py.
-try:
-    from charter_ids import CHARTER_SEED_IDS, is_blessed_charter
-except Exception:  # pragma: no cover - defensive fallback
-    CHARTER_SEED_IDS = frozenset({
-        "elon-as-manager",
-        "org-hierarchy",
-        "merge-gate",
-        "repo-scoped-skill",
-        "sub-agent-isolation",
-        "verify-before-commit",
-        "four-daily-runs",
-        "minimal-permission-overhead",
-    })
-
-    def is_blessed_charter(fm):
-        if fm.get("id") not in CHARTER_SEED_IDS:
-            return False
-        if str(fm.get("provenance") or "").strip().lower() == "charter":
-            return True
-        return any(str(s).strip().strip('"\'').startswith("charter:")
-                   for s in (fm.get("sources") or []))
+# Blessed charter seed set — the SINGLE source is charter_ids.py (same dir). The
+# charter guard protects the 8 axioms from decay's reap-unlink, so it must be
+# exact: a hard import, never a drift-prone inline copy. The sibling always ships
+# beside this file and is on sys.path (above), so the import cannot fail.
+from charter_ids import CHARTER_SEED_IDS, is_blessed_charter
 
 
-# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) lives in
-# ONE shared place (tombstone.py, same dir) so scanners can't drift. Same
-# best-effort import + verbatim fallback as the charter loader above. decay
-# treats `absorbed` exactly like `archived`: out of the active lifecycle
-# (keep-short-circuit) AND reapable past the grace window.
-try:
-    from tombstone import TOMBSTONE_STATUSES, is_tombstoned
-except Exception:  # pragma: no cover - defensive fallback (authoritative copy: tombstone.py)
-    TOMBSTONE_STATUSES = frozenset({"archived", "defunct", "absorbed"})
-
-    def is_tombstoned(fm):
-        return str(fm.get("status") or "").strip().lower() in TOMBSTONE_STATUSES
+# Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) is the ONE
+# shared set in tombstone.py (same dir). decay treats `absorbed` exactly like
+# `archived`: out of the active lifecycle (keep-short-circuit) AND reapable past
+# the grace window.
+from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 
 
 # Phase 11: the fragile frontmatter PARSING SEAM (delimiter + key:value split +
-# body split + source tokenization) is consolidated into ONE shared module
-# (frontmatter.py, same dir) so the legacy per-scanner parsers can't drift
-# again — the `.strip() == '---'` delimiter is now the single source. Best-effort
-# import + verbatim fallback, same pattern as tombstone.py / charter_ids.py. The
-# module does PARSE/SPLIT/SERIALIZE/TOKENIZE ONLY; decay keeps its OWN 13-key
-# defaults, tier/status/category validation, defunct->archived normalization,
-# and serialize key order layered on top.
-try:
-    from frontmatter import (split as _fm_split, parse as _fm_parse,
-                             serialize as _fm_serialize,
-                             SOURCE_ITEM_RE, tokenize_sources)
-except Exception:  # pragma: no cover - defensive fallback (authoritative copy: frontmatter.py)
-    import re as _fm_re
-    SOURCE_ITEM_RE = _fm_re.compile(r'"[^"]*"')
-
-    def tokenize_sources(raw):
-        return SOURCE_ITEM_RE.findall(raw or "")
-
-    def _fm_split(text):
-        lines = text.split('\n')
-        if lines[0].strip() != '---':
-            return [], text
-        for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
-                return lines[1:i], '\n'.join(lines[i + 1:])
-        return [], text
-
-    def _fm_parse(text):
-        raw_fm_lines, body = _fm_split(text)
-        fm = {}
-        for line in raw_fm_lines:
-            s = line.strip()
-            if not s or s.startswith('#') or ':' not in s:
-                continue
-            key, val = s.split(':', 1)
-            fm[key.strip()] = val.strip()
-        return fm, body
-
-    def _fm_serialize(fm, body, order=None):
-        keys = []
-        if order:
-            for k in order:
-                if k in fm and k not in keys:
-                    keys.append(k)
-        for k in fm:
-            if k not in keys:
-                keys.append(k)
-        out = ['---']
-        for k in keys:
-            out.append(f"{k}: {fm[k]}")
-        out.append('---')
-        return '\n'.join(out) + '\n' + body
+# body split + source tokenization) is the ONE shared module frontmatter.py (same
+# dir), so the legacy per-scanner parsers can't drift again — the `.strip()=='---'`
+# delimiter is the single source. The module does PARSE/SPLIT/SERIALIZE/TOKENIZE
+# ONLY; decay keeps its OWN 13-key defaults, tier/status/category validation,
+# defunct->archived normalization, and serialize key order layered on top.
+from frontmatter import (split as _fm_split, parse as _fm_parse,
+                         serialize as _fm_serialize,
+                         SOURCE_ITEM_RE, tokenize_sources)
 
 
 # ============================================================================

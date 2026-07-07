@@ -34,47 +34,29 @@ import re
 import sys
 from pathlib import Path
 
-# Same best-effort import pattern as decay.py: the guard must never be
-# disabled by a missing sibling module.
+# Bucket 2 (Phase 14): the shared sibling modules (charter_ids, frontmatter) live
+# in THIS directory. Put it on sys.path FIRST so the imports below resolve under
+# every entry point (direct run, cron, the test harness). They always ship here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Charter guard. NOTE (Bucket 2): this fallback is DELIBERATELY KEPT because it
+# DIVERGES from the shared function — it is NOT a verbatim copy. On any import
+# trouble it degrades to an unconditional `return False` (treat nothing as a
+# blessed charter) as a fail-safe, rather than replicating is_blessed_charter's
+# logic (which would re-introduce the drift risk Bucket 2 removes). So it carries
+# no drift risk and is left intact.
 try:
     from charter_ids import is_blessed_charter
-except Exception:  # pragma: no cover - defensive
+except Exception:  # pragma: no cover - divergent fail-safe (NOT a copy of is_blessed_charter)
     def is_blessed_charter(fm):
         return False
 
-# Phase 11: the fragile frontmatter PARSING SEAM + source tokenizer live in ONE
-# shared module (frontmatter.py). Best-effort import + verbatim fallback, same
-# pattern as the charter import above. The `.strip()=='---'` delimiter and the
-# `SOURCE_ITEM_RE` extractor are now the single source; backfill keeps its OWN
+# Phase 11: the fragile frontmatter PARSING SEAM + source tokenizer are the ONE
+# shared module (frontmatter.py). The `.strip()=='---'` delimiter and the
+# `SOURCE_ITEM_RE` extractor are the single source; backfill keeps its OWN
 # closing-fence-index recovery (for the surgical rc-line edit) and clamp logic
 # layered on top.
-try:
-    from frontmatter import parse as _fm_parse, SOURCE_ITEM_RE, tokenize_sources
-except Exception:  # pragma: no cover - verbatim fallback (authoritative: frontmatter.py)
-    SOURCE_ITEM_RE = re.compile(r'"[^"]*"')
-
-    def tokenize_sources(raw):
-        return SOURCE_ITEM_RE.findall(raw or "")
-
-    def _fm_parse(text):
-        lines = text.split('\n')
-        if lines[0].strip() != '---':
-            return {}, text
-        end = None
-        for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
-                end = i
-                break
-        if end is None:
-            return {}, text
-        fm = {}
-        for line in lines[1:end]:
-            s = line.strip()
-            if not s or s.startswith('#') or ':' not in s:
-                continue
-            k, v = s.split(':', 1)
-            fm[k.strip()] = v.strip()
-        return fm, '\n'.join(lines[end + 1:])
+from frontmatter import parse as _fm_parse, SOURCE_ITEM_RE, tokenize_sources
 
 RC_LINE_RE = re.compile(r"^reinforce_count:\s*(\d+)\s*$")
 
