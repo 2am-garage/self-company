@@ -32,7 +32,13 @@ Pure stdlib. NEVER raises to a caller: a missing desk, absent field, or malforme
 frontmatter degrades to a sensible default, never an exception.
 """
 
+import hashlib
+import json
+import os
+import re
+import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,6 +46,32 @@ try:
     import frontmatter  # shared markdown-frontmatter parsing seam
 except Exception:                                              # pragma: no cover
     frontmatter = None
+
+# ---------------------------------------------------------------- Phase 18 knobs
+# Per-employee "experience recall" memory (Phase 18): capture -> index -> recall,
+# FLAT and LIGHT. No per-employee L0/L1/L2 tiers, no decay/verify/entropy — the
+# anti-entropy machinery stays on the SHARED company memory only. The RAG stack
+# (rag_embed/rag_index/rag_query) is REUSED as-is, parameterized per employee; we
+# never fork the embedding/query logic.
+#
+# The reused rag_index.py only indexes files whose `tier` is L1/L2. A per-employee
+# memory is therefore stamped with ONE fixed tier (L2 = durable) purely so the
+# unmodified indexer will pick it up. This is NOT a per-employee tier pipeline:
+# there is exactly one constant value, nothing promotes/demotes/decays it.
+_MEMORY_TIER = "L2"
+
+
+def _env_num(name, default, cast):
+    """Env-tunable number, falling back to `default` on absence OR garbage."""
+    try:
+        return cast(os.environ[name])
+    except (KeyError, ValueError, TypeError):
+        return default
+
+
+# Recall shells rag_query.py with a HARD timeout (mirrors hook_memory_inject's
+# ask-time budget discipline) so recall can never block a dispatch.
+_RECALL_TIMEOUT = _env_num("SELF_COMPANY_RECALL_TIMEOUT", 7.0, float)
 
 
 # ================================================================ Layer B tables
@@ -194,6 +226,38 @@ def _as_list(v):
     return [s] if s else []
 
 
+# ================================================================ memory helpers
+_WS_RE = re.compile(r"\s+")
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_memory_text(text):
+    """Strip + collapse whitespace (mirrors rag_index.normalize_text) so the
+    content hash — and therefore the memory id — is stable across incidental
+    whitespace differences. This is what makes a re-record idempotent."""
+    return _WS_RE.sub(" ", str(text).strip())
+
+
+def _content_hash(normalized):
+    """Short stable content fingerprint (first 12 hex of sha256)."""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _slugify(normalized, max_words=6):
+    """A short filesystem-safe slug from the first few words of the memory."""
+    words = _SLUG_RE.sub("-", normalized.lower()).strip("-").split("-")
+    words = [w for w in words if w][:max_words]
+    slug = "-".join(words)
+    return slug or "memory"
+
+
+def _render_tags(tags):
+    """Render a tags list as an inline flow sequence (`[a, b]`) the loader's
+    _parse_value reads back. None/empty -> `[]`."""
+    items = _as_list(tags)
+    return "[" + ", ".join(items) + "]"
+
+
 # ================================================================ the model
 class Employee:
     """One data-driven employee. Construct via `Employee.load(name, company_dir)`;
@@ -295,9 +359,10 @@ class Employee:
 
     @property
     def memory_dir(self):
-        """RESERVED accessor for the later per-employee-memory idea (Phase 16
-        declares the seam; it is not built). Points at a per-employee memory
-        folder under the desk; nothing here creates or reads it yet."""
+        """This employee's OWN per-employee memory store (Phase 16 reserved the
+        seam; Phase 18 builds it). `remember()` materializes it on first write;
+        `recall()` reads its index under `memory_dir/index`. Physically isolated
+        from every other employee and from the shared company memory."""
         return self.desk_dir / "memory"
 
     # ------------------------------------------------------------ capabilities
@@ -385,6 +450,174 @@ class Employee:
             return True
         except Exception:
             return False
+
+    # ----------------------------------------------------------------- memory
+    # Phase 18 — the per-employee "experience recall" store. capture (remember)
+    # -> index (daily-run, per employee) -> recall. FLAT and isolated: writes go
+    # ONLY to this employee's own memory_dir; recall reads ONLY this employee's
+    # own index. Both are pure-degrade: remember is stdlib and never raises;
+    # recall shells the RAG stack and returns [] on any absence/error/timeout.
+    def remember(self, text, *, tags=None, source=None):
+        """Record ONE structured memory to this employee's own memory store and
+        return the file Path (or None on any failure — never raises).
+
+        The file `<desk>/memory/<slug>-<hash>.md` carries frontmatter
+        `id / owner=<self.name> / tier / created / tags / source` + the body.
+        The id embeds a content hash, so re-recording identical text resolves to
+        the SAME file and is a no-op (idempotent — no churn, `created` stable).
+        A trivial/empty memory is skipped (returns None). Pure stdlib; the memory
+        dir materializes on first write."""
+        try:
+            normalized = _normalize_memory_text(text)
+            if not normalized:                       # nothing worth recording
+                return None
+            mem_id = f"{_slugify(normalized)}-{_content_hash(normalized)}"
+            path = self.memory_dir / f"{mem_id}.md"
+            if path.exists():                        # dedup-by-content -> idempotent
+                return path
+            body = str(text).strip()
+            fm = [
+                "---",
+                f"id: {mem_id}",
+                f"owner: {self.name}",
+                f"tier: {_MEMORY_TIER}",
+                f"created: {date.today().isoformat()}",
+                f"tags: {_render_tags(tags)}",
+            ]
+            src = self._clean_optional(source)
+            if src is not None:
+                fm.append(f"source: {src}")
+            fm.append("---")
+            self.memory_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(fm) + "\n" + body + "\n", encoding="utf-8")
+            return path
+        except Exception:
+            return None
+
+    @property
+    def memory_index_dir(self):
+        """This employee's OWN LanceDB index dir (physically isolated, per the
+        Chairman's choice — NOT a shared owner-filtered index)."""
+        return self.memory_dir / "index"
+
+    def recall(self, query, top_k=3):
+        """Return this employee's OWN past memories most relevant to `query`.
+
+        Shells `rag_query.py --index-dir <desk>/memory/index` (mirroring
+        hook_memory_inject's subprocess+timeout+degrade discipline), then
+        RE-VALIDATES every hit against the live memory files: a hit is kept only
+        if its path physically lives under THIS employee's memory_dir (the
+        isolation backstop — a query for bob can never surface gibby's memory)
+        and the file still exists. Each kept memory is returned as a dict:
+        `{id, owner, tags, source, path, score, text}` (text = live body).
+
+        Graceful degrade — returns [] (never raises, never blocks) for ANY of:
+        empty query, no `.rag-venv`, absent/empty index, missing rag_query.py,
+        subprocess timeout, nonzero exit, non-JSON output, or zero usable hits."""
+        try:
+            q = str(query or "").strip()
+            if not q:
+                return []
+            try:
+                k = max(1, int(top_k))
+            except (TypeError, ValueError):
+                k = 3
+            # Require THIS company's venv python explicitly (cron/hook-safe).
+            rag_py = self.company_dir / ".rag-venv" / "bin" / "python"
+            if not os.access(str(rag_py), os.X_OK):
+                return []
+            index_dir = self.memory_index_dir
+            try:
+                if not index_dir.exists() or not any(index_dir.iterdir()):
+                    return []
+            except OSError:
+                return []
+            query_script = Path(__file__).resolve().parent / "rag_query.py"
+            if not query_script.exists():
+                return []
+            try:
+                proc = subprocess.run(
+                    [str(rag_py), str(query_script), "--query", q,
+                     "--top-k", str(k), "--index-dir", str(index_dir)],
+                    capture_output=True, text=True, timeout=_RECALL_TIMEOUT,
+                    # rag_py IS the venv python -> rag_query must not re-exec again
+                    # (bounds the tree to one killable child so the timeout is hard).
+                    env={**os.environ, "SC_RAG_REEXEC": "1"})
+            except Exception:
+                return []
+            if proc.returncode != 0:
+                return []
+            try:
+                hits = json.loads(proc.stdout)
+            except (ValueError, TypeError):
+                return []
+            if not isinstance(hits, list):
+                return []
+            mem_root = self._resolve(self.memory_dir)
+            out, seen = [], set()
+            for h in hits:
+                if not isinstance(h, dict):
+                    continue
+                raw = h.get("path")
+                if not raw:
+                    continue
+                p = Path(raw)
+                rp = self._resolve(p)
+                # Isolation backstop: only accept a file physically inside THIS
+                # employee's memory dir. Anything else is dropped.
+                if mem_root not in ([rp] + list(rp.parents)):
+                    continue
+                if not p.exists():                    # stale index row -> drop
+                    continue
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                mem = self._read_memory(p)
+                if mem is None:
+                    continue
+                try:
+                    mem["score"] = float(h.get("score"))
+                except (TypeError, ValueError):
+                    mem["score"] = None
+                out.append(mem)
+                if len(out) >= k:
+                    break
+            return out
+        except Exception:
+            return []
+
+    @staticmethod
+    def _resolve(p):
+        try:
+            return Path(os.path.realpath(str(p)))
+        except Exception:
+            return Path(str(p))
+
+    def _read_memory(self, path):
+        """Parse a live memory file into {id, owner, tags, source, path, text}.
+        Returns None on any read error or if the body is empty."""
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, IOError, UnicodeError):
+            return None
+        fm, body = {}, text
+        try:
+            if frontmatter is not None:
+                raw_lines, body = frontmatter.split(text)
+                fm = _parse_fm(raw_lines)
+        except Exception:
+            fm, body = {}, text
+        body = (body or "").strip()
+        if not body:
+            return None
+        return {
+            "id": str(fm.get("id") or ""),
+            "owner": str(fm.get("owner") or ""),
+            "tags": _as_list(fm.get("tags")),
+            "source": self._clean_optional(fm.get("source")),
+            "path": str(path),
+            "text": body,
+        }
 
     def __repr__(self):
         return f"Employee({self.name!r}, tier={self.tier!r}, role={self.role!r})"

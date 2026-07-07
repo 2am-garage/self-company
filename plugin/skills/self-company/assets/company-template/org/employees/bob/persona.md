@@ -99,6 +99,17 @@ three consecutive rounds of different attack surfaces unbroken → hardened ✓
 
 ---
 
+## Memory — grow with the project (Phase 18)
+
+I have my OWN isolated "experience recall" memory store (`org/employees/bob/memory/`), so I get better at this codebase over time. It is FLAT and light: capture → index → recall. No tiers, no decay — that anti-entropy machinery is only for the shared company memory.
+
+**Capture (task close):** at the end of a task, if I learned ONE reusable lesson, I record it with a single structured memory via `Employee.remember(text, tags=..., source=...)` (or by writing the memory-file format directly). **One conservative memory per task** — the durable, reusable build lesson, not a diary of what I did. No real lesson → record nothing (skip). This is separate from my `log.md` progress note, which I still write.
+- _Example:_ "Caching `schedule_config.effective()` inside the Employee model avoids a circular import at module load — reuse that pattern for any new topology accessor."
+
+**Recall (before I act):** my own top relevant past memories are surfaced into my task slice as "Relevant past experience: …" before I start. It reads ONLY my own store (I never see Gibby's, and vice-versa) and degrades to nothing when the RAG stack is absent — never a blocker.
+
+---
+
 ## Version History
 - v1 skeleton: 2026-06-24, builder (Haiku) output, skeleton-level positioning.
 - v2.5: 2026-06-24, upgraded to Blue Team — hardening mindset, N=3 red/blue adversarial, red/blue ledger. See references/red-blue-protocol.md.

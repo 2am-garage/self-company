@@ -358,6 +358,43 @@ if (( _run_rag_index )) && (( RAG_OVER == 0 )) && [[ ! -x "$RAG_PY" ]]; then
   echo "- rag-index: RAG activation candidate — active L1+L2 >= RAG_ENABLE_THRESHOLD but the RAG stack is not installed; run 'bash .company/scripts/rag_setup.sh install' to enable semantic memory search (Tony -> Elon)" >> "$LOG"
 fi
 
+# --- Phase 18: per-employee memory index refresh (8 ISOLATED indexes) ---------
+# Each employee grows their OWN "experience recall" store (org/employees/<name>/
+# memory/*.md, captured via Employee.remember). Refresh each one's OWN LanceDB
+# index by pointing the SAME reused rag_index.py per-employee — the index is
+# physically the employee's own (Chairman's isolation choice), never a shared
+# owner-filtered one. INCREMENTAL: content_hash skips unchanged files, so an
+# untouched store is ~free (a re-embed only on real change); with 8 small stores
+# this stays cheap. Gated under Tony's existing `rag_index` step (this is the
+# same index-infra duty — NO new Layer-B step owner, so the topology/validator is
+# untouched). Venv absent -> one-line skip. `|| true` on every refresh so a bad
+# store can NEVER abort the already-completed core. FLAT: capture->index->recall
+# only; no per-employee decay/verify/entropy.
+EMP_ROOT="$COMPANY/org/employees"
+if (( ! _run_rag_index )); then
+  :   # gated off above; the rag-index skip line already explains it
+elif [[ ! -f "$SCRIPTS/rag_index.py" ]]; then
+  :   # missing script already reported by the company block
+elif [[ ! -x "$RAG_PY" ]]; then
+  echo "- emp-memory-index: skipped — RAG venv absent (.company/.rag-venv) — per-employee recall deferred; capture (remember) still writes, core unaffected" >> "$LOG"
+elif [[ -d "$EMP_ROOT" ]]; then
+  _emp_refreshed=0
+  for _emp_mem in "$EMP_ROOT"/*/memory; do
+    [[ -d "$_emp_mem" ]] || continue
+    # Only employees that actually have at least one memory file (skip the index/
+    # subdir itself). No memories -> nothing to embed, no churn.
+    compgen -G "$_emp_mem/*.md" >/dev/null 2>&1 || continue
+    SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
+      --memory-dir "$_emp_mem" --index-dir "$_emp_mem/index" >/dev/null 2>>"$SERR" || true
+    _emp_refreshed=$((_emp_refreshed + 1))
+  done
+  if (( _emp_refreshed > 0 )); then
+    echo "- emp-memory-index: refreshed $_emp_refreshed per-employee store(s) (incremental; unchanged files skipped)" >> "$LOG"
+  else
+    echo "- emp-memory-index: no per-employee memory stores yet — nothing to refresh" >> "$LOG"
+  fi
+fi
+
 # Elon's daily survey: a prioritized TODO from current metrics (read-only,
 # deterministic — keeps the CEO load-bearing every day). Writes ops/plans/todo-<date>.md.
 if [[ -f "$SCRIPTS/elon_survey.py" ]]; then
