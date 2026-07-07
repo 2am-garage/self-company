@@ -185,7 +185,8 @@ Scheduled to run at a fixed day and time each week (default **Monday 02:00 local
     - Deps: the fastembed venv (`bash .company/scripts/rag_setup.sh install`). Absent OR
       broken venv → one logged skip line; the deterministic core always completes.
     - See `references/rag.md` §2/§4 for details. (Semantic query consumption —
-      ask-time injection — is Stage B, upcoming, not yet wired.)
+      ask-time injection in `hook_memory_inject.py` — shipped as Stage B, v0.1.5;
+      keyword injection is the no-venv floor.)
 
 [6] LOG-COMPILE (Tony, Sonnet)
     - Aggregate all week's changes (new / upgrade / decay / verify result)
@@ -264,7 +265,7 @@ Tom report: expected token usage, scheduled runs, risks to watch
 
 **When to Enable**: Chairman must explicitly approve before Tom sets up scheduling. Automation is **not pre-installed by default**.
 
-**Note**: the RAG index refresh is wired into the daily core (Phase 13 A.1; ships dormant, activated with `rag_setup.sh install` — fastembed + LanceDB, no Ollama). Report push mechanism (PushNotification / Discord) deferred to v3+.
+**Note**: the RAG index refresh is wired into the daily core (Phase 13 A.1) and ask-time semantic injection is live (Stage B, v0.1.5); the local venv ships uninstalled, so the semantic path activates with `rag_setup.sh install` (fastembed + LanceDB, no Ollama) and falls back to the keyword floor until then. Report push mechanism (PushNotification / Discord) deferred to v3+.
 
 ---
 
@@ -440,6 +441,6 @@ Manual triggers are not limited by daily / weekly ceiling (Chairman is highest p
 
 ---
 
-Version: v2.5 (memory pipeline + RAG index wired into the daily core, ships dormant)  
+Version: v2.5 (memory pipeline + RAG wired into the daily core and ask-time injection; venv-gated)  
 Built by: Haiku (Claude Code)  
 Last updated: 2026-06-25

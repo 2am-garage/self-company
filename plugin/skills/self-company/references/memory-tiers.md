@@ -317,8 +317,9 @@ The vocabulary is declared in **ONE** place —
 `scripts/tombstone.py` (`TOMBSTONE_STATUSES = {"archived", "defunct", "absorbed"}`
 and `is_tombstoned(fm)`) — and imported by every frontmatter scanner
 (`entropy.py`, `reinforce_memory.py`, `verify_memory.py`, `capture-trigger.py`,
-`decay.py`) with the same best-effort import + verbatim fallback used for the
-charter seed set. Before Phase 6 the set was open-coded per scanner and drifted:
+`decay.py`) with a plain hard import — the sibling always ships beside each
+scanner and is on `sys.path`, so the import cannot fail (the drift-prone verbatim
+import-fallbacks were collapsed to hard imports in Phase 14). Before Phase 6 the set was open-coded per scanner and drifted:
 `absorbed` was recognised by none of them, so the agent's `status: absorbed`
 tombstones stayed active and the same duplicate pairs re-surfaced every run.
 
@@ -328,8 +329,8 @@ since Phase 11 — `scripts/frontmatter.py`, the ONE authoritative
 frontmatter parse / serialize / tokenize implementation. Before Phase 11 that
 parsing seam was open-coded in ten scanners with five incompatible shapes (and a
 real `entropy.py` divergence that could classify the same file's active-set
-membership differently); it is now imported the same best-effort + verbatim-
-fallback way as `tombstone.py`.
+membership differently); it is now imported the same plain hard-import way as
+`tombstone.py`.
 
 ### Behaviour of a tombstone (all three statuses)
 

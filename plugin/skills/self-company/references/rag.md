@@ -1,6 +1,6 @@
 # RAG Playbook — Retrieval-Augmented Memory Search
 
-> **Tony's domain.** RAG is a local, offline vector index (LanceDB + fastembed) over the markdown memory store, used to catch semantic matches keyword search misses. Shipped **dormant**; activate with one command:
+> **Tony's domain.** RAG is a local, offline vector index (LanceDB + fastembed) over the markdown memory store, used to catch semantic matches keyword search misses. It is **wired into the pipeline** as of Phase 13 — the daily index refresh (Stage A) and ask-time semantic injection (Stage B, v0.1.5) both run live. The one piece that isn't pre-installed is the local venv; until you run the one command below the company transparently uses the keyword floor:
 > ```bash
 > bash .company/scripts/rag_setup.sh install
 > ```
@@ -27,7 +27,7 @@ There are two consumers of the shared `rag_embed` backend:
    `reinforce_memory.py` and `entropy.py` call `rag_embed.embed_batch()` directly and compute cosine similarity **in memory** (numpy). They do NOT read the LanceDB index — they embed bodies fresh each run to find near-duplicate / contradiction pairs across all tiers. This is how the daily consolidation matures memories (L0 → L1 → L2).
 
 2. **The LanceDB index (Path B — this playbook).**
-   `rag_index.py` builds a persistent vector table; `rag_query.py` queries it by meaning and returns file paths. Index scope is **L1/L2 only** (working L0 is volatile and excluded). This is the path Phase 13 wires into the pipeline (below) and that Stage B (upcoming) will consume for ask-time retrieval.
+   `rag_index.py` builds a persistent vector table; `rag_query.py` queries it by meaning and returns file paths. Index scope is **L1/L2 only** (working L0 is volatile and excluded). This is the path Phase 13 wires into the pipeline (below) and that Stage B (shipped v0.1.5) consumes for ask-time retrieval.
 
 ---
 
@@ -56,7 +56,7 @@ Chairman can order activation directly ("Enable RAG"): run `rag_setup.sh install
 
 ### Status at ship
 
-Ships **DORMANT** — no venv, no LanceDB/fastembed. `rag_index.py` / `rag_query.py` exist and exit gracefully with an actionable message until `rag_setup.sh install` runs.
+The RAG **logic is wired** (daily index refresh + ask-time semantic injection), but the **venv ships uninstalled** — no LanceDB/fastembed until `rag_setup.sh install` runs. Until then `rag_index.py` / `rag_query.py` exit gracefully with an actionable message and the ask-time hook falls back to the keyword path, so the company runs exactly as before.
 
 ---
 
@@ -124,7 +124,7 @@ Because only paths are stored, retrieval always resolves back to live markdown f
 
 ---
 
-## 6. Querying (manual / ad-hoc today)
+## 6. Querying (ad-hoc CLI + live ask-time injection)
 
 Once built, query the index semantically:
 
@@ -148,7 +148,7 @@ python3 .company/scripts/rag_query.py --query "what does the Chairman prefer for
 ```
 `score` = cosine similarity (0–1, higher = closer). `path` points back to the markdown source so you can read the full context.
 
-> **Status:** `rag_query.py` is available for manual/ad-hoc use. The **user-facing consumer** — semantic ask-time injection in `hook_memory_inject.py` — is **Stage B of Phase 13 and is NOT wired yet** (keyword injection remains the live path). This section documents the query contract Stage B will build on; it does not yet run in the pipeline.
+> **Status:** `rag_query.py` is available for manual/ad-hoc use **and** is the backend for the live ask-time consumer — semantic injection in `hook_memory_inject.py` shipped as **Stage B of Phase 13 (v0.1.5)**. On each `UserPromptSubmit` the hook queries the index semantically (tight timeout) and injects the top matches, falling back to the keyword path when the venv is absent. This section documents the query contract that consumer runs on.
 
 ### Fallback: no index / no venv
 
@@ -236,7 +236,7 @@ Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
 | **Decide** | Elon | Approve activation | Threshold crossed or Chairman orders |
 | **Setup** | Tom / human (one-time) | `rag_setup.sh install` | Before first refresh |
 | **Refresh** | Tony (daily, automatic) | Incremental `rag_index.py` after reinforce+decay | Keeps the index in sync with markdown |
-| **Query** | manual today; Stage B (upcoming) will inject at ask-time | `rag_query.py` | Search by meaning |
+| **Query** | manual CLI + live ask-time injection (`hook_memory_inject.py`, Stage B / v0.1.5) | `rag_query.py` | Search by meaning |
 | **Rebuild** | Tony (as needed) | `--rebuild` | After major cleanup / corruption |
 | **Degrade** | All | Exit 2 + grep fallback; core never fails | Venv absent/broken |
 
@@ -247,7 +247,7 @@ Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
 - **Daily core** (`daily-run.sh`): the RAG-index refresh + threshold surface run after the reinforce/decay/verify/entropy core, owned by Tony, gated via `org/schedule.yaml`. Venv absent/broken → one logged skip line, core unaffected.
 - **In-process dedup** (`reinforce_memory.py`, `entropy.py`): use `rag_embed` directly (Path A, §1) — separate from the LanceDB index.
 - **Policy tunables** (`org/policy.md §8`): `RAG_ENABLE_THRESHOLD`, `RAG_MODEL`, `RAG_INDEX_PATH`.
-- **Stage B (upcoming)**: semantic ask-time injection in `hook_memory_inject.py` will consume `rag_query.py` with a tight timeout and fall back to today's keyword path. Not yet wired.
+- **Stage B (shipped v0.1.5)**: semantic ask-time injection in `hook_memory_inject.py` consumes `rag_query.py` with a tight timeout and falls back to the keyword path when the venv is absent.
 
 ---
 
