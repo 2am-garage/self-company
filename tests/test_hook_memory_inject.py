@@ -76,6 +76,243 @@ def _run(company=None, transcript=None, stdin=None):
     return proc.returncode, parsed, out
 
 
+def _fake_rag_venv(company, rag_query_body):
+    """Plant a fake `.company/.rag-venv/bin/python` that intercepts rag_query.py
+    (emitting `rag_query_body` as its shell body — echo canned JSON, sleep, exit N,
+    etc.) and passes anything else through to the real interpreter. Also create a
+    non-empty index dir so semantic_top's presence guard passes."""
+    bindir = os.path.join(company, ".rag-venv", "bin")
+    os.makedirs(bindir, exist_ok=True)
+    py = os.path.join(bindir, "python")
+    with open(py, "w", encoding="utf-8") as f:
+        f.write("#!/usr/bin/env bash\n"
+                'case "${1:-}" in\n'
+                "  *rag_query.py)\n"
+                f"    {rag_query_body}\n"
+                "    ;;\n"
+                '  *) exec python3 "$@" ;;\n'
+                "esac\n")
+    os.chmod(py, 0o755)
+    idx = os.path.join(company, "memory", "index")
+    os.makedirs(idx, exist_ok=True)
+    with open(os.path.join(idx, "memory.lance"), "w") as f:
+        f.write("x")   # make the index dir non-empty (presence guard)
+    return py
+
+
+def _hits_json(*rows):
+    """Build a rag_query-shaped JSON array: rows are (path, tier, score)."""
+    return json.dumps([{"id": os.path.basename(p).replace(".md", ""),
+                        "tier": t, "path": p, "score": s} for (p, t, s) in rows])
+
+
+class TestMemoryInjectRAG(unittest.TestCase):
+    """Phase 13 Stage B.1 — semantic ask-time injection via rag_query, with the
+    keyword path as the guaranteed fallback."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_paraphrase_injected_via_semantic(self):
+        # Prompt shares NO keywords with the memory -> keyword path scores 0 and
+        # would stay silent; semantic returns the memory by meaning -> injected.
+        path = _write_mem(self.company, "L2-cold", "concurrency-style",
+                          body="The Chairman prefers async/await for all "
+                               "concurrency work in the codebase.")
+        _write_transcript(self.transcript,
+                          ["how should I lay out my parallel execution flow"])
+        # sanity: with no venv this prompt injects nothing (pure keyword)
+        rc0, parsed0, raw0 = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(raw0, "", "keyword path should be silent on a paraphrase")
+        # now plant the RAG stack returning the memory with a high score
+        _fake_rag_venv(self.company, f"echo '{_hits_json((path, 'L2', 0.71))}'")
+        rc, parsed, _ = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "semantic hit should be injected")
+        self.assertIn("async/await",
+                      parsed["hookSpecificOutput"]["additionalContext"])
+
+    def test_no_venv_is_byte_for_byte_keyword(self):
+        # With no venv, semantic_top returns None and behavior == the keyword path
+        # exactly (relevant keyword prompt still injects; index dir absent).
+        _write_mem(self.company, "L2-cold", "editor-preference",
+                   body="The Chairman prefers the Neovim editor with a dark theme.")
+        _write_transcript(self.transcript, ["set up my neovim colorscheme"])
+        rc, parsed, _ = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIn("Neovim",
+                      parsed["hookSpecificOutput"]["additionalContext"])
+
+    def test_rag_timeout_falls_back_to_keyword_under_budget(self):
+        # rag_query hangs; the tight subprocess timeout caps it and the keyword
+        # path takes over -> total well under the 30s hook budget.
+        _write_mem(self.company, "L2-cold", "editor-preference",
+                   body="The Chairman prefers the Neovim editor with a dark theme.")
+        _write_transcript(self.transcript, ["set up my neovim colorscheme"])
+        _fake_rag_venv(self.company, "sleep 30")   # hang
+        env = {**os.environ, "SELF_COMPANY_INJECT_RAG_TIMEOUT": "1"}
+        start = time.time()
+        proc = __import__("subprocess").run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", self.transcript],
+            capture_output=True, text=True, input="", env=env)
+        elapsed = time.time() - start
+        self.assertEqual(proc.returncode, 0)
+        self.assertLess(elapsed, 10.0, "timeout must cap the hang well under 30s")
+        # keyword fallback still injects the relevant memory
+        self.assertIn("Neovim", proc.stdout)
+
+    def test_tombstoned_hit_not_injected(self):
+        # rag_query returns a path that is now tombstoned -> re-validation drops it;
+        # nothing else matches -> silent (never inject a stale/tombstoned memory).
+        path = _write_mem(self.company, "L2-cold", "old-editor",
+                          body="The Chairman used to prefer the Emacs editor.",
+                          status="archived")
+        _write_transcript(self.transcript, ["configure my emacs setup"])
+        _fake_rag_venv(self.company, f"echo '{_hits_json((path, 'L2', 0.80))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "tombstoned semantic hit must not be injected")
+
+    def test_deleted_hit_not_injected(self):
+        # rag_query returns a path to a file that no longer exists on disk.
+        ghost = os.path.join(self.company, "memory", "L2-cold", "gone", "ghost.md")
+        real = _write_mem(self.company, "L2-cold", "coffee",
+                          body="The Chairman drinks oat-milk flat whites.")
+        _write_transcript(self.transcript, ["what coffee does the chairman drink"])
+        # index returns the GHOST (score high) plus nothing live-relevant
+        _fake_rag_venv(self.company, f"echo '{_hits_json((ghost, 'L2', 0.90))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        # ghost dropped; semantic yields nothing -> keyword fallback finds 'coffee'
+        self.assertIsNotNone(parsed)
+        ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("oat-milk", ctx)
+        self.assertNotIn("ghost", ctx)
+
+    def test_low_score_hit_gated_out(self):
+        # A semantic hit BELOW the relevance floor is off-topic noise -> dropped;
+        # with nothing else relevant -> keyword fallback -> silent on off-topic.
+        path = _write_mem(self.company, "L2-cold", "editor",
+                          body="The Chairman prefers the Neovim editor.")
+        _write_transcript(self.transcript,
+                          ["what is the boiling point of mercury"])
+        _fake_rag_venv(self.company, f"echo '{_hits_json((path, 'L2', 0.12))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "below-floor semantic hit must not be injected")
+
+    def test_budget_and_cap_never_exceeded_semantic(self):
+        # Many high-score hits -> still capped at 5 and within CONTEXT_CHAR_CAP.
+        long_body = ("neovim editor configuration workflow " * 30).strip()
+        rows = []
+        for i in range(9):
+            p = _write_mem(self.company, "L2-cold", f"m{i}", body=long_body,
+                           reinforce_count=i + 1)
+            rows.append((p, "L2", 0.90 - i * 0.01))
+        _write_transcript(self.transcript, ["neovim editor help"])
+        _fake_rag_venv(self.company, f"echo '{_hits_json(*rows)}'")
+        rc, parsed, _ = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(ctx), hmi.CONTEXT_CHAR_CAP)
+        # at most cap 5 memory lines (+1 header)
+        self.assertLessEqual(len(ctx.split("\n")), hmi.TOP_K_CAP + 1)
+
+    def test_healthy_path_no_double_inject(self):
+        # rag_query returns the same path twice -> injected once.
+        path = _write_mem(self.company, "L2-cold", "editor",
+                          body="The Chairman prefers the Neovim editor with a dark theme.")
+        _write_transcript(self.transcript, ["neovim colorscheme"])
+        _fake_rag_venv(self.company,
+                       f"echo '{_hits_json((path, 'L2', 0.80), (path, 'L2', 0.79))}'")
+        rc, parsed, _ = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(ctx.count("Neovim"), 1, "must not double-inject one memory")
+
+    def test_sc_no_rag_forces_keyword(self):
+        # SC_NO_RAG=1 disables the semantic path even with a venv+index present.
+        path = _write_mem(self.company, "L2-cold", "concurrency-style",
+                          body="The Chairman prefers async/await for concurrency.")
+        _write_transcript(self.transcript, ["parallel execution flow layout"])
+        _fake_rag_venv(self.company, f"echo '{_hits_json((path, 'L2', 0.71))}'")
+        env = {**os.environ, "SC_NO_RAG": "1"}
+        proc = __import__("subprocess").run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", self.transcript],
+            capture_output=True, text=True, input="", env=env)
+        self.assertEqual(proc.returncode, 0)
+        # paraphrase has no keyword overlap -> keyword path silent -> no injection
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_garbage_tuning_envvars_never_crash_at_import(self):
+        # P13B-1: a malformed value for any of the four env-tunable numbers must
+        # NOT raise at import (module-level parse) — the always-on hook falls back
+        # to the default and still runs / exits 0 / injects. Locks "never break the
+        # Chairman's prompt".
+        _write_mem(self.company, "L2-cold", "editor-preference",
+                   body="The Chairman prefers the Neovim editor with a dark theme.")
+        _write_transcript(self.transcript, ["set up my neovim colorscheme"])
+        vars_ = ("SELF_COMPANY_INJECT_RAG_TIMEOUT",
+                 "SELF_COMPANY_INJECT_RAG_MIN_SCORE",
+                 "SELF_COMPANY_INJECT_TOPK",
+                 "SELF_COMPANY_INJECT_HIGH_RC")
+        for name in vars_:
+            for bad in ("abc", "", "NaN"):
+                env = {**os.environ, name: bad}
+                proc = __import__("subprocess").run(
+                    [__import__("sys").executable,
+                     os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+                     "--company", self.company, "--transcript", self.transcript],
+                    capture_output=True, text=True, input="", env=env)
+                self.assertEqual(proc.returncode, 0, f"{name}={bad!r}: {proc.stderr}")
+                self.assertNotIn("Traceback", proc.stderr, f"{name}={bad!r}")
+                # default behavior intact: keyword path still injects the match
+                self.assertIn("Neovim", proc.stdout, f"{name}={bad!r}")
+
+    def test_non_finite_score_not_injected(self):
+        # A NaN/inf score from rag_query must be treated as below-floor (dropped),
+        # not slip past `score < RAG_MIN_SCORE`.
+        path = _write_mem(self.company, "L2-cold", "editor",
+                          body="The Chairman prefers the Neovim editor.")
+        _write_transcript(self.transcript,
+                          ["what is the atomic weight of tungsten"])  # off-topic vs body
+        # emit a raw NaN score (json.dumps would reject float('nan'), so hand-write)
+        body = ('echo \'[{"id": "editor", "tier": "L2", "path": "'
+                + path + '", "score": NaN}]\'')
+        _fake_rag_venv(self.company, body)
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "non-finite score must be gated out")
+
+    def test_empty_index_dir_falls_back(self):
+        # venv present but the index dir is empty -> semantic skipped, keyword used.
+        _write_mem(self.company, "L2-cold", "editor",
+                   body="The Chairman prefers the Neovim editor.")
+        _write_transcript(self.transcript, ["neovim setup"])
+        bindir = os.path.join(self.company, ".rag-venv", "bin")
+        os.makedirs(bindir, exist_ok=True)
+        py = os.path.join(bindir, "python")
+        with open(py, "w") as f:
+            f.write("#!/usr/bin/env bash\necho '[]'\n")  # would return zero hits
+        os.chmod(py, 0o755)
+        os.makedirs(os.path.join(self.company, "memory", "index"))  # empty
+        rc, parsed, _ = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIn("Neovim",
+                      parsed["hookSpecificOutput"]["additionalContext"])
+
+
 class TestMemoryInject(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
