@@ -107,10 +107,17 @@ class TestCapabilities(unittest.TestCase):
         self.assertTrue(any("org/employees/bob/" in r for r in e.reads))
         self.assertEqual(e.handoff_to, ["Gibby"])   # scalar -> one-item list
 
-    def test_capabilities_dict_has_todays_fields(self):
-        caps = Employee.load("bob", TEMPLATE).capabilities()
-        self.assertEqual(set(caps), {"tools", "reads", "writes", "handoff_to"})
+    def test_capabilities_dict_has_four_functional_dimensions(self):
+        # Phase 17: capabilities() is the FUNCTIONAL profile July stewards —
+        # tools/mcp/skills/plugins. (reads/writes/handoff_to are a separate
+        # data-access slice, reachable via attributes, not in capabilities().)
+        e = Employee.load("bob", TEMPLATE)
+        caps = e.capabilities()
+        self.assertEqual(set(caps), {"tools", "mcp", "skills", "plugins"})
         self.assertEqual(caps["tools"], ["Read", "Edit", "Write", "Bash"])
+        self.assertEqual(caps["mcp"], [])          # least-privilege default
+        # reads/writes/handoff_to remain accessible as attributes (separate slice):
+        self.assertIn("org/employees/bob/scratchpad.md", e.writes)
 
     def test_list_handoff_to_preserved(self):
         # tony's handoff_to is a YAML sequence -> list of names.
@@ -203,13 +210,17 @@ class TestDutiesAndSteps(unittest.TestCase):
         self.assertTrue(Employee.load("bob", TEMPLATE).allows_duty("build"))
         self.assertFalse(Employee.load("bob", TEMPLATE).allows_duty("attack"))
         self.assertFalse(Employee.load("phoebe", TEMPLATE).allows_duty("build"))
+        # Phase 17: July is the capability steward — she owns july_audit, nothing else.
+        self.assertTrue(Employee.load("july", TEMPLATE).allows_duty("july_audit"))
+        self.assertFalse(Employee.load("july", TEMPLATE).allows_duty("build"))
+        self.assertFalse(Employee.load("tony", TEMPLATE).allows_duty("july_audit"))
 
     def test_allows_duty_matches_table(self):
         for name in Employee.roster():
             e = Employee.load(name, TEMPLATE)
             for duty in ("attack", "build", "verify", "decay", "research", "survey",
                          "backup", "report", "schedule", "reinforce", "entropy",
-                         "rag_index", "propose", "agent"):
+                         "rag_index", "propose", "agent", "july_audit"):
                 self.assertEqual(e.allows_duty(duty),
                                  duty in employee.ALLOWED_DUTIES[name],
                                  f"{name}.{duty}")
@@ -301,13 +312,16 @@ class TestGracefulDefaults(unittest.TestCase):
         self.assertEqual(e.manager, "")
         self.assertIsNone(e.people_lead)
         self.assertEqual(e.tools, [])
+        self.assertEqual(e.mcp, [])
+        self.assertEqual(e.skills, [])
+        self.assertEqual(e.plugins, [])
         self.assertEqual(e.reads, [])
         self.assertEqual(e.writes, [])
         self.assertEqual(e.handoff_to, [])
         self.assertEqual(e.model, "")
         self.assertIsNone(e.token_budget)
         self.assertEqual(e.capabilities(),
-                         {"tools": [], "reads": [], "writes": [], "handoff_to": []})
+                         {"tools": [], "mcp": [], "skills": [], "plugins": []})
 
     def test_unknown_name_defaults(self):
         e = Employee.load("nobody", TEMPLATE)
