@@ -629,13 +629,14 @@ class TestInstallHook(unittest.TestCase):
         with open(self._settings(d), "w") as f:
             json.dump(cfg, f)
 
-    def test_install_is_plugin_native_noop(self):
-        # v0.1.2: hooks are plugin-native; install writes nothing to settings.json.
+    def test_install_command_removed_is_usage_error(self):
+        # Phase 14 Bucket 3: the deprecated `install` no-op branch was removed
+        # (hooks are plugin-native). `install` is no longer a command -> usage
+        # error (exit 2), and it must still never create/touch settings.json.
         with tempfile.TemporaryDirectory() as d:
             r = _bash([self.SH, "install", d])
-            self.assertEqual(r.returncode, 0)
-            self.assertIn("plugin-native", r.stdout.lower())
-            self.assertIn("nothing to install", r.stdout.lower())
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("usage:", r.stderr.lower())
             self.assertFalse(os.path.exists(self._settings(d)))
 
     def test_status_reports_plugin_native(self):

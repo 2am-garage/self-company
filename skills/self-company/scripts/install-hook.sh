@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 ###############################################################################
-# install-hook.sh — DEPRECATED since v0.1.2 (hooks are plugin-native).
+# install-hook.sh — legacy-hook cleaner (hooks are plugin-native since v0.1.2).
 #
-# The self-company hooks are now declared ONCE in the plugin's `hooks/hooks.json`
+# The self-company hooks are declared ONCE in the plugin's `hooks/hooks.json`
 # (at the plugin root; commands use `${CLAUDE_PLUGIN_ROOT}`), so Claude Code loads
 # them automatically when the plugin is installed — no per-repo settings.json edit.
-# Plugin hooks MERGE with settings.json hooks, so a LEGACY install-hook entry would
-# make Stop(capture) / SessionStart(notify) DOUBLE-FIRE. Therefore:
+# There is nothing to install; the old `install` no-op was removed (Phase 14).
+# Plugin hooks MERGE with settings.json hooks, so a LEGACY settings.json entry from
+# a pre-0.1.2 install would make Stop(capture) / SessionStart(notify) DOUBLE-FIRE.
+# This script therefore exists only to CLEAN that legacy state:
 #
-#   install    -> NO-OP. Prints that hooks are plugin-native; nothing to install.
 #   uninstall  -> removes any LEGACY self-company hook entries from
 #                 `.claude/settings.json` (so existing installs stop double-firing).
 #   status     -> reports "plugin-native" + whether legacy entries still linger.
@@ -17,7 +18,6 @@
 # The uninstall path preserves the original marker-based settings.json editing.
 #
 # Usage:
-#   install-hook.sh install   [PROJECT_DIR]   # no-op (see hooks/hooks.json)
 #   install-hook.sh uninstall [PROJECT_DIR]   # clean legacy double-fire entries
 #   install-hook.sh status    [PROJECT_DIR]
 ###############################################################################
@@ -31,11 +31,6 @@ SETTINGS="$PROJECT_DIR/.claude/settings.json"
 # Legacy markers this skill ever wrote into settings.json (uninstall targets these).
 STOP_MARK="self-company-capture"
 NOTIFY_MARK="self-company-notify"
-
-if [[ "$CMD" == "install" ]]; then
-  echo "[install-hook] hooks are plugin-native since v0.1.2 — nothing to install (see hooks/hooks.json)"
-  exit 0
-fi
 
 python3 - "$CMD" "$SETTINGS" "$STOP_MARK" "$NOTIFY_MARK" <<'PY'
 import json, os, sys
@@ -100,6 +95,6 @@ elif cmd == "status":
     else:
         print("[install-hook] no legacy settings.json entries — clean")
 else:
-    print("usage: install-hook.sh [install|uninstall|status] [PROJECT_DIR]", file=sys.stderr)
+    print("usage: install-hook.sh [uninstall|status] [PROJECT_DIR]", file=sys.stderr)
     sys.exit(2)
 PY

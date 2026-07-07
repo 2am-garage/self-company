@@ -55,7 +55,7 @@
 ### v0.1.2 Plugin-native Hooks Completed (Phase 10)
 
 - ✅ Hooks are plugin-native — all **7 hooks** are declared once in `hooks/hooks.json` at the plugin root and run via `${CLAUDE_PLUGIN_ROOT}`, so Claude Code loads them on install with no per-repo `install-hook.sh` edit: `Stop` (CAPTURE), `SessionStart` (catch-up push), `UserPromptSubmit` (ask-time memory injection), `PreCompact` (capture-rescue), `PreToolUse` (deny `rm` under `.company/memory`), `PostToolUse` (lint memory writes), `SessionEnd` (verify fresh captures). Each script's first action is a `.company` opt-in guard (silent `exit 0` in non-company repos).
-- ✅ `install-hook.sh` deprecated — `install` is a no-op; `uninstall` only cleans legacy `settings.json` entries that would otherwise double-fire against the plugin hooks; `status` reports plugin-native. See `references/operations.md`.
+- ✅ `install-hook.sh` is a legacy-cleaner only — nothing to install (hooks are plugin-native; the old `install` no-op command was removed in Phase 14); `uninstall` cleans legacy `settings.json` entries that would otherwise double-fire against the plugin hooks; `status` reports plugin-native. See `references/operations.md`.
 
 ### Still Open / Deferred
 

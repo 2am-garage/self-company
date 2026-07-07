@@ -266,12 +266,12 @@ opt-in guard: if `$CLAUDE_PROJECT_DIR/.company` (or `./.company`) does not exist
 `exit 0`s as a silent no-op (no output, no writes). This one marker check is what keeps
 the hooks inert in non-company repos — there is no per-hook special-casing.
 
-**`install-hook.sh` is deprecated.** The plugin now owns these hooks, and plugin hooks
-**merge** with `settings.json` hooks — so a legacy `install-hook.sh install` entry
-would make Stop(capture)/SessionStart(notify) **double-fire**. Therefore:
+**`install-hook.sh` is a legacy-cleaner only.** The plugin now owns these hooks, and plugin
+hooks **merge** with `settings.json` hooks — so a legacy pre-v0.1.2 `settings.json` entry
+would make Stop(capture)/SessionStart(notify) **double-fire**. There is nothing to install
+(the old `install` no-op command was removed in Phase 14); the script exists only to clean
+that legacy state:
 
-- `install-hook.sh install` → **no-op** ("hooks are plugin-native since v0.1.2 —
-  nothing to install (see hooks/hooks.json)").
 - `install-hook.sh uninstall` → **removes any legacy self-company hook entries** from
   `.claude/settings.json` (marker-based: `self-company-capture` / `self-company-notify`),
   leaving all other settings/hooks byte-untouched. Run this once on any repo that used

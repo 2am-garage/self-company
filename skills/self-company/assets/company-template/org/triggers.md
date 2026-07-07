@@ -57,11 +57,11 @@ the hook's first action is an opt-in guard: no `$CLAUDE_PROJECT_DIR/.company` ma
 `exit 0`. That single check keeps it inert in non-company repos, so no explicit "enable"
 step is required.
 
-> **`install-hook.sh` is deprecated.** `install` is a no-op ("hooks are plugin-native since
-> v0.1.2 — nothing to install, see `hooks/hooks.json`"); `uninstall` only removes legacy
-> `.claude/settings.json` hook entries left by the pre-v0.1.2 installer (which would otherwise
-> **double-fire** against the plugin hooks); `status` reports plugin-native. See
-> `references/operations.md` for the full hook table.
+> **`install-hook.sh` is a legacy-cleaner only** (hooks are plugin-native since v0.1.2, so
+> there is nothing to install — the old `install` no-op command was removed in Phase 14).
+> `uninstall` removes legacy `.claude/settings.json` hook entries left by the pre-v0.1.2
+> installer (which would otherwise **double-fire** against the plugin hooks); `status`
+> reports plugin-native. See `references/operations.md` for the full hook table.
 
 **Companion hooks.** Beyond `Stop`, the plugin now ships six more hooks: `SessionStart`
 (catch-up push of unattended runs), `UserPromptSubmit` (ask-time memory injection),

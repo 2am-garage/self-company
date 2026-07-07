@@ -202,9 +202,10 @@ loads them on install with no `install-hook.sh` edit. They are `Stop` (capture),
 stdlib), `PreCompact` (capture-rescue), `PreToolUse` (deny rm under `.company/memory`),
 `PostToolUse` (lint memory writes), `SessionEnd` (verify fresh captures). Plugin hooks
 fire in **every** repo, so each script's first action is an opt-in guard — no
-`$CLAUDE_PROJECT_DIR/.company` marker → silent `exit 0`. `install-hook.sh` is
-**deprecated**: `install` is a no-op, `uninstall` cleans legacy `settings.json` entries
-that would otherwise double-fire (plugin hooks merge with settings hooks).
+`$CLAUDE_PROJECT_DIR/.company` marker → silent `exit 0`. `install-hook.sh` is a
+**legacy-cleaner only** (nothing to install — the old `install` no-op was removed in
+Phase 14): `uninstall` cleans legacy `settings.json` entries that would otherwise
+double-fire (plugin hooks merge with settings hooks); `status` reports plugin-native.
 **Catch-Up** — the `SessionStart`
 hook (`notify-status.py --emit-hook`) pushes one summary when unattended runs moved
 something substantive; push only, never Discord. **Ledger** — `report.py` writes
