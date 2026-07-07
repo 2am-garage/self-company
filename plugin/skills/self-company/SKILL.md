@@ -252,7 +252,7 @@ Load these on demand — none is needed to ACT until you're doing the specific t
 - [execution-model.md](references/execution-model.md) — orchestration vs isolated workers (least-privilege context), dispatch.
 - [operations.md](references/operations.md) — triggers, scheduling/config, hooks, catch-up push, ledger, views, supervisor.
 - [red-blue-protocol.md](references/red-blue-protocol.md) — Bob (Blue) ⚔ Gibby (Red) build-and-attack loop.
-- [rag.md](references/rag.md) — RAG index (LanceDB + fastembed, local/offline); ships dormant, `rag_setup.sh install` to activate.
+- [rag.md](references/rag.md) — RAG index (LanceDB + fastembed, local/offline); wired into the pipeline (index refresh + ask-time injection), venv-gated — `rag_setup.sh install` to activate the semantic path.
 - [status.md](references/status.md) — completion checklists + deferred items.
 
 **Scripts** (stdlib only; canonical in `scripts/`, run in place — never copied into `.company/`)

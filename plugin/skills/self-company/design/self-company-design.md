@@ -357,13 +357,16 @@ Target: entropy declines or stays flat after each maintenance
 
 ---
 
-## 8. RAG (Tony's Domain, Deployed Dormant)
+## 8. RAG (Tony's Domain, Wired — venv-gated)
 
-**Status: Deployed (dormant; requires the local RAG venv to activate)** — the
-authoritative RAG reference is now **[references/rag.md](../references/rag.md)**; the
-stack below was updated from the original Ollama design to the shipped one.
+**Status: Wired into the pipeline (Phase 13); the semantic path activates once the
+local RAG venv is installed** — the daily index refresh (Stage A) and ask-time
+semantic injection (Stage B, v0.1.5) both run live; absent the venv the company
+falls back to the keyword floor. The authoritative RAG reference is now
+**[references/rag.md](../references/rag.md)**; the stack below was updated from the
+original Ollama design to the shipped one.
 
-RAG infrastructure is built and ships dormant:
+RAG infrastructure is built and wired; only the local venv ships uninstalled:
 - **Embedding**: **fastembed** (ONNX, CPU, fully offline, no daemon), model
   `BAAI/bge-small-en-v1.5` (384-dim), via `scripts/rag_embed.py`. No Ollama, no HTTP,
   no network at query time. (The original Ollama/`nomic-embed-text`/768-dim design was
@@ -371,13 +374,13 @@ RAG infrastructure is built and ships dormant:
 - **Vector store**: LanceDB (embedded, serverless), index at `.company/memory/index/`. Derivative of markdown truth, always rebuildable.
 - **Scripts**: `rag_index.py` / `rag_query.py` (+ `rag_embed.py`, `rag_setup.sh`) run
   from the skill/plugin per code-data separation — NOT copied into `.company/`.
-- **Trigger**: Rebuild (a) auto when L1+L2 memory count crosses threshold, OR (b) Chairman manual order. Ships dormant.
+- **Trigger**: the index refresh is wired into `daily-run.sh` (incremental, idempotent, Tony-owned). Activation is surfaced (a) auto when L1+L2 memory count crosses threshold, OR (b) by Chairman manual order; the venv ships uninstalled until then.
 - **Owner**: Tony builds/maintains the index; Tony + Gibby query it (Gibby for semantic dup/contradiction search during VERIFY). Others access through Tony.
 
 **Graceful degradation**: If the RAG venv (fastembed) or LanceDB is unavailable, a clear actionable message to stderr, exit non-zero. No uncaught tracebacks. Falls back to Jaccard / full-text over `.company/memory`.
 
 **Progressive activation**: 
-- **Ships dormant**: not active until the venv is set up and the threshold/order fires.
+- **Logic wired, venv uninstalled at ship**: the pipeline steps run every day, but the semantic path stays on the keyword floor until the venv is set up and the threshold/order fires.
 - **When Chairman orders** or L1/L2 memory crosses threshold: run `scripts/rag_setup.sh` (creates `.company/.rag-venv` with fastembed), then `python3 scripts/rag_index.py --rebuild`.
 
 **Role**: index, not source of truth. Can be rebuilt anytime from markdown. See [references/rag.md](../references/rag.md) for full technical reference.
@@ -399,6 +402,6 @@ RAG infrastructure is built and ships dormant:
 3. **Auto-push reports** — After weekly report generated, auto-notify Chairman or just leave for you to read?
 4. **v1 scope** — First release only Memory/text entropy (L0/L1/L2 + decay + verify), defer Code/Chat entropy to v2?
 
-> Recommendation for v1 focus: `capture → organize → write → verify (loop)` + L0/L1/L2 + decay + real-time/daily triggers. Code/Chat entropy and report automation deferred to later versions. RAG deployed dormant in v2.5 (see §8).
+> Recommendation for v1 focus: `capture → organize → write → verify (loop)` + L0/L1/L2 + decay + real-time/daily triggers. Code/Chat entropy and report automation deferred to later versions. RAG infrastructure landed in v2.5 and is now wired into the pipeline (venv-gated) as of Phase 13 (see §8).
 
 > **Resolved in shipping (kept above as the original design record):** (1) scheduling uses **cron** — `schedule.sh` installs the daily/weekly crontab lines, now namespaced per-project and fleet-aware (Phases 7-8); (2) session boundary + capture use **plugin-native hooks** — declared in `hooks/hooks.json` and auto-loaded on install since v0.1.2, including the `Stop` capture hook (Phase 10, see `references/operations.md`); (3) reports auto-notify via `scripts/notify-status.py`; (4) v1 shipped with Memory/text entropy, with Code/Chat entropy still deferred (see `references/status.md`).

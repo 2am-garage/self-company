@@ -376,7 +376,7 @@ Two tunable constants (Phase 5) keep unattended `--apply` mutation reversible an
 
 ## 8. RAG Tunables (Tony's Domain)
 
-Retrieval-Augmented Generation (RAG) enables semantic search over memory. The index is a derivative of markdown truth; always rebuildable. Ships dormant; activate with `bash .company/scripts/rag_setup.sh install`, which creates a private venv (`.company/.rag-venv`) and installs **LanceDB + fastembed** (local CPU embeddings, no daemon, fully offline). Tony owns building/maintaining the index; Tony and Gibby query it. See `references/rag.md`.
+Retrieval-Augmented Generation (RAG) enables semantic search over memory. The index is a derivative of markdown truth; always rebuildable. Wired into the pipeline as of Phase 13 (daily index refresh + ask-time semantic injection), but the local venv ships uninstalled — the semantic path activates once you run `bash .company/scripts/rag_setup.sh install`, which creates a private venv (`.company/.rag-venv`) and installs **LanceDB + fastembed** (local CPU embeddings, no daemon, fully offline); until then the company uses the keyword floor. Tony owns building/maintaining the index; Tony and Gibby query it. See `references/rag.md`.
 
 | Constant | Default | Meaning | tunable |
 |---|---|---|---|
@@ -386,12 +386,12 @@ Retrieval-Augmented Generation (RAG) enables semantic search over memory. The in
 
 ### 8.1 Graceful Degradation
 
-RAG ships dormant:
-- RAG backend not installed (no `.company/.rag-venv`) → scripts exit code 2 with an actionable message pointing to `rag_setup.sh install`.
+RAG degrades to the keyword floor when the venv is absent:
+- RAG backend not installed (no `.company/.rag-venv`) → scripts exit code 2 with an actionable message pointing to `rag_setup.sh install`; the ask-time hook falls back to keyword injection.
 - Never crash the company; never raise uncaught tracebacks.
 - `rag_query.py` unavailable → stderr hint fallback: `grep -ri '<keywords>' .company/memory`.
 
 ---
 
-Version: v5 (RAG dormant; §7.7 scheduling cadence + CAPTURE throttle; §7.8 durability: BACKUP_KEEP + OFFLINE_GAP_DAYS; §7.9 fleet: FLEET_AGENT_BUDGET)  
-Last updated: 2026-07-05
+Version: v5 (RAG wired, venv-gated; §7.7 scheduling cadence + CAPTURE throttle; §7.8 durability: BACKUP_KEEP + OFFLINE_GAP_DAYS; §7.9 fleet: FLEET_AGENT_BUDGET)  
+Last updated: 2026-07-07
