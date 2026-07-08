@@ -21,7 +21,7 @@ hardcoded subset). Built with OOP for readability:
 and render it live); the authoritative DATA MODEL is `employee.Employee`
 (identity, capabilities, per-employee memory). There is deliberately ONE class
 named `Employee` — the data model — and the supervisor BRIDGES to it (Member.
-_recall_experience loads it) rather than duplicating it: process-spawning is not a
+_recall_memory loads it) rather than duplicating it: process-spawning is not a
 data-model concern, so the two responsibilities stay separate but the data model
 stays single-sourced.
 
@@ -78,7 +78,7 @@ class Member:
     """The supervisor's ORCHESTRATION view of one company member: how to spawn it
     (demo/real command) and render it live. All members share this capability
     (Chairman: everyone). The authoritative identity/capability/memory model is
-    `employee.Employee` — this class BRIDGES to it (see _recall_experience) rather
+    `employee.Employee` — this class BRIDGES to it (see _recall_memory) rather
     than re-implementing it, so employee.py stays the single data-driven class."""
 
     def __init__(self, emp_id, name=None, role=None, company_dir="."):
