@@ -222,6 +222,25 @@ def compute_content_hash(body: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
+def incremental_up_to_date(prev: Dict[str, Any], content_hash: str,
+                           path_str: str, tier: str) -> bool:
+    """BOB-F1: decide whether an already-indexed memory may be SKIPPED (not
+    re-embedded) on an incremental refresh.
+
+    A row is up to date ONLY when the live file's body hash AND its stored path
+    AND its stored tier all still match the indexed row. Hashing the body alone
+    is insufficient: an L1->L2 promotion MOVES the file (L1-warm ->
+    L2-cold/<cat>) and flips tier L1->L2 while leaving the body byte-identical,
+    so a hash-only check would skip it and leave the index row pointing at the
+    dead L1 path — and both consumers drop any hit whose path isn't a live file,
+    silently dropping the promoted memory from recall. Returning False here forces
+    a re-embed/refresh so path+tier track reality. `prev` is the stored row dict
+    {content_hash, path, tier}. Pure — no deps, unit-testable without a venv."""
+    return (prev.get("content_hash", "") == content_hash
+            and prev.get("path", "") == path_str
+            and prev.get("tier", "") == tier)
+
+
 # ============================================================================
 # EMBEDDING (local fastembed backend — see rag_embed.py)
 # ============================================================================
@@ -249,8 +268,16 @@ def get_or_create_table(db, table_name: str = "memory"):
     Returns the table object.
     """
     try:
-        # Check if table exists
-        tables = db.table_names()
+        # Check if table exists. `list_tables()` is the current LanceDB API;
+        # the older `table_names()` is deprecated (emits a DeprecationWarning in
+        # daily-run logs). NOTE: newer LanceDB returns a `ListTablesResponse`
+        # object (names under `.tables`), NOT a bare list — a naive
+        # `name in db.list_tables()` is always False on it, which would make
+        # get_or_create_table report every existing table as absent and silently
+        # overwrite it on each run (breaking incremental refresh). Extract the
+        # names list defensively so both the object and a plain-list return work.
+        listed = db.list_tables()
+        tables = getattr(listed, "tables", listed)
         if table_name in tables:
             return db.open_table(table_name)
         else:
@@ -419,15 +446,27 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
 
     report["over_threshold"] = report["l1_l2_count"] >= RAG_ENABLE_THRESHOLD
 
-    # Load existing hash map if incremental
-    existing_hashes = {}
+    # Load existing rows if incremental. BOB-F1: the incremental cache keys on
+    # (content_hash, path, tier), NOT content_hash alone. When decay promotes a
+    # memory L1->L2 it MOVES the file (same id, same body) into L2-cold/<cat>/;
+    # the body is unchanged, so a hash-only skip would `continue` and leave the
+    # stored row pointing at the dead L1-warm path with tier: L1 — both consumers
+    # (hook_memory_inject.semantic_top, employee.recall_shared) drop any hit whose
+    # path isn't a live file, so the promoted, highest-value memory silently
+    # vanishes from semantic recall. Tracking path+tier lets us re-embed/refresh
+    # exactly those moved rows while still skipping the common unchanged case.
+    existing_rows = {}
     if not rebuild:
         try:
             db = lancedb.connect(str(index_dir))
             table = get_or_create_table(db)
             if table:
                 for row in table.search().to_list():
-                    existing_hashes[row["id"]] = row.get("content_hash", "")
+                    existing_rows[row["id"]] = {
+                        "content_hash": row.get("content_hash", ""),
+                        "path": row.get("path", ""),
+                        "tier": row.get("tier", ""),
+                    }
         except Exception as e:
             report["warnings"].append(f"Failed to load existing index: {e}")
 
@@ -448,9 +487,15 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         body = mem.get("_body", "")
         content_hash = compute_content_hash(body)
 
-        # Skip if unchanged (incremental mode)
-        if not rebuild and mem["id"] in existing_hashes:
-            if existing_hashes[mem["id"]] == content_hash:
+        # Skip if unchanged (incremental mode). BOB-F1: "unchanged" means body
+        # hash AND stored path AND stored tier all still match the live file. A
+        # promotion move changes path (L1-warm -> L2-cold/<cat>) and tier
+        # (L1 -> L2) while leaving the body identical — such a row must NOT be
+        # skipped; it is re-embedded below so its stored path/tier track reality
+        # (upsert_rows deletes-then-adds by id, so the stale row is replaced).
+        if not rebuild and mem["id"] in existing_rows:
+            if incremental_up_to_date(existing_rows[mem["id"]], content_hash,
+                                      str(path), mem["tier"]):
                 report["skipped_unchanged"] += 1
                 continue
 

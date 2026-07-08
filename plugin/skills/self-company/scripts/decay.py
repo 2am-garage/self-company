@@ -675,7 +675,37 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                 # invalidated, even if last_reinforced is much older.
                 reap_candidates = [d for d in (parse_date(mem.get("last_reinforced")),
                                                parse_date(mem.get("invalid_at"))) if d]
-                reap_last = max(reap_candidates) if reap_candidates else None
+                if reap_candidates:
+                    reap_last = max(reap_candidates)
+                else:
+                    # C2 (BOB-F5): a tombstone carrying NEITHER last_reinforced
+                    # nor invalid_at previously stayed `keep` forever — no anchor,
+                    # so the grace clock never started. Fall back to `created`
+                    # first, then the file's mtime, so a dateless
+                    # archived/absorbed stub still ages out and gets reaped.
+                    # `created` is preferred because it is round-tripped in the
+                    # frontmatter and therefore SURVIVES the keep-pass rewrite
+                    # (a kept within-grace tombstone is re-serialized every
+                    # --apply run, bumping mtime to ~now).
+                    reap_last = parse_date(mem.get("created"))
+                    if reap_last is None:
+                        try:
+                            reap_last = datetime.fromtimestamp(path.stat().st_mtime)
+                        except Exception:
+                            reap_last = None
+                        # BOB-F5 must-fix: mtime is the ONLY anchor that is NOT
+                        # stable across runs — the keep-pass rewrite below bumps
+                        # it to ~now each --apply, which would reset reap_age to
+                        # ≈the daily gap every run and mean a pure-mtime anchor
+                        # NEVER crosses grace (reaps never). Self-heal on first
+                        # encounter: STAMP the mtime date into `invalid_at` so
+                        # subsequent runs read a fixed frontmatter anchor (exactly
+                        # the stability `created` already gives). The keep-pass
+                        # persists mem here; on --apply this fires once then the
+                        # anchor is permanent. (`created` needs no stamp — it is
+                        # already a stable frontmatter field.)
+                        if reap_last is not None and not mem.get("invalid_at"):
+                            mem["invalid_at"] = reap_last.strftime("%Y-%m-%d")
                 if reap_last is not None:
                     reap_age = (now - reap_last).total_seconds() / (24 * 3600)
                     if reap_age > reap_grace_days:
