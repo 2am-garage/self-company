@@ -12,10 +12,18 @@ parent of the process tree. It is ephemeral: it exists only while work runs.
 Every employee has this capability (discovered from org/employees/, not a
 hardcoded subset). Built with OOP for readability:
 
-    Employee   — one member; knows how to build its run command (real or demo)
+    Member     — one member; knows how to build its run command (real or demo)
     Worker     — one running employee process; parses its live '@status' stream
     Supervisor — spawns workers, multiplexes their streams, drives the renderer
     LiveTree   — renders the live status; repaints on a TTY, streams a feed if not
+
+`Member` is the supervisor's ORCHESTRATION view of a company member (how to spawn
+and render it live); the authoritative DATA MODEL is `employee.Employee`
+(identity, capabilities, per-employee memory). There is deliberately ONE class
+named `Employee` — the data model — and the supervisor BRIDGES to it (Member.
+_recall_experience loads it) rather than duplicating it: process-spawning is not a
+data-model concern, so the two responsibilities stay separate but the data model
+stays single-sourced.
 
 Status protocol: a worker prints lines beginning with '@status <phase>' as it
 works ('@status planning', '@status done'). Everything else is treated as a log
@@ -65,8 +73,12 @@ ROLE_HINTS = {
 ORDER = ["elon", "phoebe", "tony", "gibby", "bob", "july", "tom"]
 
 
-class Employee:
-    """One company member. All members share this capability (Chairman: everyone)."""
+class Member:
+    """The supervisor's ORCHESTRATION view of one company member: how to spawn it
+    (demo/real command) and render it live. All members share this capability
+    (Chairman: everyone). The authoritative identity/capability/memory model is
+    `employee.Employee` — this class BRIDGES to it (see _recall_experience) rather
+    than re-implementing it, so employee.py stays the single data-driven class."""
 
     def __init__(self, emp_id, name=None, role=None, company_dir="."):
         self.id = emp_id
@@ -89,9 +101,36 @@ class Employee:
         script = "; ".join(f"echo '@status {p}'; sleep {delay}" for p in phases)
         return ["bash", "-c", script]
 
+    def _recall_experience(self, task):
+        """Phase 18 Item 4 — dispatch-time recall injection (the dormant payoff,
+        now wired). BRIDGE to the employee.py data model: load THIS member's real
+        `Employee` and ask it for a ready-to-prepend "Relevant past experience"
+        block for `task`. We import lazily and bridge (rather than merge the two
+        classes) because process-spawning is not a data-model concern — employee.py
+        stays the single data-driven class that owns identity/capabilities/memory.
+
+        recall_context() is internally gated + budget-capped + timeout-degrading:
+        a `flat`-mode employee gets "" (NO read at all), and a `rag` employee with
+        no venv / empty index / timeout / zero hits also gets "" — so dispatch is
+        never blocked and never fails on recall. The extra try/except here only
+        guards the import itself; recall_context never raises."""
+        try:
+            from employee import Employee as EmployeeModel
+        except Exception:
+            return ""
+        try:
+            return EmployeeModel.load(self.id, self.company_dir).recall_context(task)
+        except Exception:
+            return ""
+
     def real_command(self, task, model="claude-sonnet-4-6"):
         """A real headless agent, primed with this employee's role and the task,
-        told to emit @status markers so the supervisor can stream live phases."""
+        told to emit @status markers so the supervisor can stream live phases.
+
+        Before dispatch, inject this employee's OWN relevant past experience
+        (Phase 18 Item 4): for a `rag`-mode employee whose memory store has hits,
+        the recalled block is prepended into the prompt slice; a `flat`-mode
+        employee (bob/gibby/tom) injects NOTHING (recall_context returns "")."""
         prompt = (
             f"You are {self.name} ({self.role}) in the self-company, working "
             f"non-interactively. Task: {task}\n"
@@ -101,6 +140,9 @@ class Employee:
             f"working', '@status reviewing'). Print '@status done' when finished. "
             f"Keep it tight."
         )
+        experience = self._recall_experience(task)
+        if experience:
+            prompt = f"{prompt}\n\n{experience}"
         return ["claude", "-p", prompt, "--model", model]
 
 
@@ -204,7 +246,7 @@ class Supervisor:
 
     def __init__(self, company_dir, renderer=None, event_log=None):
         self.company_dir = company_dir
-        self.roster = Employee.roster(company_dir)
+        self.roster = Member.roster(company_dir)
         self.by_id = {e.id: e for e in self.roster}
         self.renderer = renderer if renderer is not None else LiveTree(self.roster)
         self.event_log = event_log

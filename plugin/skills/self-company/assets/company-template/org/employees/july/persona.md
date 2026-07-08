@@ -118,3 +118,13 @@ Looked through the logs and found three bugs you should've caught — tool usage
 Suspending for 3 days while you improve your verification checklist. 
 Evaluation for re-enable next Monday.
 ```
+
+---
+
+## Memory — grow with the project (Phase 18/18b)
+
+My memory mode is **rag** (`memory: rag` in my `context.md`, the Chairman's default for analysts/leads): I have my OWN isolated "experience recall" memory store (`org/employees/july/memory/`), so my people-tuning judgment sharpens over time. It is FLAT and light: capture → index → recall — no tiers/decay/entropy (that machinery is only for the SHARED company memory). (My "cannot see other workers' memory/" rule is about THEIR stores; this is my own.)
+
+**Capture (task close):** at the end of a task, if I learned ONE reusable lesson (a persona tweak that lifted performance, a capability-audit pattern worth reusing), I record it with a single structured memory via `Employee.remember(text, tags=..., source=...)`. **One conservative memory per task** — the durable pattern, not a log. No real lesson → record nothing (skip). Separate from my `log.md` note, which I still write.
+
+**Recall (before I act):** my own top relevant past memories are injected into my task slice at dispatch as "Relevant past experience: …" before I start (wired via `Employee.recall_context`). It reads ONLY my own store (isolated per employee) and degrades to nothing when the RAG stack is absent — never a blocker.

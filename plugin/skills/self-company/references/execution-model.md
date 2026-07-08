@@ -175,7 +175,10 @@ on `rag_memory_enabled` — a `flat` employee no-ops every one of them):
 **Recall at dispatch (the payoff, now wired).** Before a `rag` worker acts, the
 orchestration tier calls `Employee.load(name, company).recall_context(<task
 brief>)` and prepends the returned block to the worker's prompt slice (alongside
-persona + reads-slice + brief, §2). Because the worker prompt is assembled by the
+persona + reads-slice + brief, §2). The concrete call site is
+`supervisor.py` — `Member.real_command()` (the live dispatcher that builds each
+worker's `claude -p` prompt) bridges to the data model and injects the recalled
+block when it is non-empty. Because the worker prompt is assembled by the
 orchestration tier itself (the Agent/Task dispatch in §4), `recall_context()` **is**
 that wiring point — one call, config-gated, with the whole ask-time injection
 discipline (`hook_memory_inject`) baked in: tight timeout, capped size, and a
