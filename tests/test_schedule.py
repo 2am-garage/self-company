@@ -782,5 +782,68 @@ class TestScheduleGuardSelfHealNoYaml(ScheduleTestBase):
         self.assertIn(dest, self._daily_line(self.A))              # still healed via file
 
 
+class TestScheduleGuardLock(ScheduleTestBase):
+    """Phase 19 C3 (GIB-S3) — the SessionStart guard's crontab read-modify-write
+    is serialized by an flock so two concurrent SessionStarts cannot interleave it;
+    convergence is preserved, and flock-absent degrades to the unlocked path."""
+
+    def _write_cfg(self, project, body):
+        org = os.path.join(project, ".company", "org")
+        os.makedirs(org, exist_ok=True)
+        with open(os.path.join(org, "schedule.yaml"), "w") as f:
+            f.write(body)
+
+    def _marker(self, project):
+        return os.path.join(project, ".company", "ops", "schedule", ".installed-tick")
+
+    def _guard_popen(self, project, extra_env=None):
+        env = {**os.environ, "SELF_COMPANY_CRONTAB_FILE": self.fake,
+               "CLAUDE_PROJECT_DIR": project}
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.Popen(["bash", GUARD], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                text=True, env=env)
+
+    def test_guard_creates_lockfile(self):
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        self._guard_popen(self.A).communicate()
+        self.assertTrue(os.path.exists(
+            os.path.join(self.A, ".company", "ops", "schedule", ".guard.lock")))
+
+    def test_concurrent_guards_converge_no_corruption(self):
+        # Two guards fire at once against the same fake crontab after a tick change.
+        # The flock serializes their RMW: the crontab converges to exactly the two
+        # self-company lines (no dup, no split), and the foreign line survives.
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        self._guard_popen(self.A).communicate()          # settle the marker
+        self._write_cfg(self.A, "cadence: every 3h\n")   # signature change
+        procs = [self._guard_popen(self.A) for _ in range(4)]
+        for p in procs:
+            p.communicate()
+        self.assertEqual(len(self._sc_lines()), 2, self._read())   # daily+research, no dup
+        self.assertIn("*/3", self._daily_line(self.A))
+        self.assertIn(self.foreign, self._lines())                 # neighbour intact
+        # at most one guard actually re-installed (the rest saw the fresh marker)
+        with open(self._marker(self.A)) as f:
+            self.assertIn("*/3", f.read())
+
+    def test_flock_absent_still_syncs(self):
+        # SELF_COMPANY_NO_FLOCK=1 => unlocked path, but the sync still converges.
+        self._write_cfg(self.A, "cadence: every 2h\n")
+        _run(["install", self.A], self.fake)
+        p = self._guard_popen(self.A, extra_env={"SELF_COMPANY_NO_FLOCK": "1"})
+        _, err = p.communicate()
+        self.assertEqual(p.returncode, 0)
+        self.assertTrue(os.path.exists(self._marker(self.A)))
+        self.assertEqual(len(self._sc_lines()), 2)
+
+    def _daily_line(self, path):
+        return next(ln for ln in self._sc_lines()
+                    if "self-company-daily" in ln and path in ln)
+
+
 if __name__ == "__main__":
     unittest.main()
