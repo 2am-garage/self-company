@@ -8,7 +8,8 @@ memory, so re-observing the same thing creates near-duplicates and nothing ever
 reaches the rc>=2 promotion gate. This closes that gap: when a new L0 memory is
 semantically the SAME as an existing memory (cosine >= threshold), it ABSORBS the
 L0 into the canonical one (reinforce_count++, last_reinforced=today, merge sources)
-and removes the L0 duplicate — so memories mature L0 -> L1 -> L2.
+and TOMBSTONES the L0 duplicate (status: absorbed + invalid_at, reaped by decay
+after a grace window — recoverable until then) — so memories mature L0 -> L1 -> L2.
 
 CONSERVATIVE BY DESIGN:
 - The absorbed entry is ALWAYS an L0 (we never delete L1/L2).
@@ -180,11 +181,12 @@ def _session_ids(items):
 
 
 def apply_reinforcement(canon_mem, absorbed_mem, today):
-    """Merge absorbed's sources into canonical, update last_reinforced, delete
-    the absorbed file. Phase 5 Item 1 (N1): rc bumps at most once per DISTINCT
-    session id — the merge increments reinforce_count only when the absorbed
-    memory contributes at least one session id the canonical didn't already
-    have (same-session near-duplicates consolidate without inflating the
+    """Merge absorbed's sources into canonical, update last_reinforced, and
+    TOMBSTONE the absorbed file (status: absorbed + invalid_at) — no longer a
+    hard delete (Item 2 / BOB-F2). Phase 5 Item 1 (N1): rc bumps at most once
+    per DISTINCT session id — the merge increments reinforce_count only when the
+    absorbed memory contributes at least one session id the canonical didn't
+    already have (same-session near-duplicates consolidate without inflating the
     cross-session recurrence signal the promotion gates trust)."""
     lines = canon_mem["text"].split("\n")
     fm, close = parse_frontmatter(canon_mem["text"])
@@ -201,16 +203,76 @@ def apply_reinforcement(canon_mem, absorbed_mem, today):
         rc = 1
     if adds_new_session:
         rc += 1
+    # C1 (BOB-F3): rewrite EXISTING frontmatter lines in place, but track which
+    # of the three mutated keys were present. The old loop only rewrote existing
+    # lines, so a canonical LACKING `reinforce_count` (or last_reinforced /
+    # sources) silently dropped the update — the rc bump vanished and the memory
+    # never reached the rc>=2 promotion gate. Any key that was absent is inserted
+    # just before the closing fence below.
+    seen_keys = set()
     for i in range(1, close):
         key = lines[i].split(":", 1)[0].strip() if ":" in lines[i] else ""
         if key == "reinforce_count":
             lines[i] = f"reinforce_count: {rc}"
+            seen_keys.add("reinforce_count")
         elif key == "last_reinforced":
             lines[i] = f"last_reinforced: {today}"
+            seen_keys.add("last_reinforced")
         elif key == "sources":
             lines[i] = "sources: [" + ", ".join(new_sources) + "]"
+            seen_keys.add("sources")
+    inserts = []
+    if "reinforce_count" not in seen_keys:
+        inserts.append(f"reinforce_count: {rc}")
+    if "last_reinforced" not in seen_keys:
+        inserts.append(f"last_reinforced: {today}")
+    if "sources" not in seen_keys:
+        inserts.append("sources: [" + ", ".join(new_sources) + "]")
+    if inserts:
+        lines[close:close] = inserts   # insert before the closing fence
     Path(canon_mem["path"]).write_text("\n".join(lines), encoding="utf-8")
-    Path(absorbed_mem["path"]).unlink()
+    _tombstone_absorbed(absorbed_mem, today)
+
+
+def _tombstone_absorbed(absorbed_mem, today):
+    """Item 2 (BOB-F2): a merged-away duplicate is TOMBSTONED, not hard-deleted.
+
+    Rewrite the absorbed L0's frontmatter to `status: absorbed` +
+    `invalid_at: <today>` (inserting either key when absent) and leave the file
+    on disk with its body verbatim. The shared tombstone vocabulary already
+    excludes `absorbed` from every active scan (recall/injection/reinforce), and
+    decay's grace-windowed reap physically removes it later — activating the
+    documented recovery window (a false-positive dedup on paraphrased-but-distinct
+    facts is recoverable until the reap) and the previously-dead `absorbed` reap
+    branch. Only ever called on an L0 (plan_reinforcements guarantees absorbed is
+    L0), so no L1/L2 file is ever tombstoned."""
+    text = absorbed_mem.get("text")
+    if text is None:
+        text = Path(absorbed_mem["path"]).read_text(encoding="utf-8")
+    lines = text.split("\n")
+    _fm, close = parse_frontmatter(text)
+    if close < 0:
+        # Unparseable frontmatter (shouldn't happen — absorbed came from
+        # load_memories, which requires a valid block). Leave the file intact
+        # rather than risk corrupting/orphaning it.
+        return
+    seen = set()
+    for i in range(1, close):
+        key = lines[i].split(":", 1)[0].strip() if ":" in lines[i] else ""
+        if key == "status":
+            lines[i] = "status: absorbed"
+            seen.add("status")
+        elif key == "invalid_at":
+            lines[i] = f"invalid_at: {today}"
+            seen.add("invalid_at")
+    inserts = []
+    if "status" not in seen:
+        inserts.append("status: absorbed")
+    if "invalid_at" not in seen:
+        inserts.append(f"invalid_at: {today}")
+    if inserts:
+        lines[close:close] = inserts   # insert before the closing fence
+    Path(absorbed_mem["path"]).write_text("\n".join(lines), encoding="utf-8")
 
 
 def nearest_pairs(mems, threshold):
