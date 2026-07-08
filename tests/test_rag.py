@@ -148,6 +148,16 @@ class TestPromotionRecallRoundTrip(unittest.TestCase):
              "--index-dir", indexdir],
             capture_output=True, text=True,
             env={**os.environ, "SC_RAG_REEXEC": "1"})
+        # Exit 2 is the documented RAG-backend-unavailable DEGRADE path (LanceDB/
+        # fastembed not importable, or a transient model-load failure under
+        # resource pressure). That is orthogonal to the Item-1 logic under test —
+        # a genuine logic regression surfaces as exit 0 with a wrong row/count,
+        # never exit 2 — so treat it as a skip, not a failure, to keep this
+        # integration test from flaking when the backend can't spin up.
+        if proc.returncode == 2:
+            first_line = ((proc.stderr or "").strip().splitlines() or [""])[0]
+            self.skipTest("RAG backend unavailable at runtime (degrade path): "
+                          + first_line)
         self.assertEqual(proc.returncode, 0,
                          f"index failed: out={proc.stdout} err={proc.stderr}")
         return json.loads(proc.stdout)

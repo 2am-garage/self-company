@@ -233,10 +233,15 @@ class TestApplyDrop(unittest.TestCase):
             self.assertEqual([x["id"] for x in data["actions"]["reaped"]], ["stub"])
             self.assertFalse(os.path.exists(path))
 
-    def test_fully_dateless_tombstone_reaped_via_mtime(self):
-        # C2 (BOB-F5): a stub lacking last_reinforced, invalid_at AND created
-        # falls back to the file's mtime as the grace anchor. Single --apply run
-        # (mtime pinned via os.utime) so the keep-pass rewrite can't bump it.
+    def test_fully_dateless_mtime_stamps_anchor_and_survives_keep_writes(self):
+        # C2 (BOB-F5) must-fix: a stub lacking last_reinforced/invalid_at/created
+        # falls back to mtime. But a within-grace tombstone is classified `keep`
+        # and the keep-pass REWRITES the file every --apply run, bumping mtime to
+        # ~now — so a pure-mtime anchor would reset each run and NEVER cross
+        # grace. This models the REAL multi-run cadence: mtime is pinned old only
+        # once, and every subsequent run's keep-write is allowed to bump it (as
+        # production does). The fix STAMPS invalid_at from the mtime on first
+        # encounter, so the grace clock is thereafter stable and it still reaps.
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "L0-working", "nodate.md")
             os.makedirs(os.path.dirname(path))
@@ -244,32 +249,39 @@ class TestApplyDrop(unittest.TestCase):
                 f.write("---\nid: nodate\ntier: L0\nowner: Tony\n"
                         'sources: ["[s#1]"]\nreinforce_count: 1\n'
                         "status: archived\n---\nbody\n")
-            anchor = datetime(2026, 6, 25).timestamp()
-            os.utime(path, (anchor, anchor))
-            # past grace measured from mtime (2026-06-25 + 7d < 2026-07-06)
-            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
-                                     "2026-07-06", "--config",
-                                     "/nonexistent.md", "--apply")
-            self.assertEqual([x["id"] for x in data["actions"]["reaped"]],
-                             ["nodate"])
-            self.assertFalse(os.path.exists(path))
+            os.utime(path, (datetime(2026, 6, 25).timestamp(),) * 2)
 
-    def test_fully_dateless_tombstone_kept_within_grace(self):
-        # Complement: within the mtime-anchored grace window it stays put.
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "L0-working", "nodate.md")
-            os.makedirs(os.path.dirname(path))
-            with open(path, "w") as f:
-                f.write("---\nid: nodate\ntier: L0\nowner: Tony\n"
-                        'sources: ["[s#1]"]\nreinforce_count: 1\n'
-                        "status: archived\n---\nbody\n")
-            anchor = datetime(2026, 6, 25).timestamp()
-            os.utime(path, (anchor, anchor))
+            # Run 1 (within grace): NOT reaped; invalid_at stamped from mtime.
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-06-26", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual(data["actions"]["reaped"], [])
+            self.assertTrue(os.path.exists(path))
+            with open(path) as f:
+                self.assertIn("invalid_at: 2026-06-25", f.read())  # anchor persisted
+            # The keep-write bumped the real file mtime to ~now — proving a
+            # pure-mtime anchor would now be worthless. The stamped invalid_at is
+            # what carries the clock forward.
+            self.assertGreater(os.path.getmtime(path),
+                               datetime(2026, 6, 26).timestamp())
+
+            # Run 2 (still within grace by the STAMPED anchor 06-25 + 7d): kept.
             data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
                                      "2026-06-29", "--config",
                                      "/nonexistent.md", "--apply")
             self.assertEqual(data["actions"]["reaped"], [])
             self.assertTrue(os.path.exists(path))
+            with open(path) as f:
+                self.assertIn("invalid_at: 2026-06-25", f.read())  # anchor stable
+
+            # Run 3 (past grace from the stamped anchor, gap <=7d so no damper):
+            # reaped despite mtime having been bumped to ~now by prior runs.
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-07-03", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual([x["id"] for x in data["actions"]["reaped"]],
+                             ["nodate"])
+            self.assertFalse(os.path.exists(path))
 
     def test_apply_preserves_verified_date(self):
         # Regression: decay --apply rewrites frontmatter and must NOT drop the

@@ -256,6 +256,15 @@ def _tombstone_absorbed(absorbed_mem, today):
         # load_memories, which requires a valid block). Leave the file intact
         # rather than risk corrupting/orphaning it.
         return
+    # Defense-in-depth L0-only guard (matches decay's explicit-`if`, not-`assert`
+    # L2-safety doctrine — python3 -O strips asserts). plan_reinforcements
+    # already guarantees `absorbed` is an L0, but NEVER tombstone an L1/L2 here
+    # even if a caller regressed that guarantee: it would retire a warm/cold
+    # memory that decay's reap then deletes past grace. Prefer the file's own
+    # tier; fall back to the passed dict's tier.
+    tier = ((_fm or {}).get("tier") or absorbed_mem.get("tier") or "").strip()
+    if tier in ("L1", "L2"):
+        return
     seen = set()
     for i in range(1, close):
         key = lines[i].split(":", 1)[0].strip() if ":" in lines[i] else ""

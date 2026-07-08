@@ -243,6 +243,25 @@ class TestItem2AbsorbTombstones(unittest.TestCase):
             ids = {m["id"] for m in rm.load_memories(d)}
             self.assertEqual(ids, {"c"})
 
+    def test_l0_guard_refuses_to_tombstone_l1(self):
+        # Defense-in-depth: even if a caller passed an L1/L2 as `absorbed`
+        # (plan_reinforcements never does), _tombstone_absorbed must refuse —
+        # never retire a warm/cold memory that decay's reap would then delete.
+        with tempfile.TemporaryDirectory() as d:
+            ap = os.path.join(d, "warm.md")
+            with open(ap, "w") as f:
+                f.write("---\nid: w\ntier: L1\nowner: Tony\nsources: [\"[A#1]\"]\n"
+                        "created: 2026-06-01\nlast_reinforced: 2026-06-01\n"
+                        "reinforce_count: 2\ndecay_score: 1.0\nstatus: active\n"
+                        "---\nbody w\n")
+            with open(ap) as f:
+                absorbed = {"id": "w", "tier": "L1", "path": ap, "text": f.read()}
+            rm._tombstone_absorbed(absorbed, "2026-06-30")
+            with open(ap) as f:
+                at = f.read()
+            self.assertIn("status: active", at)       # untouched
+            self.assertNotIn("absorbed", at)
+
     def test_existing_status_line_is_overwritten_not_duplicated(self):
         # If the absorbed file already had `status: active`, that line is
         # rewritten in place (not duplicated) and invalid_at inserted.
