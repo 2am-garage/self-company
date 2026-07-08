@@ -117,8 +117,15 @@ actually warrant work, note that and stop.
 EOF
 
 # Detached + time-boxed + recursion-guarded (so the CAPTURE Stop hook no-ops).
+# Item 1 (TOM-2): hard-kill grace. This spawn is DETACHED (nohup … &), so a claude
+# that traps SIGTERM would otherwise survive its budget as an unreaped orphan with
+# nothing watching it. `timeout -k <grace>` SIGKILLs it <grace>s past budget. `-k`
+# is GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
 printf '\n===== trigger %s fired %s =====\n' "$NAME" "$TS" >> "$AGENT_LOG"
-SELF_COMPANY_CAPTURE_ACTIVE=1 nohup timeout "${SELF_COMPANY_TRIGGER_TIMEOUT:-600}" \
+KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
+_tmo=(timeout)
+timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
+SELF_COMPANY_CAPTURE_ACTIVE=1 nohup "${_tmo[@]}" "${SELF_COMPANY_TRIGGER_TIMEOUT:-600}" \
   "$CLAUDE_BIN" -p "$PROMPT" --model "${SELF_COMPANY_TRIGGER_MODEL:-claude-sonnet-4-6}" \
   >>"$AGENT_LOG" 2>&1 &
 echo "[fire-trigger] fired: $NAME -> dispatched (detached, see ops/logs/trigger-$DATE.log)"

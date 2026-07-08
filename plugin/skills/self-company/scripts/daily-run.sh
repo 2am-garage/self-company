@@ -22,14 +22,22 @@ set -uo pipefail   # not -e: a failing optional step must not abort the run
 PROJECT_DIR="${SELF_COMPANY_PROJECT_DIR:-$PWD}"
 RUN_AGENT=true
 DRY_RUN=false
+# Item 2: cron vs manual governs the flock mode on the memory-mutating core.
+# CRON (--cron flag or SELF_COMPANY_CRON=1): non-blocking lock, skip-with-log if a
+# run is already in flight (no pile-up). MANUAL (default): block-and-wait so the
+# human's run still happens. The scheduled cron line may pass --cron; interactive
+# invocations omit it and get the safe block-and-wait behaviour.
+IS_CRON=0
 for a in "$@"; do
   case "$a" in
     --no-agent) RUN_AGENT=false ;;
     --dry-run)  DRY_RUN=true; RUN_AGENT=false ;;
+    --cron)     IS_CRON=1 ;;
     -*)         : ;;                       # ignore unknown flags
     *)          PROJECT_DIR="$a" ;;        # positional = project dir
   esac
 done
+[[ "${SELF_COMPANY_CRON:-}" == "1" ]] && IS_CRON=1
 
 COMPANY="$PROJECT_DIR/.company"
 # Resolve the scripts dir (code/data separation): run the CANONICAL scripts, not a
@@ -93,6 +101,42 @@ _run_decay=1;     _should_run decay     || _run_decay=0
 _run_verify=1;    _should_run verify    || _run_verify=0
 _run_entropy=1;   _should_run entropy   || _run_entropy=0
 _run_rag_index=1; _should_run rag_index || _run_rag_index=0
+
+# --- Item 2: mutual exclusion on the memory-mutating core --------------------
+# A manual daily-run racing the cron tick — or an Item-1 orphan overlapping the
+# next tick — would run reinforce/decay/verify --apply concurrently against the
+# same .company/memory: double-processing, lost tombstones, interleaved rewrites.
+# The pre-apply tar snapshot bounds data LOSS, not CORRUPTION. Serialize the whole
+# mutating pass (backup -> reinforce -> decay -> verify -> entropy -> rag-index ->
+# agent) on .company/ops/.daily.lock, held for the life of this process (the fd
+# stays open until exit, releasing the lock automatically):
+#   * CRON  => flock -n : if a run already holds it, SKIP this tick with a log line.
+#   * MANUAL => flock (block) : wait for the in-flight run, then run.
+# flock absent (or SELF_COMPANY_NO_FLOCK=1) => ONE warning, run unserialized as
+# today — never fail the cron. Dry-run mutates nothing, so it never locks.
+LOCK_HELD=0
+if ! $DRY_RUN; then
+  if command -v flock >/dev/null 2>&1 && [[ "${SELF_COMPANY_NO_FLOCK:-}" != "1" ]]; then
+    LOCKFILE="$COMPANY/ops/.daily.lock"
+    mkdir -p "$COMPANY/ops" 2>/dev/null || true
+    if exec {LOCK_FD}>"$LOCKFILE" 2>/dev/null; then
+      if (( IS_CRON )); then
+        if flock -n "$LOCK_FD"; then
+          LOCK_HELD=1
+        else
+          echo "- lock: another daily-run holds .company/ops/.daily.lock — cron tick SKIPPED (no pile-up); the in-flight run applies this maintenance" >> "$LOG"
+          echo "[daily-run] skipped ($DATE) — mutating core locked by a concurrent run"
+          exit 0
+        fi
+      else
+        flock "$LOCK_FD"   # manual: block until the in-flight run releases, then run
+        LOCK_HELD=1
+      fi
+    fi
+  else
+    echo "- lock: flock unavailable — mutating core runs UNSERIALIZED (concurrent runs could race .company/memory); install util-linux to enable mutual exclusion" >> "$LOG"
+  fi
+fi
 
 # --- 1+2. deterministic core: reinforce + decay + verify + entropy ----------
 # Capture each script's JSON to a temp file, then parse via a heredoc that reads
@@ -741,7 +785,17 @@ EOF
     [[ -n "$_cfg_model" ]] || _cfg_model="claude-sonnet-4-6"
     AGENT_MODEL="${SELF_COMPANY_DAILY_MODEL:-$_cfg_model}"
     printf '\n===== agent run %s =====\n' "$ts" >> "$AGENT_LOG"
-    SELF_COMPANY_CAPTURE_ACTIVE=1 timeout "$AGENT_TIMEOUT" \
+    # Item 1 (TOM-2): hard-kill grace. A lone SIGTERM leaves a claude that traps/
+    # delays TERM running as an orphan past its budget; the next tick then spawns
+    # a SECOND agent (observed 2026-07-08: pids 336454/336455). `timeout -k <grace>`
+    # SIGKILLs the child <grace>s after budget, so no orphan survives past
+    # budget+grace. GNU coreutils supports -k; if this platform's timeout does not,
+    # degrade to a plain SIGTERM timeout (today's behaviour). Grace is env-tunable
+    # (tests use 1s); default 30s.
+    KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
+    _tmo=(timeout)
+    timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
+    SELF_COMPANY_CAPTURE_ACTIVE=1 "${_tmo[@]}" "$AGENT_TIMEOUT" \
          "$CLAUDE_BIN" -p "$PROMPT" --model "$AGENT_MODEL" \
          ${STREAM_ARGS[@]+"${STREAM_ARGS[@]}"} \
          >>"$AGENT_LOG" 2>&1
@@ -750,14 +804,17 @@ EOF
     if (( rc == 0 )); then
       rm -f "$FAIL_MARKER"   # B3: success => auth healthy + streak recovered, reset
       echo "- agent (consolidate/verify): ok [run $((RUNS + 1))/$CAP; stdout in agent-$DATE.log]" >> "$LOG"
-    elif (( rc == 124 )); then
+    elif (( rc == 124 || rc == 137 )); then
       # B3: explicit, machine-readable timeout trail — both in the audit log
       # (below the partial stream) and in the daily log (report.py keys on
       # "TIMEOUT" to render an honest `fail` verdict, never a green row).
+      # Item 1 (TOM-2): rc 124 = SIGTERM at budget; rc 137 (128+9) = the `-k` grace
+      # SIGKILLed a claude that ignored TERM — BOTH are a hard timeout, not a
+      # generic failure. Reporting the real rc keeps the trail honest.
       echo "agent: TIMEOUT after ${AGENT_TIMEOUT}s (partial output above)" >> "$AGENT_LOG"
       fc="$(_read_fail_count)"; fc=$((fc + 1))
       _write_fail_marker "$fc" agent
-      echo "- agent: TIMEOUT after ${AGENT_TIMEOUT}s (rc 124) [run $((RUNS + 1))/$CAP; streak $fc] — partial output in agent-$DATE.log; deterministic maintenance still applied" >> "$LOG"
+      echo "- agent: TIMEOUT after ${AGENT_TIMEOUT}s (rc $rc) [run $((RUNS + 1))/$CAP; streak $fc] — partial output in agent-$DATE.log; deterministic maintenance still applied" >> "$LOG"
     else
       fc="$(_read_fail_count)"; fc=$((fc + 1))   # B3: an agent failure also grows the streak
       _write_fail_marker "$fc" agent

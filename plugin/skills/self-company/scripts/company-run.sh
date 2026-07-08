@@ -74,7 +74,13 @@ per-employee assignment. Employees available: $roster. Task: "$TASK".
 Output ONLY a single JSON object mapping employee id -> a one-line subtask, e.g.
 {"bob":"...", "gibby":"verify Bob's change"}. No prose, JSON only.
 EOF
-    raw="$(SELF_COMPANY_CAPTURE_ACTIVE=1 timeout 180 "$CLAUDE_BIN" -p "$PPROMPT" \
+    # Item 1 (TOM-2): hard-kill grace on Phoebe's planning spawn too — a claude
+    # that ignores SIGTERM is SIGKILLed <grace>s past budget, no orphan. `-k` is
+    # GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
+    KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
+    _tmo=(timeout)
+    timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
+    raw="$(SELF_COMPANY_CAPTURE_ACTIVE=1 "${_tmo[@]}" 180 "$CLAUDE_BIN" -p "$PPROMPT" \
            --model "${SELF_COMPANY_PLAN_MODEL:-claude-sonnet-4-6}" 2>/dev/null || true)"
     plan_json="$(printf '%s' "$raw" | python3 -c "import sys,re,json
 t=sys.stdin.read()
