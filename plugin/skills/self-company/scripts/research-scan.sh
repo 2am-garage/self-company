@@ -83,7 +83,13 @@ propose fixing a problem that doesn't reproduce). Then write THREE outputs:
 EOF
 
 printf '\n===== research-scan %s =====\n' "$TS" >> "$LOG"
-SELF_COMPANY_CAPTURE_ACTIVE=1 timeout "${SELF_COMPANY_RESEARCH_TIMEOUT:-900}" \
+# Item 1 (TOM-2): hard-kill grace — a claude that ignores SIGTERM is SIGKILLed
+# <grace>s after budget so no orphan survives into the next scheduled scan.
+# `-k` is GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
+KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
+_tmo=(timeout)
+timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
+SELF_COMPANY_CAPTURE_ACTIVE=1 "${_tmo[@]}" "${SELF_COMPANY_RESEARCH_TIMEOUT:-900}" \
   "$CLAUDE_BIN" -p "$PROMPT" --model "${SELF_COMPANY_RESEARCH_MODEL:-claude-sonnet-4-6}" \
   >>"$LOG" 2>&1
 rc=$?

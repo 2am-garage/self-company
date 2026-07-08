@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -42,7 +43,33 @@ FAIL_MARKER = "ops/auth-fail.marker"   # B3 (Item 4): consecutive agent/auth fai
 # escalation, distinct from the routine ledger. NEW constant, default 2; env
 # override for tests. daily-run.sh writes the streak into FAIL_MARKER; we only READ.
 FAIL_STREAK_ESCALATE = int(os.environ.get("SELF_COMPANY_FAIL_STREAK_ESCALATE", "2"))
+# C2: a run whose agent-<date>.log was written within this many seconds is IN-FLIGHT
+# (the agent is still streaming) — kept in lockstep with report.py. Env-overridable.
+INFLIGHT_WINDOW = int(os.environ.get("SELF_COMPANY_INFLIGHT_WINDOW", "300"))
 RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
+
+
+def _agent_log_fresh(company, ts, now=None):
+    """C2: True if ops/logs/agent-<run-date>.log was modified within INFLIGHT_WINDOW.
+    Mirrors report.py::_agent_log_fresh (the copy keeps notify standalone-stdlib)."""
+    p = Path(company) / "ops" / "logs" / f"agent-{ts.strftime('%Y-%m-%d')}.log"
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return False
+    now = time.time() if now is None else now
+    return (now - mtime) <= INFLIGHT_WINDOW
+
+
+def _mark_inflight(company, blocks):
+    """C2 (REPORT/TOM-5): the MOST-RECENT block only — a prompt-built-but-no-outcome
+    silent death that is still in-flight (fresh agent log) is `running`, not a false
+    `failed`. Applied to the GLOBAL latest block before any `since` filter."""
+    if not blocks:
+        return
+    last = blocks[-1]
+    if last.get("_silent_death") and _agent_log_fresh(company, last["ts"]):
+        last["agent"] = "running"
 
 
 def _parse_ts(s):
@@ -123,7 +150,12 @@ def _classify_agent_line(ln):
 
 
 def collect_runs(company, since):
-    """Return real (non-dry-run) daily-run blocks newer than `since`, parsed."""
+    """Return real (non-dry-run) daily-run blocks newer than `since`, parsed.
+
+    C2: ALL blocks are parsed first so the GLOBAL latest block can be
+    reclassified in-flight (running) before the `since` filter is applied — a
+    still-streaming latest run must never be summarized as a dead agent, even when
+    `since` would otherwise clip it in."""
     logs = sorted((Path(company) / "ops" / "logs").glob("daily-*.md"))
     runs = []
     for f in logs:
@@ -164,12 +196,16 @@ def collect_runs(company, since):
                     block["agent"] = cls
                 i += 1
             # prompt built but NO outcome line: the run died before recording
-            # one (silent death) — honest classification: failed.
+            # one (silent death) — honest classification: failed (C2 may later
+            # reclassify the GLOBAL latest such block to `running` if in-flight).
             if block.pop("_agent_attempted", False) and block["agent"] is None:
                 block["agent"] = "failed"
-            if since is None or ts > since:
-                runs.append(block)
+                block["_silent_death"] = True
+            runs.append(block)                      # collect ALL, filter after in-flight mark
     runs.sort(key=lambda b: b["ts"])
+    _mark_inflight(company, runs)                   # C2: latest silent-death + fresh log -> running
+    if since is not None:
+        runs = [b for b in runs if b["ts"] > since]
     return runs
 
 

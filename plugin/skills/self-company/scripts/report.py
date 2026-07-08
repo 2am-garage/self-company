@@ -40,11 +40,43 @@ Pure stdlib, read-only (except --write).
 """
 
 import argparse
+import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
 RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
+
+# C2: a run whose agent-<date>.log was written within this many seconds is treated
+# as IN-FLIGHT (the agent is still streaming). Env-overridable.
+INFLIGHT_WINDOW = int(os.environ.get("SELF_COMPANY_INFLIGHT_WINDOW", "300"))
+
+
+def _agent_log_fresh(company, ts, now=None):
+    """True if ops/logs/agent-<run-date>.log was modified within INFLIGHT_WINDOW —
+    i.e. an agent is (still) actively streaming to it. Missing/stale => False."""
+    p = Path(company) / "ops" / "logs" / f"agent-{ts.strftime('%Y-%m-%d')}.log"
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return False
+    now = time.time() if now is None else now
+    return (now - mtime) <= INFLIGHT_WINDOW
+
+
+def _mark_inflight(company, rows):
+    """C2 (REPORT/TOM-5): the MOST-RECENT run only. A block with an `agent prompt`
+    line but NO outcome line is a SILENT DEATH by default (classified `failed`).
+    But if it is the latest run AND the agent is still in-flight (its
+    agent-<date>.log is freshly written), it is not dead — render `running`, not a
+    false `fail — agent died`. It self-corrects to the real outcome once the agent
+    writes its outcome line (a genuine death: stale log + no outcome stays fail)."""
+    if not rows:
+        return
+    last = rows[-1]
+    if last.get("_silent_death") and _agent_log_fresh(company, last["ts"]):
+        last["agent"] = "running"
 
 
 def _parse_ts(s):
@@ -128,12 +160,19 @@ def collect(company):
             # classification: failed.
             if r.pop("_agent_attempted", False) and r["agent"] is None:
                 r["agent"] = "failed"
+                r["_silent_death"] = True   # C2: eligible for in-flight reclassification
             rows.append(r)
     rows.sort(key=lambda x: x["ts"])
+    _mark_inflight(company, rows)           # C2: latest silent-death + fresh log -> running
     return rows
 
 
 def verdict(r, prev_entropy):
+    # C2: an in-flight run (latest block, prompt built, agent still streaming) is
+    # neither keep nor fail yet — it is `running`, and self-corrects on the
+    # outcome line. Checked FIRST so a live agent is never rendered `fail`.
+    if r["agent"] == "running":
+        return "running"
     # B3 (Phase 5 Item 3, N4): a run where the agent died (rc!=0), timed out,
     # or was AUTH_FAIL-skipped is a FAILED run — the deterministic half's
     # progress is noted in the description column but can never turn the
@@ -154,9 +193,13 @@ def verdict(r, prev_entropy):
 
 def describe(r):
     bits = []
+    # C2: an in-flight agent leads the description — the deterministic half's
+    # progress follows, but the run is not done, so it is neither keep nor fail.
+    if r["agent"] == "running":
+        bits.append("agent running (in-flight)")
     # B3: agent health leads the description on a red day — the deterministic
     # half's progress follows (reported, but it never greens the verdict).
-    if r["agent"] == "timeout":
+    elif r["agent"] == "timeout":
         bits.append("agent TIMEOUT (partial trail in agent log)")
     elif r["agent"] == "failed":
         bits.append("agent died")

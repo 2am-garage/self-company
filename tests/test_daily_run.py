@@ -10,6 +10,7 @@ hermetic and token-free).
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 
 import _helpers
@@ -605,6 +606,178 @@ class TestDailyRunAgentPrompt(unittest.TestCase):
                 self.assertIn("reason=auth", f.read())
         finally:
             subprocess.run(["rm", "-rf", d])
+
+
+class TestRuntimeReliability(unittest.TestCase):
+    """Phase 19 — Item 1 (hard-kill grace on the agent spawn) + Item 2 (flock
+    mutual exclusion on the memory-mutating core)."""
+
+    # --- Item 1 -------------------------------------------------------------
+    def _fake_claude_ignoring_term(self, d, pidfile):
+        """A fake claude that passes auth, records its pid, then TRAPS SIGTERM and
+        keeps running — exactly the 'claude that won't die on TERM' orphan case."""
+        bindir = os.path.join(d, "fakebin")
+        os.makedirs(bindir, exist_ok=True)
+        p = os.path.join(bindir, "claude")
+        with open(p, "w") as f:
+            f.write('#!/usr/bin/env bash\n'
+                    'if [[ "${1:-}" == "auth" ]]; then echo \'{"loggedIn": true}\'; exit 0; fi\n'
+                    f'echo $$ > "{pidfile}"\n'
+                    "trap '' TERM\n"
+                    'while true; do sleep 0.5; done\n')
+        os.chmod(p, 0o755)
+        return bindir
+
+    def test_agent_orphan_hard_killed_past_budget_no_survivor(self):
+        # Item 1 (TOM-2): a claude that ignores SIGTERM is SIGKILLed <grace>s past
+        # budget — no orphan survives into the next tick (the 336454/336455 repro).
+        d = _fresh_project()
+        try:
+            pidfile = os.path.join(d, "claude.pid")
+            bindir = self._fake_claude_ignoring_term(d, pidfile)
+            env = {"PATH": bindir + os.pathsep + os.environ["PATH"],
+                   "SELF_COMPANY_DAILY_TIMEOUT": "1",
+                   "SELF_COMPANY_TIMEOUT_KILL_AFTER": "1"}
+            start = time.monotonic()
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d], env=env)
+            elapsed = time.monotonic() - start
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(elapsed, 30, "budget+grace must bound the spawn")
+            with open(pidfile) as f:
+                pid = int(f.read().strip())
+            time.sleep(0.5)                       # let the kill settle
+            alive = True
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                alive = False
+            if alive:
+                os.kill(pid, 9)                   # cleanup so we don't leak it
+            self.assertFalse(alive, "orphan survived past budget+grace")
+            # a TERM-ignoring child SIGKILLed by the -k grace exits 137 -> still
+            # classified as a hard TIMEOUT (not a generic failure).
+            self.assertIn("- agent: TIMEOUT after 1s (rc 137)", _read_log(company_of(d)))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    # --- Item 2 -------------------------------------------------------------
+    def _hold_lock(self, company, hold_secs):
+        """Background holder of .company/ops/.daily.lock; drops a `lock.ready`
+        sentinel once it actually owns the lock."""
+        ops = os.path.join(company, "ops")
+        os.makedirs(ops, exist_ok=True)
+        lock = os.path.join(ops, ".daily.lock")
+        ready = os.path.join(company, "lock.ready")
+        script = f'exec 9>"{lock}"; flock 9; : > "{ready}"; sleep {hold_secs}'
+        return subprocess.Popen(["bash", "-c", script])
+
+    def _await_ready(self, company):
+        ready = os.path.join(company, "lock.ready")
+        for _ in range(200):
+            if os.path.exists(ready):
+                return
+            time.sleep(0.02)
+        self.fail("lock holder never acquired the lock")
+
+    def test_cron_skips_when_lock_already_held(self):
+        # Item 2: a cron run that finds the lock held SKIPS this tick (no pile-up)
+        # and does NOT run the mutating pass.
+        d = _fresh_project()
+        holder = None
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-stale", last_reinforced="2026-05-01")  # would decay-drop
+            holder = self._hold_lock(company, 5)
+            self._await_ready(company)
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent", "--cron"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("cron tick SKIPPED", _read_log(company))
+            self.assertIn("skipped", r.stdout)
+            # mutating pass never ran -> the stale memory is untouched (no tombstone)
+            with open(os.path.join(company, "memory", "L0-working", "obs-stale.md")) as f:
+                self.assertNotIn("status: archived", f.read())
+        finally:
+            if holder:
+                holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+    def test_cron_env_flag_also_selects_nonblocking(self):
+        # SELF_COMPANY_CRON=1 is an equivalent seam to --cron.
+        d = _fresh_project()
+        holder = None
+        try:
+            company = os.path.join(d, ".company")
+            holder = self._hold_lock(company, 4)
+            self._await_ready(company)
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"SELF_COMPANY_CRON": "1"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("cron tick SKIPPED", _read_log(company))
+        finally:
+            if holder:
+                holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+    def test_manual_blocks_then_runs_after_lock_releases(self):
+        # Item 2: a MANUAL run (default) waits for the in-flight run, then runs —
+        # the human's run still happens.
+        d = _fresh_project()
+        holder = None
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            holder = self._hold_lock(company, 2)
+            self._await_ready(company)
+            start = time.monotonic()
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])  # manual
+            elapsed = time.monotonic() - start
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertGreaterEqual(elapsed, 1.0, "manual run must have waited on the lock")
+            text = _read_log(company)
+            self.assertNotIn("cron tick SKIPPED", text)
+            self.assertIn("- decay --apply:", text)             # it actually ran the core
+        finally:
+            if holder:
+                holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+    def test_flock_absent_degrades_with_one_warning(self):
+        # Item 2: flock unavailable => ONE warning line, core runs unserialized.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"SELF_COMPANY_NO_FLOCK": "1"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertEqual(text.count("flock unavailable"), 1)
+            self.assertIn("- decay --apply:", text)             # core still runs
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_dry_run_never_locks(self):
+        # Dry-run mutates nothing, so it must never take (or be blocked by) the lock.
+        d = _fresh_project()
+        holder = None
+        try:
+            company = os.path.join(d, ".company")
+            holder = self._hold_lock(company, 5)
+            self._await_ready(company)
+            start = time.monotonic()
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--dry-run"])
+            elapsed = time.monotonic() - start
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(elapsed, 4, "dry-run must not block on a held lock")
+            self.assertNotIn("cron tick SKIPPED", _read_log(company))
+        finally:
+            if holder:
+                holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+
+def company_of(d):
+    return os.path.join(d, ".company")
 
 
 class TestInstallHook(unittest.TestCase):

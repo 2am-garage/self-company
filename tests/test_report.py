@@ -190,6 +190,73 @@ class TestReport(unittest.TestCase):
             self.assertEqual(table[1]["status"], "fail")
             self.assertIn("verify +9", table[1]["desc"])   # reported, not green
 
+    def _company_with(self, d, date, body):
+        logs = os.path.join(d, ".company", "ops", "logs")
+        os.makedirs(logs, exist_ok=True)
+        with open(os.path.join(logs, f"daily-{date}.md"), "w") as f:
+            f.write(body)
+        return os.path.join(d, ".company")
+
+    def _touch_agent_log(self, company, date, age_secs=0):
+        import time
+        logs = os.path.join(company, "ops", "logs")
+        os.makedirs(logs, exist_ok=True)
+        p = os.path.join(logs, f"agent-{date}.log")
+        with open(p, "w") as f:
+            f.write("===== agent run =====\nstream event\n")
+        if age_secs:
+            old = time.time() - age_secs
+            os.utime(p, (old, old))
+
+    _INFLIGHT = (
+        "## Daily run 2026-06-29T06:07:01\n"
+        "- decay --apply: scanned 10 | drop 3 | demote 0 | archive 0 | upgrade-candidates 0\n"
+        "- entropy 0.02 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.02) over 10 memories\n"
+        "- agent prompt: measured backlog injected (scored pairs + review candidates from this run)\n"
+    )
+
+    def test_inflight_latest_renders_running_not_fail(self):
+        # C2 (REPORT/TOM-5): latest run = prompt built, NO outcome line, agent log
+        # FRESH -> `running`, never a false `fail — agent died`.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-29", self._INFLIGHT)
+            self._touch_agent_log(c, "2026-06-29")               # fresh: agent streaming
+            table = rp.build(rp.collect(c))
+            self.assertEqual(table[-1]["status"], "running")
+            self.assertIn("in-flight", table[-1]["desc"])
+
+    def test_stale_log_silent_death_still_fails(self):
+        # A genuine death: same shape but a STALE agent log -> fail, not running.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-29", self._INFLIGHT)
+            self._touch_agent_log(c, "2026-06-29", age_secs=99999)
+            table = rp.build(rp.collect(c))
+            self.assertEqual(table[-1]["status"], "fail")
+            self.assertIn("agent died", table[-1]["desc"])
+
+    def test_no_agent_log_silent_death_still_fails(self):
+        # No agent log at all (the existing collect() behaviour) -> fail.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-29", self._INFLIGHT)
+            table = rp.build(rp.collect(c))
+            self.assertEqual(table[-1]["status"], "fail")
+
+    def test_inflight_only_reclassifies_the_latest_block(self):
+        # An OLDER silent-death block stays `fail` even with a fresh log — only the
+        # most-recent run is eligible for `running`.
+        body = self._INFLIGHT + (
+            "\n## Daily run 2026-06-29T12:07:01\n"
+            "- decay --apply: scanned 10 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+            "- entropy 0.02 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.02) over 10 memories\n"
+            "- agent (consolidate/verify): ok\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-29", body)
+            self._touch_agent_log(c, "2026-06-29")               # fresh, but latest is `ok`
+            table = rp.build(rp.collect(c))
+            self.assertEqual(table[0]["status"], "fail")         # older silent death: still fail
+            self.assertNotEqual(table[1]["status"], "running")   # latest is a real outcome
+
     def test_write_creates_ledger(self):
         with tempfile.TemporaryDirectory() as d:
             c = _company(d)

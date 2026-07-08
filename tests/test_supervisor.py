@@ -11,6 +11,7 @@ import importlib.util
 import io
 import os
 import tempfile
+import time
 import unittest
 
 import _helpers
@@ -319,6 +320,100 @@ class TestSharedMemoryAtDispatch(unittest.TestCase):
             prompt = self._prompt(elon, "anything")               # must not raise
             self.assertNotIn("Relevant company memory", prompt)
             self.assertIn("@status", prompt)                      # prompt intact
+
+
+class TestDispatchBudget(unittest.TestCase):
+    """Phase 19 Item 3 (TOM-1) — the live dispatch path is BOUNDED: a worker that
+    never reaches EOF is killed at its wall-clock budget, dispatch returns cleanly,
+    and the session-triggered company-run.sh can never hang."""
+
+    def _company(self, d, ids=("bob",)):
+        base = os.path.join(d, ".company", "org", "employees")
+        for i in ids:
+            os.makedirs(os.path.join(base, i))
+            open(os.path.join(base, i, "persona.md"), "w").close()
+        return os.path.join(d, ".company")
+
+    def test_hung_worker_killed_at_budget_and_dispatch_returns(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            orig = sv.Member.real_command
+            # a worker that emits nothing, never EOFs, and IGNORES SIGTERM
+            sv.Member.real_command = lambda self, task, model="m": [
+                "bash", "-c", "trap '' TERM; while :; do sleep 0.2; done"]
+            os.environ["SELF_COMPANY_DISPATCH_TIMEOUT"] = "1"
+            os.environ["SELF_COMPANY_DISPATCH_KILL_AFTER"] = "1"
+            try:
+                sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
+                t0 = time.monotonic()
+                workers = sup.dispatch({"bob": "hang please"}, demo=False)
+                elapsed = time.monotonic() - t0
+            finally:
+                sv.Member.real_command = orig
+                os.environ.pop("SELF_COMPANY_DISPATCH_TIMEOUT", None)
+                os.environ.pop("SELF_COMPANY_DISPATCH_KILL_AFTER", None)
+            self.assertLess(elapsed, 15, "dispatch must not hang on a stalled worker")
+            self.assertEqual(workers["bob"].status, sv.Status.FAILED)  # killed -> failed
+
+    def test_normal_fast_worker_unaffected(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            orig = sv.Member.real_command
+            sv.Member.real_command = lambda self, task, model="m": [
+                "bash", "-c", "echo '@status done'"]
+            os.environ["SELF_COMPANY_DISPATCH_TIMEOUT"] = "30"
+            try:
+                sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
+                workers = sup.dispatch({"bob": "quick"}, demo=False)
+            finally:
+                sv.Member.real_command = orig
+                os.environ.pop("SELF_COMPANY_DISPATCH_TIMEOUT", None)
+            self.assertEqual(workers["bob"].status, sv.Status.DONE)
+            self.assertFalse(workers["bob"].timed_out)
+
+    def test_wrap_timeout_shape(self):
+        # real workers are spawned under `timeout -k <grace> <budget>` (Item-1 parity)
+        cmd = sv._wrap_timeout(["claude", "-p", "x", "--model", "m"], 42, 7)
+        self.assertEqual(cmd[:4], ["timeout", "-k", "7", "42"])
+        self.assertEqual(cmd[4:], ["claude", "-p", "x", "--model", "m"])
+
+    def test_kill_over_budget_marks_failed_and_reaps(self):
+        emp = sv.Member("bob")
+        w = sv.Worker(emp, "t", ["bash", "-c", "sleep 30"], budget=0.1)
+        w.start()
+        pid = w.proc.pid
+        time.sleep(0.3)
+        self.assertTrue(w.over_budget())
+        w.kill_over_budget()
+        self.assertEqual(w.status, sv.Status.FAILED)
+        self.assertTrue(w.timed_out)
+        alive = True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        if alive:
+            os.kill(pid, 9)
+        self.assertFalse(alive, "kill_over_budget must reap the process")
+
+    def test_real_command_still_bare_claude_at_index_2(self):
+        # Contract preserved: real_command returns the BARE claude cmd with the
+        # prompt at [2] (the timeout wrap happens in dispatch, not here) — the
+        # recall-injection tests depend on cmd[2] being the prompt.
+        m = sv.Member("bob")
+        cmd = m.real_command("do a thing")
+        self.assertEqual(cmd[0], "claude")
+        self.assertEqual(cmd[1], "-p")
+        self.assertIn("do a thing", cmd[2])
+
+    def test_demo_workers_are_unbounded(self):
+        # Demo workers (trusted local echoes) get no budget — never wrapped/killed.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
+            workers = sup.dispatch({"bob": "demo"}, demo=True, demo_delay=0.0)
+            self.assertIsNone(workers["bob"].budget)
+            self.assertEqual(workers["bob"].status, sv.Status.DONE)
 
 
 if __name__ == "__main__":

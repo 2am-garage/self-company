@@ -47,11 +47,47 @@ import enum
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+
+# --- Item 3 (TOM-1): bound the live dispatch path ----------------------------
+# company-run.sh --dispatch -> Supervisor.dispatch loops on select() with no
+# wall-clock deadline, and real_command spawned bare ["claude","-p",…] with no
+# timeout. A stalled worker never reaches EOF, so the supervisor (and the
+# session-triggered company-run.sh) hangs forever — the only unbounded agent
+# spawn in the codebase. We now (a) wrap each real worker in `timeout -k`
+# (Item-1 parity) so a never-EOF child is SIGKILLed past budget, AND (b) enforce
+# an in-process monotonic deadline in the select loop that kills+reaps a worker
+# past budget, so a child that ignores signals still can't wedge the loop.
+def _dispatch_budget():
+    """Per-worker wall-clock budget in seconds (env-overridable; default 600, the
+    daily-agent budget)."""
+    try:
+        return float(os.environ.get("SELF_COMPANY_DISPATCH_TIMEOUT", "600"))
+    except ValueError:
+        return 600.0
+
+
+def _dispatch_kill_after():
+    """SIGKILL grace after budget for the outer `timeout -k` (default 30s)."""
+    try:
+        return float(os.environ.get("SELF_COMPANY_DISPATCH_KILL_AFTER", "30"))
+    except ValueError:
+        return 30.0
+
+
+def _wrap_timeout(cmd, budget, kill_after):
+    """Prepend `timeout -k <kill_after> <budget>` so a real worker is bounded and a
+    child that ignores SIGTERM is SIGKILLed past budget. Degrades to the bare cmd
+    when `timeout` is unavailable (the in-loop deadline still guards the loop)."""
+    if shutil.which("timeout") is None:
+        return cmd
+    return ["timeout", "-k", str(int(kill_after)), str(int(budget)), *cmd]
 
 
 class Status(enum.Enum):
@@ -179,11 +215,13 @@ class Member:
 class Worker:
     """Wraps one running employee process; parses its live @status stream."""
 
-    def __init__(self, employee, task, command, env=None):
+    def __init__(self, employee, task, command, env=None, budget=None):
         self.emp = employee
         self.task = task
         self.command = command
         self.env = env                # None -> inherit; set to guard the memory hook
+        self.budget = budget          # Item 3: wall-clock deadline (s); None -> unbounded
+        self.timed_out = False        # Item 3: killed by the deadline (vs natural exit)
         self.status = Status.IDLE
         self.phase = ""
         self.last = ""
@@ -218,6 +256,38 @@ class Worker:
             self.proc.stdout.close()           # release the pipe fd (many workers)
         if self.status not in (Status.DONE, Status.FAILED):
             self.status = Status.DONE if rc == 0 else Status.FAILED
+        self._t1 = time.monotonic()
+
+    def over_budget(self, now=None):
+        """Item 3: True once this worker has run past its wall-clock budget without
+        finishing. None budget (demo workers) is unbounded."""
+        if self.budget is None or self._t0 is None:
+            return False
+        now = time.monotonic() if now is None else now
+        return (now - self._t0) > self.budget
+
+    def kill_over_budget(self):
+        """Item 3: force-terminate a worker that blew its budget without reaching
+        EOF. SIGKILL (not TERM) — a child that ignored the outer `timeout`'s TERM
+        is exactly why we're here — then reap and mark FAILED so dispatch can
+        return cleanly instead of wedging on a never-EOF pipe."""
+        self.timed_out = True
+        if self.proc:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+            try:
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+            if self.proc.stdout:
+                try:
+                    self.proc.stdout.close()
+                except OSError:
+                    pass
+        self.status = Status.FAILED
+        self.phase = self.phase or "timeout"
         self._t1 = time.monotonic()
 
     def elapsed(self):
@@ -291,16 +361,24 @@ class Supervisor:
 
     def dispatch(self, assignments, demo=False, demo_delay=0.3):
         """assignments: {emp_id: task}. Spawn matching workers, run to completion live."""
+        # Item 3: real workers get a wall-clock budget (demo workers stay unbounded —
+        # they are trusted local echoes). The budget bounds BOTH the outer
+        # `timeout -k` wrap and the in-loop deadline below.
+        budget = _dispatch_budget() if not demo else None
+        kill_after = _dispatch_kill_after()
         workers = {}
         for emp_id, task in assignments.items():
             emp = self.by_id.get(emp_id)
             if emp is None:
                 continue
-            cmd = emp.demo_command(task, demo_delay) if demo else emp.real_command(task)
+            if demo:
+                cmd = emp.demo_command(task, demo_delay)
+            else:
+                cmd = _wrap_timeout(emp.real_command(task), budget, kill_after)
             # Real workers get the double-injection guard env for shared_memory_read
             # employees (elon); demo workers just echo, so they inherit unchanged.
             env = None if demo else emp.worker_env()
-            w = Worker(emp, task, cmd, env=env)
+            w = Worker(emp, task, cmd, env=env, budget=budget)
             w.start()
             workers[emp_id] = w
             self._emit(w, "start")
@@ -322,6 +400,19 @@ class Supervisor:
                         self.renderer.feed(w)
                         self._emit(w, "status")
                 self.renderer.repaint(workers)
+            # Item 3: per-worker wall-clock deadline. A stalled worker that never
+            # reaches EOF (no output, ignores signals) would wedge this loop —
+            # and the session — forever. The 0.2s select timeout means we reach
+            # here even when nothing is ready, so we can kill+reap any worker past
+            # budget, mark it FAILED, and drop it from the active set so dispatch
+            # returns cleanly. A killed worker renders as failed, never hung.
+            for fd in list(active):
+                w = active[fd]
+                if w.over_budget():
+                    w.kill_over_budget()
+                    del active[fd]
+                    self._emit(w, "end")
+                    self.renderer.repaint(workers)
         self.renderer.final(workers)
         return workers
 

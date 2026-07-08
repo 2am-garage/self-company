@@ -108,16 +108,36 @@ RESEARCH_SIG="$(python3 "$CONFIG_PY" --company "$COMPANY" --cron research --minu
 SCRIPTS_NOW="$(bash "$SCHEDULE_SH" scripts-dir "$PROJECT_DIR" 2>/dev/null)" || SCRIPTS_NOW=""
 DESIRED="$DAILY_SIG|$RESEARCH_SIG|$SCRIPTS_NOW"
 
-CURRENT=""
-[ -f "$MARKER" ] && CURRENT="$(cat "$MARKER" 2>/dev/null || true)"
-
-if [ "$DESIRED" != "$CURRENT" ] && [ -f "$SCHEDULE_SH" ]; then
-  # Idempotent: install replaces only THIS project's two lines with the current
-  # tick AND the current scripts dir — so both a tick edit and a plugin update heal.
-  if bash "$SCHEDULE_SH" install "$PROJECT_DIR" >/dev/null 2>&1; then
-    mkdir -p "$MARKER_DIR" 2>/dev/null || true
-    printf '%s\n' "$DESIRED" > "$MARKER" 2>/dev/null || true
-    echo "[schedule-guard] schedule signature changed (tick/research/scripts path) -> re-installed cron for $PROJECT_DIR" >&2
+# C3 (GIB-S3): the compare-read + install + marker-write below is a crontab
+# read-modify-write. Two concurrent SessionStarts (two windows opened at once)
+# could interleave schedule.sh install's RMW and clobber each other's line / a
+# neighbour. The critical section reads the marker AFTER acquiring the lock, so a
+# guard that just synced is seen and we no-op instead of racing. Idempotent: an
+# install replaces only THIS project's two lines with the current tick AND the
+# current scripts dir — so both a tick edit and a plugin update heal.
+_guard_sync() {
+  local CURRENT=""
+  [ -f "$MARKER" ] && CURRENT="$(cat "$MARKER" 2>/dev/null || true)"
+  if [ "$DESIRED" != "$CURRENT" ] && [ -f "$SCHEDULE_SH" ]; then
+    if bash "$SCHEDULE_SH" install "$PROJECT_DIR" >/dev/null 2>&1; then
+      mkdir -p "$MARKER_DIR" 2>/dev/null || true
+      printf '%s\n' "$DESIRED" > "$MARKER" 2>/dev/null || true
+      echo "[schedule-guard] schedule signature changed (tick/research/scripts path) -> re-installed cron for $PROJECT_DIR" >&2
+    fi
   fi
+}
+
+# Serialize the RMW with a subshell-scoped flock (fd 9) — held for the life of the
+# _guard_sync call, released when the subshell exits. Blocking with a short cap so
+# SessionStart never hangs. flock absent (SELF_COMPANY_NO_FLOCK=1 or no util-linux)
+# => run unlocked; convergence still holds (install is idempotent). The subshell
+# form (vs `exec {fd}>`) avoids clobbering the script's own stderr and the
+# non-interactive exec-redirect-failure exit trap.
+mkdir -p "$MARKER_DIR" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1 && [ -z "${SELF_COMPANY_NO_FLOCK:-}" ]; then
+  ( flock -w "${SELF_COMPANY_GUARD_LOCK_WAIT:-10}" 9 2>/dev/null || true
+    _guard_sync ) 9>"$MARKER_DIR/.guard.lock"
+else
+  _guard_sync
 fi
 exit 0
