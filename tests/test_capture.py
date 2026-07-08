@@ -665,5 +665,35 @@ class TestRecentDigestSkipsTombstones(unittest.TestCase):
             self.assertEqual(ids, {"live"})
 
 
+class TestCaptureTimeoutBudget(unittest.TestCase):
+    """Phase 19 C1 (GIB-S2) — the model call must stay BELOW the Stop-hook's 120s
+    budget so Claude Code can't SIGKILL the hook mid-call and orphan the capture."""
+
+    def test_default_timeout_under_hook_budget(self):
+        import inspect
+        default = inspect.signature(ct.run_capture_model).parameters["timeout"].default
+        self.assertLess(default, 120)               # headroom below the 120s hook budget
+        self.assertEqual(ct.CAPTURE_TIMEOUT, 90)
+
+    def test_timeout_actually_passed_to_subprocess(self):
+        captured = {}
+
+        class _P:
+            returncode = 0
+            stdout = "[]"
+
+        real_run = ct.subprocess.run
+        real_which = ct._which
+        ct._which = lambda name: "/usr/bin/claude"
+        ct.subprocess.run = lambda *a, **k: captured.update(k) or _P()
+        try:
+            ct.run_capture_model("prompt")
+        finally:
+            ct.subprocess.run = real_run
+            ct._which = real_which
+        self.assertIn("timeout", captured)
+        self.assertLess(captured["timeout"], 120)
+
+
 if __name__ == "__main__":
     unittest.main()

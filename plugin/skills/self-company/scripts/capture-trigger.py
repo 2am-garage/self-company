@@ -291,11 +291,19 @@ def build_capture_prompt(chairman_lines, existing_ids, today=None,
 # Model call (guarded, degrades to [])
 # ----------------------------------------------------------------------------
 
-def run_capture_model(prompt, model=DEFAULT_MODEL, timeout=120):
+CAPTURE_TIMEOUT = int(os.environ.get("SELF_COMPANY_CAPTURE_TIMEOUT", "90"))
+
+
+def run_capture_model(prompt, model=DEFAULT_MODEL, timeout=CAPTURE_TIMEOUT):
     """
     Run the headless `claude` CLI to perform extraction. Returns a list of
     observation dicts, or [] on any failure. Sets the recursion guard env so the
     child's own Stop hook (if any) no-ops.
+
+    C1 (GIB-S2): the timeout MUST stay below the Stop-hook's 120s budget — at
+    timeout==120 Claude Code could SIGKILL the whole hook before the child
+    returns, orphaning the capture. Default 90s (env-overridable) leaves headroom
+    so the model call completes or degrades to [] inside the hook budget.
     """
     if not _which("claude"):
         return []
