@@ -205,6 +205,47 @@ class TestNotify(unittest.TestCase):
             self.assertIn("agent ok 1/3", s)
             self.assertIn("2 agent-fail", s)
 
+    _INFLIGHT = (
+        "## Daily run 2026-06-26T18:07:01\n"
+        "- decay --apply: scanned 10 | drop 1 | demote 0 | archive 0 | upgrade-candidates 0\n"
+        "- entropy 0.02 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.02) over 10 memories\n"
+        "- agent prompt: measured backlog injected (scored pairs + review candidates from this run)\n"
+    )
+
+    def test_inflight_latest_run_is_running_not_failed(self):
+        # C2: latest block is a silent death but the agent log is FRESH ->
+        # collect_runs classifies it `running`, never a false `failed` (nor an
+        # agent-fail in the summary).
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, self._INFLIGHT)
+            with open(os.path.join(c, "ops", "logs", "agent-2026-06-26.log"), "w") as f:
+                f.write("stream\n")                              # fresh
+            runs = ns.collect_runs(c, None)
+            self.assertEqual(runs[-1]["agent"], "running")
+            self.assertNotIn("agent-fail", ns.summarize(runs))
+
+    def test_inflight_stale_log_still_failed(self):
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, self._INFLIGHT)
+            p = os.path.join(c, "ops", "logs", "agent-2026-06-26.log")
+            with open(p, "w") as f:
+                f.write("stream\n")
+            old = time.time() - 99999
+            os.utime(p, (old, old))                             # stale
+            runs = ns.collect_runs(c, None)
+            self.assertEqual(runs[-1]["agent"], "failed")
+
+    def test_inflight_survives_since_filter(self):
+        # The global-latest in-flight run is reclassified BEFORE the `since` filter,
+        # so even a marker that would clip it in still sees `running`, not failed.
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, self._INFLIGHT)
+            with open(os.path.join(c, "ops", "logs", "agent-2026-06-26.log"), "w") as f:
+                f.write("stream\n")
+            runs = ns.collect_runs(c, ns._parse_ts("2026-06-26T00:00:00"))
+            self.assertEqual(runs[-1]["agent"], "running")
+
     def test_emit_hook_silent_when_no_runs(self):
         with tempfile.TemporaryDirectory() as d:
             logs = os.path.join(d, ".company", "ops", "logs")
