@@ -491,11 +491,20 @@ class TestScheduleGuardSync(ScheduleTestBase):
         return next(ln for ln in self._sc_lines()
                     if "self-company-daily" in ln and path in ln)
 
-    def test_no_schedule_yaml_is_noop(self):
+    def test_no_schedule_yaml_installed_syncs_and_converges(self):
+        # Phase 12b gap fix: a DEFAULT-schedule company (no schedule.yaml) that is
+        # already installed still gets the scripts-dir self-heal. The first guard
+        # run writes the marker (default-derived sig) and converges; a second run
+        # does NOT churn. (Old behaviour short-circuited before this and never
+        # healed a default-schedule cron after a plugin move.)
         _run(["install", self.A], self.fake)
         r = self._run_guard(self.A)
-        self.assertEqual(r.returncode, 0)
-        self.assertFalse(os.path.exists(self._marker(self.A)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(self._marker(self.A)))     # marker written
+        r2 = self._run_guard(self.A)                              # settled -> no churn
+        self.assertEqual(r2.returncode, 0)
+        self.assertNotIn("re-installed", r2.stderr)
+        self.assertEqual(len(self._sc_lines()), 2)               # daily+research, no dup
 
     def test_tick_change_reinstalls_and_writes_marker(self):
         self._write_cfg(self.A, "cadence: every 2h\n")
@@ -660,6 +669,117 @@ class TestScheduleGuardSelfHeal(ScheduleTestBase):
         # ...and now converged: a second run does not churn
         r2 = self._run_guard(self.A)
         self.assertNotIn("re-installed", r2.stderr)
+
+
+class TestScheduleGuardSelfHealNoYaml(ScheduleTestBase):
+    """Phase 12b gap fix — the scripts-dir self-heal must reach a DEFAULT-schedule
+    company (NO org/schedule.yaml) too, since a plugin move breaks its cron path
+    identically to a configured company. This is exactly how self-company's own
+    cron silently broke. All via the fake-crontab seam; the real crontab is never
+    touched. NO schedule.yaml is ever written in this class."""
+
+    REAL_SCRIPTS = os.path.join(REPO, "plugin", "skills", "self-company", "scripts")
+
+    def _marker(self, project):
+        return os.path.join(project, ".company", "ops", "schedule", ".installed-tick")
+
+    def _run_guard(self, project, extra_env=None):
+        env = {**os.environ, "SELF_COMPANY_CRONTAB_FILE": self.fake,
+               "CLAUDE_PROJECT_DIR": project}
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(["bash", GUARD], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, env=env)
+
+    def _daily_line(self, path):
+        return next(ln for ln in self._sc_lines()
+                    if "self-company-daily" in ln and path in ln)
+
+    def _fake_plugin_root(self):
+        y = os.path.join(self.tmp, "newplugin")
+        dest = os.path.join(y, "skills", "self-company", "scripts")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        subprocess.run(["cp", "-r", self.REAL_SCRIPTS, dest], check=True)
+        return y, dest
+
+    # (a) no schedule.yaml + stale installed scripts dir -> re-installs to current
+    def test_no_yaml_stale_path_reinstalls_to_current_dir(self):
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)                          # settle marker at real dir
+        self.assertIn(self.REAL_SCRIPTS, self._daily_line(self.A))
+        # simulate a plugin update: resolver now points at Y (no yaml written)
+        y, dest = self._fake_plugin_root()
+        r = self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(dest, self._daily_line(self.A))               # healed to Y
+        self.assertNotIn(self.REAL_SCRIPTS + "/daily-run.sh", self._daily_line(self.A))
+        self.assertEqual(len(self._sc_lines()), 2)                 # exactly one pair
+        self.assertIn(self.foreign, self._lines())                 # neighbour intact
+        with open(self._marker(self.A)) as f:
+            self.assertIn(dest, f.read())                          # marker healed
+
+    # (b) no schedule.yaml + already-correct path -> no churn (idempotent)
+    def test_no_yaml_correct_path_no_churn(self):
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)                          # first run heals + marks
+        r = self._run_guard(self.A)                      # nothing changed
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("re-installed", r.stderr)
+        self.assertEqual(len(self._sc_lines()), 2)
+
+    # (b') the self-heal is one-shot: after healing to Y, a second run at Y no-ops
+    def test_no_yaml_self_heal_is_one_shot(self):
+        _run(["install", self.A], self.fake)
+        self._run_guard(self.A)
+        y, dest = self._fake_plugin_root()
+        self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})   # heals
+        r = self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("re-installed", r.stderr)
+        self.assertEqual(len(self._sc_lines()), 2)
+
+    # (c) uninstalled project (no yaml) -> guard never auto-installs
+    def test_no_yaml_uninstalled_project_not_auto_installed(self):
+        y, dest = self._fake_plugin_root()
+        r = self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._sc_lines(), [])                     # nothing installed
+        self.assertFalse(os.path.exists(self._marker(self.A)))
+        self.assertIn(self.foreign, self._lines())                 # neighbour intact
+
+    # foreign / other-company lines are never disturbed by a no-yaml self-heal
+    def test_no_yaml_other_company_untouched(self):
+        _run(["install", self.A], self.fake)
+        _run(["install", self.B], self.fake)
+        self._run_guard(self.A)
+        y, dest = self._fake_plugin_root()
+        self._run_guard(self.A, extra_env={"CLAUDE_PLUGIN_ROOT": y})   # heal only A
+        # B's daily line is untouched (still at the real dir), foreign intact
+        b_daily = next(ln for ln in self._sc_lines()
+                       if "self-company-daily" in ln and self.B in ln)
+        self.assertIn(self.REAL_SCRIPTS, b_daily)
+        self.assertIn(self.foreign, self._lines())
+
+    # (d) the REAL crontab binary is never invoked while the file seam is active
+    def test_no_yaml_real_crontab_never_invoked(self):
+        _run(["install", self.A], self.fake)
+        # A fake `crontab` on PATH that trips a sentinel if it is ever executed.
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        tripwire = os.path.join(self.tmp, "REAL_CRONTAB_TOUCHED")
+        shim = os.path.join(bindir, "crontab")
+        with open(shim, "w") as f:
+            f.write("#!/usr/bin/env bash\ntouch '%s'\nexit 0\n" % tripwire)
+        os.chmod(shim, 0o755)
+        y, dest = self._fake_plugin_root()
+        r = self._run_guard(self.A, extra_env={
+            "CLAUDE_PLUGIN_ROOT": y,
+            "PATH": bindir + os.pathsep + os.environ.get("PATH", ""),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(tripwire),
+                         "guard shelled the real crontab binary despite the file seam")
+        self.assertIn(dest, self._daily_line(self.A))              # still healed via file
 
 
 if __name__ == "__main__":

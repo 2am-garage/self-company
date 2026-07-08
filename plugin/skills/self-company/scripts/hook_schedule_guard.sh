@@ -3,12 +3,17 @@
 # hook_schedule_guard.sh — SessionStart guard for org/schedule.yaml (Phase 12, I4).
 #
 # Plugin hooks fire in EVERY repo the Chairman opens, so this no-ops unless THIS
-# project is a company (.company/ present). Then, ONLY if a schedule.yaml exists:
+# project is a company (.company/ present) AND is ALREADY scheduled. Then:
 #
-#   1. VALIDATE (Layer B). Run schedule_validator.py. An invalid config is
-#      NON-BLOCKING: print the violations as a warning and exit 0. daily-run.sh /
-#      schedule.sh fall back to defaults on their own — we must never fail the
-#      session and never install a mis-configured tick.
+#   1. VALIDATE (Layer B) — ONLY when a schedule.yaml exists. Run
+#      schedule_validator.py. An invalid config is NON-BLOCKING: print the
+#      violations as a warning and exit 0. daily-run.sh / schedule.sh fall back to
+#      defaults on their own — we must never fail the session and never install a
+#      mis-configured tick. A company on the DEFAULT schedule (NO schedule.yaml)
+#      skips this step (nothing to validate) but still runs the SYNC below —
+#      Phase 12b: the scripts-dir self-heal must reach default-schedule companies
+#      too, since a plugin move breaks their cron path identically (this is exactly
+#      how self-company's own cron silently broke on a plugin restructure).
 #   2. SYNC. Compute a signature of the desired daily + research cron (minute-
 #      AGNOSTIC) PLUS the canonical scripts dir, and compare it to
 #      .company/ops/schedule/.installed-tick. If the TICK, research cadence, OR the
@@ -46,14 +51,19 @@ CONFIG_PY="$SCRIPT_DIR/schedule_config.py"
 VALIDATOR_PY="$SCRIPT_DIR/schedule_validator.py"
 SCHEDULE_SH="$SCRIPT_DIR/schedule.sh"
 
-# No config => nothing to validate or sync (defaults govern — today's behaviour).
-[ -f "$CFG" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 [ -f "$CONFIG_PY" ] || exit 0
 
-# 1. Validate (Layer B). A rejected config is non-blocking: warn, leave the tick
-#    on its current (default / last-valid) value. Never install a bad tick.
-if [ -f "$VALIDATOR_PY" ]; then
+# 1. Validate (Layer B) — ONLY when a schedule.yaml EXISTS. Phase 12b gap fix: a
+#    company on the DEFAULT schedule (no org/schedule.yaml) has nothing to
+#    validate, but it STILL needs the scripts-dir self-heal below — a plugin
+#    update leaves its cron pointing at a stale absolute path exactly the same as
+#    a configured company (this is how self-company's own cron silently broke).
+#    So validation is gated on $CFG; the SYNC that follows is NOT — it runs for
+#    ANY already-installed project. A rejected config is non-blocking: warn, leave
+#    the tick on its current (default / last-valid) value, and DO NOT sync (a bad
+#    yaml must never install a tick — the scripts-dir heal waits for a valid one).
+if [ -f "$CFG" ] && [ -f "$VALIDATOR_PY" ]; then
   if ! violations="$(python3 "$VALIDATOR_PY" --company "$COMPANY" 2>/dev/null)"; then
     echo "[schedule-guard] org/schedule.yaml REJECTED — falling back to defaults; not syncing the crontab:" >&2
     printf '%s\n' "$violations" | sed 's/^/[schedule-guard]   /' >&2
