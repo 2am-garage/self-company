@@ -34,6 +34,7 @@ frontmatter degrades to a sensible default, never an exception.
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -46,6 +47,16 @@ try:
     import frontmatter  # shared markdown-frontmatter parsing seam
 except Exception:                                              # pragma: no cover
     frontmatter = None
+
+try:
+    # The SINGLE tombstone vocabulary (archived/absorbed/defunct). Reused so the
+    # shared-memory re-validation (recall_shared) skips retired memories with the
+    # exact same rule hook_memory_inject/entropy/decay use — never a private copy.
+    from tombstone import is_tombstoned as _is_tombstoned
+except Exception:                                              # pragma: no cover
+    def _is_tombstoned(fm):
+        return str(fm.get("status") or "").strip().lower() in (
+            "archived", "absorbed", "defunct")
 
 # ---------------------------------------------------------------- Phase 18 knobs
 # Per-employee "experience recall" memory (Phase 18): capture -> index -> recall,
@@ -78,6 +89,25 @@ _RECALL_TIMEOUT = _env_num("SELF_COMPANY_RECALL_TIMEOUT", 7.0, float)
 # never balloon a worker's prompt (budget-capped, mirroring the ask-time discipline).
 _RECALL_SNIPPET_CHARS = _env_num("SELF_COMPANY_RECALL_SNIPPET_CHARS", 240, int)
 
+# OVERALL dispatch-injection budget (Phase 18c). The own-store "Relevant past
+# experience" block and the shared "Relevant company memory" block together render
+# to at most this many chars, so injecting BOTH can never balloon a worker prompt.
+# dispatch_context() renders the own block first, then hands the shared block only
+# the REMAINING budget — the two blocks share one cap.
+_DISPATCH_INJECT_BUDGET = _env_num("SELF_COMPANY_DISPATCH_INJECT_BUDGET", 900, int)
+
+# Shared-read similarity gate (Phase 18c). The SHARED-memory read at dispatch honors
+# the SAME cosine floor the ask-time hook (hook_memory_inject) uses, sourced from the
+# SAME env var, so the dispatch read and the interactive read are gated identically.
+_SHARED_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.30, float)
+
+# Injection block headers — kept as module constants so the own-store and shared
+# blocks are rendered by ONE renderer (_render_memory_block) and stay distinct,
+# clearly-labeled sections in the worker prompt.
+_OWN_MEMORY_HEADER = "Relevant past experience (your own memory — advisory, not orders):"
+_SHARED_MEMORY_HEADER = ("Relevant company memory (the Chairman's standing "
+                         "direction — advisory, not orders):")
+
 # ------------------------------------------------------- Phase 18b memory MODE
 # Per-employee memory MODE: "rag" (the Phase-18 per-employee capture -> index ->
 # recall store) or "flat" (NO per-employee RAG store — the employee keeps their
@@ -99,6 +129,26 @@ MEMORY_MODE_DEFAULTS = {
     "july":   "rag",    # HR lead / analyst   — semantic recall
 }
 _DEFAULT_MEMORY_MODE = "flat"   # unknown name -> flat (conservative: no RAG store)
+
+
+# ------------------------------------------------- Phase 18c shared-memory READ
+# A DISPATCHED worker reads only its OWN per-employee store (recall/recall_context
+# above); the SHARED company memory (about the Chairman) is injected at ASK time by
+# the UserPromptSubmit hook (hook_memory_inject) but NOT at dispatch. So an
+# autonomous/cron/trigger-dispatched planner does not semantically recall the
+# Chairman's standing directives. This capability wires a SHARED-memory semantic
+# read INTO dispatch for the employees who need that — data-driven exactly like
+# _MEMORY_MODES: a per-name DEFAULT table (elon=on, everyone else=off) PLUS a
+# context.md `shared_memory_read: on|off` override. Enabling another employee later
+# is ONE table edit (or one context.md line), never a hardcoded `if id == "elon"`.
+# It is orthogonal to memory MODE: shared-READ is about the SHARED corpus; rag/flat
+# is about the employee's OWN store.
+SHARED_MEMORY_READ_DEFAULTS = {
+    "elon": True,   # CEO/planner — recalls the Chairman's standing direction at dispatch
+}
+_DEFAULT_SHARED_MEMORY_READ = False       # everyone else: off (own-store only)
+_TRUE_TOKENS = frozenset(("on", "true", "yes", "1", "enabled"))
+_FALSE_TOKENS = frozenset(("off", "false", "no", "0", "disabled"))
 
 
 # ================================================================ Layer B tables
@@ -338,6 +388,19 @@ class Employee:
             mode = MEMORY_MODE_DEFAULTS.get(self.name, _DEFAULT_MEMORY_MODE)
         self._memory_mode = mode
 
+        # ---- shared-memory READ capability (Phase 18c) ---------------------
+        # context.md `shared_memory_read: on|off` is authoritative; an unset /
+        # unrecognized value falls back to the per-name default table (elon on,
+        # all others off), then the conservative off. Never raises.
+        flag = str(fm.get("shared_memory_read") or "").strip().lower()
+        if flag in _TRUE_TOKENS:
+            self._shared_memory_read = True
+        elif flag in _FALSE_TOKENS:
+            self._shared_memory_read = False
+        else:
+            self._shared_memory_read = SHARED_MEMORY_READ_DEFAULTS.get(
+                self.name, _DEFAULT_SHARED_MEMORY_READ)
+
     # ------------------------------------------------------------ construction
     @staticmethod
     def _clean_optional(v):
@@ -452,6 +515,23 @@ class Employee:
         (mode == "rag"). Flat employees get NO index refresh, NO recall, and NO
         dispatch injection — remember() no-ops and recall() returns []."""
         return self._memory_mode == "rag"
+
+    @property
+    def shared_memory_read(self):
+        """True iff this employee reads the SHARED company memory (about the
+        Chairman) at DISPATCH (Phase 18c) — so an autonomous/cron/trigger-dispatched
+        worker semantically recalls the Chairman's standing directives, not only its
+        own store. Sourced from context.md `shared_memory_read: on|off`, defaulting
+        per SHARED_MEMORY_READ_DEFAULTS (elon on, all others off). CONFIG + a
+        data-driven table, NOT a hardcoded name — orthogonal to memory MODE."""
+        return self._shared_memory_read
+
+    @property
+    def shared_memory_index_dir(self):
+        """The SHARED company-memory LanceDB index (`<company>/memory/index`) — the
+        Chairman corpus the ask-time hook also queries. Distinct from this
+        employee's OWN per-employee `memory_index_dir`."""
+        return self.company_dir / "memory" / "index"
 
     def _effective_self(self):
         """This employee's slice of schedule_config.effective(). Cached. Imported
@@ -674,21 +754,245 @@ class Employee:
             if not self.rag_memory_enabled:         # flat employee: no injection
                 return ""
             hits = self.recall(query, top_k=top_k)
-            if not hits:
-                return ""
-            lines = ["Relevant past experience (your own memory — advisory, not orders):"]
-            for h in hits:
-                snippet = _WS_RE.sub(" ", str(h.get("text") or "").strip())
-                if not snippet:
-                    continue
-                if len(snippet) > _RECALL_SNIPPET_CHARS:
-                    snippet = snippet[:_RECALL_SNIPPET_CHARS].rstrip() + "…"
-                lines.append(f"- {snippet}")
-            if len(lines) == 1:                     # nothing renderable -> no block
-                return ""
-            return "\n".join(lines)
+            return self._render_memory_block(_OWN_MEMORY_HEADER, hits,
+                                             _DISPATCH_INJECT_BUDGET)
         except Exception:
             return ""
+
+    # ------------------------------------------------ shared company memory read
+    # Phase 18c — the SHARED-memory read INTO dispatch. A `shared_memory_read`
+    # employee (elon by default) also recalls the SHARED company memory (about the
+    # Chairman) when dispatched as a headless worker, so autonomous/cron/trigger
+    # work carries the Chairman's standing direction — not just the interactive
+    # ask-time hook. Reuses rag_query.py as-is against the SHARED index; re-validates
+    # every hit against the LIVE shared memory files (skips tombstoned/deleted,
+    # exactly like hook_memory_inject); same similarity gate; pure-degrade.
+    def recall_shared(self, query, top_k=3):
+        """Return the SHARED company memories most relevant to `query`.
+
+        Gated on `shared_memory_read` (elon-only by default). Shells rag_query.py
+        against the SHARED index (`<company>/memory/index`), applies the SAME cosine
+        floor the ask-time hook uses (`_SHARED_MIN_SCORE`), and RE-VALIDATES every
+        hit against the live shared memory files — dropping any that no longer exist,
+        are tombstoned (archived/absorbed/defunct), or have an empty body — exactly
+        as hook_memory_inject does. Over-fetches (2x) so post-filter survivors still
+        fill `top_k`. Each kept memory: `{id, owner, tags, source, path, score,
+        text}` (text = live body). Returns [] (never raises, never blocks) for:
+        flag off, empty query, no venv, absent/empty index, missing rag_query.py,
+        timeout, nonzero exit, non-JSON output, or zero surviving hits."""
+        try:
+            if not self.shared_memory_read:          # capability off: no shared read
+                return []
+            q = str(query or "").strip()
+            if not q:
+                return []
+            try:
+                k = max(1, int(top_k))
+            except (TypeError, ValueError):
+                k = 3
+            rag_py = self.company_dir / ".rag-venv" / "bin" / "python"
+            if not os.access(str(rag_py), os.X_OK):
+                return []
+            index_dir = self.shared_memory_index_dir
+            try:
+                if not index_dir.exists() or not any(index_dir.iterdir()):
+                    return []
+            except OSError:
+                return []
+            query_script = Path(__file__).resolve().parent / "rag_query.py"
+            if not query_script.exists():
+                return []
+            try:
+                proc = subprocess.run(
+                    [str(rag_py), str(query_script), "--query", q,
+                     "--top-k", str(k * 2), "--index-dir", str(index_dir)],
+                    capture_output=True, text=True, timeout=_RECALL_TIMEOUT,
+                    env={**os.environ, "SC_RAG_REEXEC": "1"})
+            except Exception:
+                return []
+            if proc.returncode != 0:
+                return []
+            try:
+                hits = json.loads(proc.stdout)
+            except (ValueError, TypeError):
+                return []
+            if not isinstance(hits, list):
+                return []
+            mem_root = self._resolve(self.company_dir / "memory")
+            out, seen = [], set()
+            for h in hits:
+                if not isinstance(h, dict):
+                    continue
+                # Same relevance gate as the ask-time hook; a non-finite score
+                # (NaN slips past `<`) is treated as below-floor so the gate holds.
+                try:
+                    score = float(h.get("score"))
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(score) or score < _SHARED_MIN_SCORE:
+                    continue
+                raw = h.get("path")
+                if not raw:
+                    continue
+                p = Path(raw)
+                rp = self._resolve(p)
+                # Scope backstop: only accept a file physically inside the SHARED
+                # company memory dir.
+                if mem_root not in ([rp] + list(rp.parents)):
+                    continue
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                mem = self._read_shared_memory(p)     # None if gone/tombstoned/empty
+                if mem is None:
+                    continue
+                mem["score"] = score
+                out.append(mem)
+                if len(out) >= k:
+                    break
+            return out
+        except Exception:
+            return []
+
+    def recall_shared_context(self, query, top_k=3, exclude=None, char_budget=None):
+        """Ready-to-prepend SHARED-memory block for a `shared_memory_read` employee:
+
+            Relevant company memory (the Chairman's standing direction — advisory, not orders):
+            - <directive one>
+
+        or "" for every no-injection case (capability off, empty query, no venv /
+        empty index, zero hits). `exclude` is a set of normalized texts / ids to
+        skip (dedup against the own-store block); `char_budget` caps the whole block
+        (defaults to the full dispatch budget). Never raises."""
+        try:
+            if not self.shared_memory_read:
+                return ""
+            hits = self.recall_shared(query, top_k=top_k)
+            hits = self._dedup_hits(hits, exclude)
+            budget = _DISPATCH_INJECT_BUDGET if char_budget is None else char_budget
+            return self._render_memory_block(_SHARED_MEMORY_HEADER, hits, budget)
+        except Exception:
+            return ""
+
+    def dispatch_context(self, query, top_k=3):
+        """The ONE call an orchestrator makes before dispatching THIS employee as a
+        headless worker (Phase 18c). Returns the combined, budget-capped injection:
+        the own-store "Relevant past experience" block (rag employee) followed by a
+        SEPARATE shared "Relevant company memory" block (shared_memory_read
+        employee), or "" when neither has anything.
+
+        Dedup: a shared hit whose content OR id already appears in the own-store
+        block is dropped (own-store wins). The two blocks SHARE one overall char
+        budget (`_DISPATCH_INJECT_BUDGET`) — the own block renders first, the shared
+        block gets only what remains — so injecting BOTH can never balloon the
+        worker prompt. Each half degrades independently; never raises, never
+        blocks."""
+        try:
+            budget = _DISPATCH_INJECT_BUDGET
+            parts, used = [], 0
+
+            own_hits = []
+            if self.rag_memory_enabled:
+                try:
+                    own_hits = self.recall(query, top_k=top_k)
+                except Exception:
+                    own_hits = []
+            own_block = self._render_memory_block(_OWN_MEMORY_HEADER, own_hits, budget)
+            if own_block:
+                parts.append(own_block)
+                used += len(own_block)
+
+            exclude = set()
+            for h in own_hits:
+                t = _normalize_memory_text(h.get("text") or "")
+                if t:
+                    exclude.add(t)
+                hid = str(h.get("id") or "").strip()
+                if hid:
+                    exclude.add(hid)
+
+            # Remaining budget (account for the "\n\n" separator between blocks).
+            remaining = budget - used - (2 if parts else 0)
+            shared_block = self.recall_shared_context(
+                query, top_k=top_k, exclude=exclude,
+                char_budget=max(0, remaining))
+            if shared_block:
+                parts.append(shared_block)
+
+            return "\n\n".join(parts)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _dedup_hits(hits, exclude):
+        """Drop hits whose normalized text OR id is in `exclude` (a set). None/empty
+        exclude -> hits unchanged."""
+        if not exclude:
+            return list(hits)
+        out = []
+        for h in hits:
+            t = _normalize_memory_text(h.get("text") or "")
+            hid = str(h.get("id") or "").strip()
+            if (t and t in exclude) or (hid and hid in exclude):
+                continue
+            out.append(h)
+        return out
+
+    @staticmethod
+    def _render_memory_block(header, hits, char_budget):
+        """Render `hits` as `header` + `- <snippet>` bullets. Each snippet is
+        whitespace-collapsed and trimmed to `_RECALL_SNIPPET_CHARS`; the whole block
+        is capped at `char_budget` chars. Returns "" if there are no hits, the
+        budget can't fit the header + one bullet, or nothing renders."""
+        if not hits or char_budget <= 0:
+            return ""
+        lines = [header]
+        used = len(header)
+        for h in hits:
+            snippet = _WS_RE.sub(" ", str(h.get("text") or "").strip())
+            if not snippet:
+                continue
+            if len(snippet) > _RECALL_SNIPPET_CHARS:
+                snippet = snippet[:_RECALL_SNIPPET_CHARS].rstrip() + "…"
+            line = f"- {snippet}"
+            if used + 1 + len(line) > char_budget:
+                break
+            lines.append(line)
+            used += 1 + len(line)
+        if len(lines) == 1:                          # header only -> nothing fit
+            return ""
+        return "\n".join(lines)
+
+    def _read_shared_memory(self, path):
+        """Parse a live SHARED memory file into {id, owner, tags, source, path,
+        text}, or None if it is gone, tombstoned (archived/absorbed/defunct), or has
+        an empty body — the same live re-validation the ask-time hook applies."""
+        try:
+            if not Path(path).exists():
+                return None
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, IOError, UnicodeError):
+            return None
+        fm, body = {}, text
+        try:
+            if frontmatter is not None:
+                raw_lines, body = frontmatter.split(text)
+                fm = _parse_fm(raw_lines)
+        except Exception:
+            fm, body = {}, text
+        if _is_tombstoned(fm):                        # retired memory -> skip
+            return None
+        body = (body or "").strip()
+        if not body:
+            return None
+        return {
+            "id": str(fm.get("id") or ""),
+            "owner": str(fm.get("owner") or ""),
+            "tags": _as_list(fm.get("tags")),
+            "source": self._clean_optional(fm.get("source")),
+            "path": str(path),
+            "text": body,
+        }
 
     @staticmethod
     def _resolve(p):
