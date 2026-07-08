@@ -45,6 +45,7 @@ Pure stdlib (subprocess, select). Unix.
 import argparse
 import enum
 import json
+import os
 import select
 import subprocess
 import sys
@@ -101,36 +102,65 @@ class Member:
         script = "; ".join(f"echo '@status {p}'; sleep {delay}" for p in phases)
         return ["bash", "-c", script]
 
-    def _recall_experience(self, task):
-        """Phase 18 Item 4 — dispatch-time recall injection (the dormant payoff,
-        now wired). BRIDGE to the employee.py data model: load THIS member's real
-        `Employee` and ask it for a ready-to-prepend "Relevant past experience"
-        block for `task`. We import lazily and bridge (rather than merge the two
-        classes) because process-spawning is not a data-model concern — employee.py
-        stays the single data-driven class that owns identity/capabilities/memory.
+    def _recall_memory(self, task):
+        """Phase 18 Item 4 + Phase 18c — dispatch-time MEMORY injection. BRIDGE to
+        the employee.py data model: load THIS member's real `Employee` and ask it
+        for the ready-to-prepend memory block for `task`. We import lazily and
+        bridge (rather than merge the two classes) because process-spawning is not a
+        data-model concern — employee.py stays the single data-driven class that
+        owns identity/capabilities/memory.
 
-        recall_context() is internally gated + budget-capped + timeout-degrading:
-        a `flat`-mode employee gets "" (NO read at all), and a `rag` employee with
-        no venv / empty index / timeout / zero hits also gets "" — so dispatch is
-        never blocked and never fails on recall. The extra try/except here only
-        guards the import itself; recall_context never raises."""
+        `dispatch_context()` returns TWO distinct sections, both internally gated +
+        budget-capped + timeout-degrading:
+          * "Relevant past experience" — this employee's OWN store (rag employee).
+          * "Relevant company memory"  — the SHARED Chairman corpus, ONLY for a
+            `shared_memory_read` employee (elon by default). Phase 18c wires this
+            read INTO dispatch so autonomous/cron/trigger work carries the Chairman's
+            standing direction, not just the interactive ask-time hook.
+        A `flat`, no-venv, empty-index, timeout, or zero-hit case yields "" for the
+        relevant half — dispatch is never blocked and never fails on recall. The
+        try/except here only guards the import; dispatch_context never raises."""
         try:
             from employee import Employee as EmployeeModel
         except Exception:
             return ""
         try:
-            return EmployeeModel.load(self.id, self.company_dir).recall_context(task)
+            return EmployeeModel.load(self.id, self.company_dir).dispatch_context(task)
         except Exception:
             return ""
+
+    def worker_env(self):
+        """Environment for a spawned real worker, or None to inherit unchanged.
+
+        DOUBLE-INJECTION GUARD (Phase 18c). A spawned `claude -p` worker ALSO fires
+        the plugin's UserPromptSubmit hook (hook_memory_inject.py) on its own prompt
+        — confirmed: `-p` fires UserPromptSubmit before Claude processes it. For a
+        `shared_memory_read` employee we already inject the SHARED company memory
+        EXPLICITLY into the worker prompt at dispatch (see real_command), so we set
+        SC_NO_MEMORY_INJECT=1 to make that worker's hook a clean no-op — otherwise
+        the shared memory would be injected a SECOND time. The explicit dispatch
+        injection is then the single source. For every OTHER employee we return None
+        (inherit), so the hook keeps providing shared memory as before — no
+        regression for non-shared-read workers."""
+        try:
+            from employee import Employee as EmployeeModel
+            if EmployeeModel.load(self.id, self.company_dir).shared_memory_read:
+                return {**os.environ, "SC_NO_MEMORY_INJECT": "1"}
+        except Exception:
+            pass
+        return None
 
     def real_command(self, task, model="claude-sonnet-4-6"):
         """A real headless agent, primed with this employee's role and the task,
         told to emit @status markers so the supervisor can stream live phases.
 
-        Before dispatch, inject this employee's OWN relevant past experience
-        (Phase 18 Item 4): for a `rag`-mode employee whose memory store has hits,
-        the recalled block is prepended into the prompt slice; a `flat`-mode
-        employee (bob/gibby/tom) injects NOTHING (recall_context returns "")."""
+        Before dispatch, inject this employee's relevant MEMORY (Phase 18 Item 4 +
+        Phase 18c): for a `rag`-mode employee, the OWN-store "Relevant past
+        experience" block; for a `shared_memory_read` employee (elon), ALSO the
+        SHARED "Relevant company memory" block. A `flat`, non-shared-read employee
+        (e.g. bob/gibby/tom) with no relevant memory injects NOTHING
+        (dispatch_context returns ""). The two blocks share one budget and are
+        deduped by employee.py."""
         prompt = (
             f"You are {self.name} ({self.role}) in the self-company, working "
             f"non-interactively. Task: {task}\n"
@@ -140,19 +170,20 @@ class Member:
             f"working', '@status reviewing'). Print '@status done' when finished. "
             f"Keep it tight."
         )
-        experience = self._recall_experience(task)
-        if experience:
-            prompt = f"{prompt}\n\n{experience}"
+        memory = self._recall_memory(task)
+        if memory:
+            prompt = f"{prompt}\n\n{memory}"
         return ["claude", "-p", prompt, "--model", model]
 
 
 class Worker:
     """Wraps one running employee process; parses its live @status stream."""
 
-    def __init__(self, employee, task, command):
+    def __init__(self, employee, task, command, env=None):
         self.emp = employee
         self.task = task
         self.command = command
+        self.env = env                # None -> inherit; set to guard the memory hook
         self.status = Status.IDLE
         self.phase = ""
         self.last = ""
@@ -164,7 +195,7 @@ class Worker:
     def start(self):
         self.proc = subprocess.Popen(
             self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1)
+            text=True, bufsize=1, env=self.env)
         self.status = Status.STARTING
         self._t0 = time.monotonic()
 
@@ -266,7 +297,10 @@ class Supervisor:
             if emp is None:
                 continue
             cmd = emp.demo_command(task, demo_delay) if demo else emp.real_command(task)
-            w = Worker(emp, task, cmd)
+            # Real workers get the double-injection guard env for shared_memory_read
+            # employees (elon); demo workers just echo, so they inherit unchanged.
+            env = None if demo else emp.worker_env()
+            w = Worker(emp, task, cmd, env=env)
             w.start()
             workers[emp_id] = w
             self._emit(w, "start")
