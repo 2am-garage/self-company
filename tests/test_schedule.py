@@ -14,6 +14,7 @@ line preservation.
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 
 import _helpers
@@ -780,6 +781,57 @@ class TestScheduleGuardSelfHealNoYaml(ScheduleTestBase):
         self.assertFalse(os.path.exists(tripwire),
                          "guard shelled the real crontab binary despite the file seam")
         self.assertIn(dest, self._daily_line(self.A))              # still healed via file
+
+
+class TestCronModeWiring(ScheduleTestBase):
+    """Phase 19 Item 2 — the INSTALLED daily cron line runs in cron mode (--cron),
+    so an overlapping tick takes the non-blocking flock SKIP path in production
+    (not the manual block-and-wait that would queue + re-spawn an agent). Closes
+    the shipped-artifact coverage gap: the installed line's cron behavior is now
+    actually exercised, not just the --cron seam in isolation."""
+
+    def _daily_line(self, path):
+        return next(ln for ln in self._sc_lines()
+                    if "self-company-daily" in ln and path in ln)
+
+    def test_installed_daily_line_runs_in_cron_mode(self):
+        _run(["install", self.A], self.fake)
+        daily = self._daily_line(self.A)
+        # --cron sits after the project-dir arg and before the redirect
+        self.assertIn("daily-run.sh' '%s' --cron >>" % self.A, daily)
+        # research + fleet lines must NOT carry --cron (no --apply, no lock needed)
+        research = next(ln for ln in self._sc_lines()
+                        if "self-company-research" in ln and self.A in ln)
+        self.assertNotIn("--cron", research)
+
+    def test_installed_line_cron_behavior_skips_when_lock_held(self):
+        # Run the EXACT command the crontab would run (extracted from the installed
+        # line) with the mutating-core lock held: it must take the cron SKIP path.
+        _run(["install", self.A], self.fake)
+        daily = self._daily_line(self.A)
+        # strip the leading 5 cron time fields -> the shell command cron executes
+        # (the trailing ' # self-company-daily …' is a harmless shell comment).
+        runner = daily.split(None, 5)[5]
+        company = os.path.join(self.A, ".company")
+        ops = os.path.join(company, "ops")
+        os.makedirs(ops, exist_ok=True)
+        lock = os.path.join(ops, ".daily.lock")
+        ready = os.path.join(self.A, "lock.ready")
+        holder = subprocess.Popen(
+            ["bash", "-c", f'exec 9>"{lock}"; flock 9; : > "{ready}"; sleep 5'])
+        try:
+            for _ in range(200):
+                if os.path.exists(ready):
+                    break
+                time.sleep(0.02)
+            r = subprocess.run(["bash", "-c", runner], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            date = subprocess.check_output(["date", "+%F"], text=True).strip()
+            with open(os.path.join(ops, "logs", f"daily-{date}.md")) as f:
+                self.assertIn("cron tick SKIPPED", f.read())
+        finally:
+            holder.wait()
 
 
 class TestScheduleGuardLock(ScheduleTestBase):

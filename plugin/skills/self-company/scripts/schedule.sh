@@ -192,7 +192,22 @@ PATH_PREFIX="PATH='$CLAUDE_DIR:/usr/local/bin:/usr/bin:/bin'"
 MARK="$MARK_DAILY project=$PROJ_KEY path=$PROJECT_DIR"
 MARK_RES="$MARK_RESEARCH project=$PROJ_KEY path=$PROJECT_DIR"
 MARK_FLT="$MARK_FLEET project=$PROJ_KEY path=$PROJECT_DIR"
-RUNNER="cd '$PROJECT_DIR' && $PATH_PREFIX bash '$SCRIPTS_DIR/daily-run.sh' '$PROJECT_DIR' >> '$LOGFILE' 2>&1"
+# Phase 19 Item 2: the scheduled daily tick runs in CRON mode (--cron) so
+# daily-run.sh takes the non-blocking flock path — an overlapping tick SKIPS with a
+# log line instead of QUEUEing and re-running the full mutating pass + a second
+# agent spawn (the token-overrun/pile-up this phase prevents). Only the DAILY line
+# gets --cron: research-scan / fleet-run don't run reinforce/decay --apply, so they
+# need no mutating-core lock. Manual `daily-run.sh <dir>` (no --cron) still
+# block-and-waits so a human's run always happens.
+# NOTE (deliberate): the SessionStart self-heal signature is intentionally NOT
+# extended to cover the runner FORM. Folding a runner-schema token into the
+# signature would force a one-time re-install for EVERY already-installed company
+# on next session (fleet-wide churn) for a benign migration. New installs get
+# --cron immediately; existing installs pick it up on the next real signature
+# change (tick/scripts-dir) or a manual `schedule.sh install`. Corruption safety
+# never depended on --cron (the flock serializes either mode) — only the cron-skip
+# optimization does, so a lazy migration is safe.
+RUNNER="cd '$PROJECT_DIR' && $PATH_PREFIX bash '$SCRIPTS_DIR/daily-run.sh' '$PROJECT_DIR' --cron >> '$LOGFILE' 2>&1"
 LINE="$CRON_EXPR $RUNNER $MARK"
 RESEARCH_RUNNER="cd '$PROJECT_DIR' && $PATH_PREFIX bash '$SCRIPTS_DIR/research-scan.sh' '$PROJECT_DIR' >> '$LOGFILE' 2>&1"
 RESEARCH_LINE="$RESEARCH_EXPR $RESEARCH_RUNNER $MARK_RES"
