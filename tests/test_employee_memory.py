@@ -91,6 +91,27 @@ def _index_store(memory_dir):
     return proc
 
 
+def _write_shared_mem(company, name, body, *, tier="L2", status=None):
+    """Plant one SHARED company-memory file under <company>/memory/L2-cold."""
+    d = os.path.join(company, "memory", "L2-cold")
+    os.makedirs(d, exist_ok=True)
+    st = f"status: {status}\n" if status else ""
+    with open(os.path.join(d, name + ".md"), "w", encoding="utf-8") as f:
+        f.write(f"---\nid: {name}\ntier: {tier}\ncreated: 2026-01-01\n"
+                f"tags: []\n{st}---\n{body}\n")
+    return os.path.join(d, name + ".md")
+
+
+def _index_shared(company):
+    """Build the SHARED company-memory index via the reused rag_index.py + venv."""
+    mem = os.path.join(company, "memory")
+    return subprocess.run(
+        [REPO_VENV_PY, os.path.join(SCRIPTS, "rag_index.py"),
+         "--memory-dir", mem, "--index-dir", os.path.join(mem, "index")],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "SC_RAG_REEXEC": "1"})
+
+
 # ============================================================ memory MODE toggle
 class TestMemoryMode(unittest.TestCase):
     """Phase 18b — the rag/flat toggle: default table + context.md override."""
@@ -419,6 +440,136 @@ class TestRecallWithVenv(unittest.TestCase):
         self.assertTrue(block.startswith("Relevant past experience"))
         self.assertIn("recall_context", block)
         # Every rendered line is a bullet; nothing from the other store leaks.
+        for line in block.splitlines()[1:]:
+            self.assertTrue(line.startswith("- "))
+
+
+# ============================================ Phase 18c shared-memory READ flag
+class TestSharedMemoryReadFlag(unittest.TestCase):
+    """The `shared_memory_read` capability: data-driven default table (elon on,
+    all others off) + a context.md override, exactly like the memory MODE toggle —
+    never a hardcoded name in logic."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.company = _make_company(
+            self.tmp, ("bob", "gibby", "tom", "tony", "mike", "elon", "phoebe", "july"))
+
+    def test_default_table_elon_only(self):
+        self.assertTrue(Employee.load("elon", self.company).shared_memory_read)
+        for n in ("bob", "gibby", "tom", "tony", "mike", "phoebe", "july"):
+            self.assertFalse(Employee.load(n, self.company).shared_memory_read, n)
+
+    def test_context_md_override_both_ways(self):
+        # Turn a default-off employee ON, and elon OFF — config, not a name.
+        d = os.path.join(self.company, "org", "employees", "phoebe")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "context.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: Phoebe\nshared_memory_read: on\n---\nbody\n")
+        de = os.path.join(self.company, "org", "employees", "elon")
+        os.makedirs(de, exist_ok=True)
+        with open(os.path.join(de, "context.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: Elon\nshared_memory_read: off\n---\nbody\n")
+        self.assertTrue(Employee.load("phoebe", self.company).shared_memory_read)
+        self.assertFalse(Employee.load("elon", self.company).shared_memory_read)
+
+    def test_bad_value_degrades_to_default(self):
+        de = os.path.join(self.company, "org", "employees", "elon")
+        os.makedirs(de, exist_ok=True)
+        with open(os.path.join(de, "context.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: Elon\nshared_memory_read: bogus\n---\nbody\n")
+        self.assertTrue(Employee.load("elon", self.company).shared_memory_read)
+
+
+class TestSharedRecallDegrade(unittest.TestCase):
+    """recall_shared / recall_shared_context / dispatch_context degrade cleanly with
+    no deps: capability off short-circuits, and an enabled employee with no venv
+    still returns []/"" (never raises, never blocks)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.company = _make_company(self.tmp, ("elon", "bob", "tony"))
+
+    def test_capability_off_returns_empty(self):
+        bob = Employee.load("bob", self.company)                 # shared_read off
+        self.assertEqual(bob.recall_shared("chairman policy"), [])
+        self.assertEqual(bob.recall_shared_context("chairman policy"), "")
+
+    def test_empty_query_returns_empty(self):
+        elon = Employee.load("elon", self.company)
+        self.assertEqual(elon.recall_shared(""), [])
+        self.assertEqual(elon.recall_shared("   "), [])
+
+    def test_no_venv_degrades(self):
+        elon = Employee.load("elon", self.company)               # shared_read on
+        self.assertEqual(elon.recall_shared("anything"), [])     # no .rag-venv -> []
+        self.assertEqual(elon.recall_shared_context("anything"), "")
+
+    def test_dispatch_context_never_raises(self):
+        # No venv, no index: both halves degrade, dispatch_context is "".
+        for n in ("elon", "bob", "tony"):
+            self.assertEqual(Employee.load(n, self.company).dispatch_context("x"), "")
+
+
+# ==================================================== shared recall — the payoff
+@unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
+class TestSharedRecallWithVenv(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.company = _make_company(self.tmp, ("elon", "bob"), venv=True)
+        self.elon = Employee.load("elon", self.company)
+        self._orig_timeout = employee._RECALL_TIMEOUT
+        employee._RECALL_TIMEOUT = 120.0
+
+    def tearDown(self):
+        employee._RECALL_TIMEOUT = self._orig_timeout
+
+    def _seed(self):
+        _write_shared_mem(self.company, "attribution",
+                          "The Chairman wants commits with NO Claude attribution "
+                          "or Co-Authored-By trailers — clean authorship.")
+        _write_shared_mem(self.company, "backups",
+                          "Backup rotation keeps the newest tarballs of the memory "
+                          "store.")
+        _write_shared_mem(self.company, "retired",
+                          "An old, retired directive about attribution trailers.",
+                          status="archived")
+        rc = _index_shared(self.company)
+        if rc.returncode != 0:
+            self.skipTest(f"rag_index unavailable/offline: {rc.stderr}")
+
+    def test_finds_relevant_and_excludes_tombstoned(self):
+        self._seed()
+        hits = self.elon.recall_shared(
+            "what commit attribution policy does the chairman want", top_k=3)
+        self.assertTrue(hits, "expected a semantically-relevant shared recall")
+        ids = [h["id"] for h in hits]
+        self.assertIn("attribution", ids)
+        self.assertNotIn("retired", ids)                          # tombstone excluded
+        for h in hits:
+            self.assertIn(os.path.join("memory", "L2-cold"), h["path"])
+
+    def test_gate_drops_below_floor(self):
+        self._seed()
+        orig = employee._SHARED_MIN_SCORE
+        employee._SHARED_MIN_SCORE = 0.99                         # impossibly strict
+        try:
+            self.assertEqual(
+                self.elon.recall_shared("commit attribution policy"), [])
+        finally:
+            employee._SHARED_MIN_SCORE = orig
+
+    def test_non_shared_employee_gets_nothing(self):
+        self._seed()
+        bob = Employee.load("bob", self.company)                 # shared_read off
+        self.assertEqual(bob.recall_shared("commit attribution policy"), [])
+
+    def test_shared_context_block_renders(self):
+        self._seed()
+        block = self.elon.recall_shared_context(
+            "commit attribution policy", top_k=3)
+        self.assertTrue(block.startswith("Relevant company memory"))
+        self.assertIn("attribution", block.lower())
         for line in block.splitlines()[1:]:
             self.assertTrue(line.startswith("- "))
 
