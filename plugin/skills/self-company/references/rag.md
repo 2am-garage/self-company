@@ -148,7 +148,7 @@ python3 .company/scripts/rag_query.py --query "what does the Chairman prefer for
 ```
 `score` = cosine similarity (0–1, higher = closer). `path` points back to the markdown source so you can read the full context.
 
-> **Status:** `rag_query.py` is available for manual/ad-hoc use **and** is the backend for the live ask-time consumer — semantic injection in `hook_memory_inject.py` shipped as **Stage B of Phase 13 (v0.1.5)**. On each `UserPromptSubmit` the hook queries the index semantically (tight timeout) and injects the top matches, falling back to the keyword path when the venv is absent. This section documents the query contract that consumer runs on.
+> **Status:** `rag_query.py` is available for manual/ad-hoc use **and** is the backend for TWO live consumers of the SHARED index: (1) the **ask-time** semantic injection in `hook_memory_inject.py` — Stage B of Phase 13 (v0.1.5); and (2) the **dispatch-time** shared read in `Employee.recall_shared` / `dispatch_context` — Phase 18c. On each `UserPromptSubmit` the hook queries the index semantically (tight timeout) and injects the top matches, falling back to the keyword path when the venv is absent. At **dispatch**, a `shared_memory_read` employee (elon by default) reads the SAME shared index through the SAME query engine and gate before its headless `claude -p` worker runs — so the read side of shared memory is no longer interactive-hook-only. Both re-validate hits against the live files (skip tombstoned/deleted) and share the `SELF_COMPANY_INJECT_RAG_MIN_SCORE` gate. This section documents the query contract both consumers run on.
 
 ### Fallback: no index / no venv
 
@@ -236,7 +236,7 @@ Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
 | **Decide** | Elon | Approve activation | Threshold crossed or Chairman orders |
 | **Setup** | Tom / human (one-time) | `rag_setup.sh install` | Before first refresh |
 | **Refresh** | Tony (daily, automatic) | Incremental `rag_index.py` after reinforce+decay | Keeps the index in sync with markdown |
-| **Query** | manual CLI + live ask-time injection (`hook_memory_inject.py`, Stage B / v0.1.5) | `rag_query.py` | Search by meaning |
+| **Query** | manual CLI + live ask-time injection (`hook_memory_inject.py`, Stage B / v0.1.5) + dispatch-time shared read (`Employee.recall_shared`, Phase 18c, `shared_memory_read` employees) | `rag_query.py` | Search by meaning |
 | **Rebuild** | Tony (as needed) | `--rebuild` | After major cleanup / corruption |
 | **Degrade** | All | Exit 2 + grep fallback; core never fails | Venv absent/broken |
 
@@ -248,6 +248,7 @@ Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
 - **In-process dedup** (`reinforce_memory.py`, `entropy.py`): use `rag_embed` directly (Path A, §1) — separate from the LanceDB index.
 - **Policy tunables** (`org/policy.md §8`): `RAG_ENABLE_THRESHOLD`, `RAG_MODEL`, `RAG_INDEX_PATH`.
 - **Stage B (shipped v0.1.5)**: semantic ask-time injection in `hook_memory_inject.py` consumes `rag_query.py` with a tight timeout and falls back to the keyword path when the venv is absent.
+- **Shared read at dispatch (Phase 18c)**: a `shared_memory_read` employee (elon by default) also consumes `rag_query.py` against the SHARED index at DISPATCH — via `Employee.recall_shared` / `dispatch_context` — so a headless worker carries the Chairman's standing directives, not just the interactive hook. Same gate + live re-validation; the dispatcher sets `SC_NO_MEMORY_INJECT=1` on the worker so the worker's own `UserPromptSubmit` hook no-ops (no double injection).
 
 ---
 

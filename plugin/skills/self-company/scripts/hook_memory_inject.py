@@ -426,6 +426,18 @@ def run(company_arg, transcript_arg):
     trivial to reason about (Gibby-friendly). The keyword path stays byte-for-byte
     as the guaranteed-fast floor AND the no-venv/timeout/no-index degrade — so with
     no RAG stack, behavior is identical to before this change."""
+    # Phase 18c double-injection guard. A headless worker spawned at dispatch by
+    # supervisor.py for a `shared_memory_read` employee (elon) already had the SHARED
+    # company memory injected EXPLICITLY into its `claude -p` prompt. That worker is
+    # itself a `claude -p` process, which ALSO fires THIS UserPromptSubmit hook
+    # (confirmed: `-p` fires UserPromptSubmit before Claude processes the prompt) —
+    # so without this guard the shared memory would be injected a SECOND time. The
+    # dispatcher sets SC_NO_MEMORY_INJECT=1 on that worker's env to make this hook a
+    # clean no-op, so the explicit dispatch injection is the single source. Ask-time
+    # (interactive) sessions never set it, so their injection is unaffected.
+    if os.environ.get("SC_NO_MEMORY_INJECT"):
+        _debug("SC_NO_MEMORY_INJECT set (dispatch owns injection)")
+        return ""
     company = resolve_company(company_arg)
     if company is None:                            # opt-in guard: off-company
         return ""

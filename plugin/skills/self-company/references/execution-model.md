@@ -187,6 +187,47 @@ flat, so it can never delay or block a dispatch. For a **flat** worker it return
 `""` — no injection. Isolation holds: a worker only ever receives memories from
 its OWN store.
 
+**Shared company memory at dispatch (Phase 18c).** The own-store recall above is
+per-employee only — a dispatched worker did **not** semantically recall the
+**shared** company memory (about the Chairman). That corpus was read back only at
+**ask time** by the `UserPromptSubmit` hook (`hook_memory_inject`), so an
+autonomous/cron/trigger-dispatched planner missed the Chairman's standing
+directives. A `shared_memory_read` capability now wires that read INTO dispatch:
+
+- **Data-driven, not name-hardcoded.** `Employee.shared_memory_read` is a
+  per-employee flag from a DEFAULT table (`SHARED_MEMORY_READ_DEFAULTS` — **elon
+  on, everyone else off**) plus a `context.md` `shared_memory_read: on|off`
+  override — the same modular shape as the `memory: rag|flat` toggle. Enabling
+  another employee later is one table edit or one context.md line. It is
+  orthogonal to memory MODE (shared-READ is about the SHARED corpus; rag/flat is
+  about the employee's OWN store).
+- **`Employee.recall_shared(query)`** shells the SAME `rag_query.py` against the
+  SHARED index (`<company>/memory/index`), applies the SAME cosine floor the
+  ask-time hook uses (`SELF_COMPANY_INJECT_RAG_MIN_SCORE`, default 0.30), and
+  **re-validates** every hit against the live shared files — dropping deleted or
+  tombstoned (archived/absorbed/defunct) memories exactly like the hook. Degrades
+  to `[]` on flag-off / no venv / empty index / timeout / any error.
+- **`Employee.dispatch_context(query)`** is the ONE call the dispatcher makes: it
+  returns the own-store **"Relevant past experience"** block followed by a SEPARATE
+  shared **"Relevant company memory"** block. The two share one overall char
+  budget (`_DISPATCH_INJECT_BUDGET`) and are **deduped** (a shared hit already in
+  the own-store block is dropped — own-store wins). `supervisor.py`
+  (`Member.real_command`) calls this instead of the old own-store-only bridge.
+- **Double-injection guard.** A spawned `claude -p` worker ALSO fires the plugin's
+  `UserPromptSubmit` hook on its own prompt (confirmed: `-p` fires
+  `UserPromptSubmit`). For a `shared_memory_read` worker — whose shared memory was
+  already injected explicitly at dispatch — the dispatcher sets
+  `SC_NO_MEMORY_INJECT=1` on the worker env, and `hook_memory_inject` no-ops when
+  it sees that flag, so the explicit dispatch injection is the **single source**.
+  Non-shared-read workers leave the env untouched, so the hook keeps serving them
+  shared memory as before (no regression). **Coverage:** the live dispatch path is
+  `supervisor.py` (via `company-run.sh --dispatch`); the other headless-agent
+  sites dispatch a FIXED persona, not Elon — `daily-run.sh`'s agent runs as Tony
+  (maintenance/proposals), `fire-trigger.sh` routes through Phoebe, `fleet-run.sh`
+  only re-invokes each sub's `daily-run.sh`, and `elon_survey.py` is deterministic
+  (spawns no agent) — so none dispatch a `shared_memory_read` employee and none
+  need the shared block.
+
 **Capture at close.** A `rag` worker's final act, after its handoff brief, is to
 record **ONE** structured memory of the single reusable lesson from the task, via
 `remember()` (its persona's "Memory — grow with the project" section states this).
@@ -206,7 +247,7 @@ the R1–R6 validator are untouched.
 
 ---
 
-Version: v1.3 (2026-07-07) — + per-employee memory MODE (rag/flat) + recall-at-dispatch wired via `Employee.recall_context`.
+Version: v1.4 (2026-07-08) — + shared company-memory READ at dispatch (Phase 18c): `shared_memory_read` capability (elon by default) reads the SHARED corpus into a dispatched worker via `Employee.dispatch_context`, with a `SC_NO_MEMORY_INJECT` double-injection guard on the spawned worker. Prior: v1.3 (2026-07-07) — per-employee memory MODE (rag/flat) + own-store recall-at-dispatch via `Employee.recall_context`.
 Prior: v1.2 (2026-07-07) — + per-employee memory (recall at dispatch, capture at close).
 Prior: v1.1 (2026-06-29) — orchestration/execution split, sub-agent isolation, parallel dispatch, tools registry.
 Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice + `memory:` mode), `scripts/employee.py` (`memory_mode`/`remember`/`recall`/`recall_context`).

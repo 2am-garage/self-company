@@ -447,6 +447,32 @@ class TestMemoryInject(unittest.TestCase):
         rc, _p, _r = _run(company=self.company, stdin="not-a-dict-just-a-string")
         self.assertEqual(rc, 0)
 
+    # --- Phase 18c double-injection guard ------------------------------------
+    def test_sc_no_memory_inject_no_ops(self):
+        # A dispatched `shared_memory_read` worker (elon) already had the SHARED
+        # memory injected explicitly at dispatch; supervisor sets
+        # SC_NO_MEMORY_INJECT=1 on that worker so THIS hook must no-op — otherwise
+        # the same memory is injected a second time.
+        _write_mem(self.company, "L2-cold", "editor-preference",
+                   body="The Chairman prefers the Neovim editor with a dark theme.")
+        _write_transcript(self.transcript, ["set up my neovim colorscheme"])
+        # Baseline (no guard) injects the match...
+        rc0, parsed0, _ = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc0, 0)
+        self.assertIsNotNone(parsed0)
+        self.assertIn("Neovim",
+                      parsed0["hookSpecificOutput"]["additionalContext"])
+        # ...with the guard set, the SAME prompt injects NOTHING (single source).
+        os.environ["SC_NO_MEMORY_INJECT"] = "1"
+        try:
+            rc1, parsed1, raw1 = _run(company=self.company,
+                                      transcript=self.transcript)
+        finally:
+            os.environ.pop("SC_NO_MEMORY_INJECT", None)
+        self.assertEqual(rc1, 0)
+        self.assertEqual(raw1, "")
+        self.assertIsNone(parsed1)
+
     # --- loose time bound on a ~150-memory corpus ----------------------------
     def test_fast_on_150_memories(self):
         topics = ["kubernetes", "postgres", "rust", "typescript", "terraform"]
