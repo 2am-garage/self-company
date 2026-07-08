@@ -208,6 +208,69 @@ class TestApplyDrop(unittest.TestCase):
             self.assertEqual([x["id"] for x in data["actions"]["reaped"]], ["dup"])
             self.assertFalse(os.path.exists(path))
 
+    def test_dateless_tombstone_reaped_via_created(self):
+        # C2 (BOB-F5): a tombstone with NEITHER last_reinforced NOR invalid_at
+        # previously stayed keep forever. It now anchors the grace clock on
+        # `created` (stable across the keep-pass rewrite), so it ages out.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "stub.md")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w") as f:
+                f.write("---\nid: stub\ntier: L0\nowner: Tony\n"
+                        'sources: ["[s#1]"]\ncreated: 2026-06-25\n'
+                        "reinforce_count: 1\ndecay_score: 1.0\n"
+                        "status: archived\n---\nbody\n")
+            # inside grace (created 2026-06-25 + 7d): kept
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-06-30", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual(data["actions"]["reaped"], [])
+            self.assertTrue(os.path.exists(path))
+            # past grace: reaped (anchor from `created`)
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-07-05", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual([x["id"] for x in data["actions"]["reaped"]], ["stub"])
+            self.assertFalse(os.path.exists(path))
+
+    def test_fully_dateless_tombstone_reaped_via_mtime(self):
+        # C2 (BOB-F5): a stub lacking last_reinforced, invalid_at AND created
+        # falls back to the file's mtime as the grace anchor. Single --apply run
+        # (mtime pinned via os.utime) so the keep-pass rewrite can't bump it.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "nodate.md")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w") as f:
+                f.write("---\nid: nodate\ntier: L0\nowner: Tony\n"
+                        'sources: ["[s#1]"]\nreinforce_count: 1\n'
+                        "status: archived\n---\nbody\n")
+            anchor = datetime(2026, 6, 25).timestamp()
+            os.utime(path, (anchor, anchor))
+            # past grace measured from mtime (2026-06-25 + 7d < 2026-07-06)
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-07-06", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual([x["id"] for x in data["actions"]["reaped"]],
+                             ["nodate"])
+            self.assertFalse(os.path.exists(path))
+
+    def test_fully_dateless_tombstone_kept_within_grace(self):
+        # Complement: within the mtime-anchored grace window it stays put.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "L0-working", "nodate.md")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w") as f:
+                f.write("---\nid: nodate\ntier: L0\nowner: Tony\n"
+                        'sources: ["[s#1]"]\nreinforce_count: 1\n'
+                        "status: archived\n---\nbody\n")
+            anchor = datetime(2026, 6, 25).timestamp()
+            os.utime(path, (anchor, anchor))
+            data = _helpers.run_json("decay.py", "--memory-dir", d, "--now",
+                                     "2026-06-29", "--config",
+                                     "/nonexistent.md", "--apply")
+            self.assertEqual(data["actions"]["reaped"], [])
+            self.assertTrue(os.path.exists(path))
+
     def test_apply_preserves_verified_date(self):
         # Regression: decay --apply rewrites frontmatter and must NOT drop the
         # VERIFY stamp (verified_date/verified_by), or it fights the verify loop.

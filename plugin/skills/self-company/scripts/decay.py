@@ -675,7 +675,26 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                 # invalidated, even if last_reinforced is much older.
                 reap_candidates = [d for d in (parse_date(mem.get("last_reinforced")),
                                                parse_date(mem.get("invalid_at"))) if d]
-                reap_last = max(reap_candidates) if reap_candidates else None
+                if reap_candidates:
+                    reap_last = max(reap_candidates)
+                else:
+                    # C2 (BOB-F5): a tombstone carrying NEITHER last_reinforced
+                    # nor invalid_at previously stayed `keep` forever — no anchor,
+                    # so the grace clock never started. Fall back to `created`
+                    # first, then the file's mtime, so a dateless
+                    # archived/absorbed stub still ages out and gets reaped.
+                    # `created` is preferred because it is round-tripped in the
+                    # frontmatter and therefore SURVIVES the keep-pass rewrite
+                    # (a kept within-grace tombstone is re-serialized each run,
+                    # which bumps mtime); mtime is the last resort for a stub
+                    # that lacks `created` too. Best-effort: on any failure leave
+                    # it unanchored (kept) rather than crash the batch.
+                    reap_last = parse_date(mem.get("created"))
+                    if reap_last is None:
+                        try:
+                            reap_last = datetime.fromtimestamp(path.stat().st_mtime)
+                        except Exception:
+                            reap_last = None
                 if reap_last is not None:
                     reap_age = (now - reap_last).total_seconds() / (24 * 3600)
                     if reap_age > reap_grace_days:
