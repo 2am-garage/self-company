@@ -355,6 +355,44 @@ class TestDispatchBudget(unittest.TestCase):
             self.assertLess(elapsed, 15, "dispatch must not hang on a stalled worker")
             self.assertEqual(workers["bob"].status, sv.Status.FAILED)  # killed -> failed
 
+    def test_partial_line_stall_does_not_block_deadline_or_siblings(self):
+        # Item C1 (Phase 26 fold-in / Gibby #4): a worker that emits a PARTIAL
+        # line (no trailing '\n') and then stalls used to block the buffered
+        # readline() forever, wedging the whole select loop — starving the
+        # in-loop deadline check for every OTHER worker too. Non-blocking +
+        # manual buffer assembly means the stalled worker is still killed on
+        # schedule, and a normal sibling keeps running/finishing unaffected.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d, ids=("bob", "elon"))
+            orig = sv.Member.real_command
+
+            def _cmd(self, task, model="m"):
+                if self.id == "bob":
+                    # partial line, no newline, then hang (ignoring TERM)
+                    return ["bash", "-c",
+                            "trap '' TERM; printf '@status working-partial'; "
+                            "while :; do sleep 0.2; done"]
+                return ["bash", "-c", "echo '@status done'"]
+
+            sv.Member.real_command = _cmd
+            os.environ["SELF_COMPANY_DISPATCH_TIMEOUT"] = "1"
+            os.environ["SELF_COMPANY_DISPATCH_KILL_AFTER"] = "1"
+            try:
+                sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
+                t0 = time.monotonic()
+                workers = sup.dispatch({"bob": "hang please", "elon": "quick"},
+                                       demo=False)
+                elapsed = time.monotonic() - t0
+            finally:
+                sv.Member.real_command = orig
+                os.environ.pop("SELF_COMPANY_DISPATCH_TIMEOUT", None)
+                os.environ.pop("SELF_COMPANY_DISPATCH_KILL_AFTER", None)
+            self.assertLess(elapsed, 15,
+                            "a partial-line stall must not block the deadline check")
+            self.assertEqual(workers["bob"].status, sv.Status.FAILED)
+            self.assertTrue(workers["bob"].timed_out)
+            self.assertEqual(workers["elon"].status, sv.Status.DONE)
+
     def test_normal_fast_worker_unaffected(self):
         with tempfile.TemporaryDirectory() as d:
             c = self._company(d)

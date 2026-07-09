@@ -229,17 +229,59 @@ class Worker:
         self.proc = None
         self._t0 = None
         self._t1 = None
+        self._buf = b""            # Item C1: raw bytes pending a '\n'
 
     def start(self):
+        # Item C1 (Phase 26 fold-in / Gibby #4): binary, unbuffered pipe — we
+        # read it ourselves via os.read() on the raw fd, never through
+        # proc.stdout's own buffered readline().
         self.proc = subprocess.Popen(
             self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, env=self.env)
+            bufsize=0, env=self.env)
+        os.set_blocking(self.proc.stdout.fileno(), False)
         self.status = Status.STARTING
         self._t0 = time.monotonic()
 
     @property
     def fd(self):
         return self.proc.stdout.fileno() if self.proc and self.proc.stdout else None
+
+    def read_available(self):
+        """Item C1 (Phase 26 fold-in / Gibby #4): non-blocking raw read +
+        manual line assembly. `select()` only promises the fd is READABLE —
+        it does NOT promise a full line is available. The old code called the
+        buffered `readline()`, which keeps issuing blocking reads until it
+        sees a '\\n' or EOF; a worker that emits a partial line (no trailing
+        newline) and then stalls would block that call forever, wedging the
+        WHOLE select loop — including the in-loop deadline check for every
+        OTHER worker — until the outer `timeout -k` finally SIGKILLs it. With
+        the fd set non-blocking, a short/empty read just means "nothing more
+        right now" (BlockingIOError), never a wait, so the loop always comes
+        back around to re-check every worker's budget on schedule. The outer
+        `timeout -k` wrap remains the backstop for a worker that ignores
+        signals entirely.
+
+        Returns (lines, eof): decoded complete lines (newline stripped), and
+        whether the far end has closed (mirrors the old readline()=="" EOF
+        signal, flushing any final partial line as the last one first)."""
+        try:
+            chunk = os.read(self.fd, 65536)
+        except BlockingIOError:
+            return [], False
+        except OSError:
+            chunk = b""
+        if chunk == b"":
+            lines = []
+            if self._buf:
+                lines.append(self._buf.decode("utf-8", errors="replace"))
+                self._buf = b""
+            return lines, True
+        self._buf += chunk
+        lines = []
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            lines.append(line.decode("utf-8", errors="replace"))
+        return lines, False
 
     def consume_line(self, line):
         line = line.rstrip("\n")
@@ -389,16 +431,16 @@ class Supervisor:
             ready, _, _ = select.select(list(active), [], [], 0.2)
             for fd in ready:
                 w = active[fd]
-                line = w.proc.stdout.readline()
-                if line == "":                 # EOF -> process finished
-                    w.on_eof()
-                    del active[fd]
-                    self._emit(w, "end")
-                else:
+                lines, eof = w.read_available()
+                for line in lines:
                     w.consume_line(line)
                     if line.startswith("@status "):
                         self.renderer.feed(w)
                         self._emit(w, "status")
+                if eof:                        # far end closed -> process finished
+                    w.on_eof()
+                    del active[fd]
+                    self._emit(w, "end")
                 self.renderer.repaint(workers)
             # Item 3: per-worker wall-clock deadline. A stalled worker that never
             # reaches EOF (no output, ignores signals) would wedge this loop —
