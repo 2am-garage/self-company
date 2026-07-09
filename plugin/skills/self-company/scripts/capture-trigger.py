@@ -679,6 +679,19 @@ def _read_hook_stdin():
 
 
 def main(argv=None):
+    # Absolute fail-open backstop (GIB-C3): CAPTURE must NEVER crash a session.
+    # write_l0 (mkdir/write_text) or the daily-log block can raise OSError on a
+    # read-only/full memory dir or an L0-working-is-a-file — mirror the sibling
+    # hooks (hook_memory_inject.main, hook_memory_lint) and swallow anything into
+    # exit 0, logging to stderr but never propagating a traceback to the user.
+    try:
+        return _main_impl(argv)
+    except Exception as e:                      # noqa: BLE001 - deliberate catch-all
+        print(f"[capture-trigger] non-fatal error, exiting 0: {e}", file=sys.stderr)
+        return 0
+
+
+def _main_impl(argv=None):
     # Second-layer recursion guard (the headless model call sets this).
     if os.environ.get(RECURSION_GUARD):
         return 0
