@@ -53,6 +53,10 @@ try:
 except Exception:
     _HAS_EMBED = False
 
+# Phase 24 Item 1: model-stamp the index so a query can never silently score
+# against a different model's vectors (same dim does not mean same space).
+from rag_stamp import read_stamp, write_stamp, stamp_matches
+
 # ============================================================================
 # OPTIONAL IMPORT (graceful degradation)
 # ============================================================================
@@ -69,8 +73,17 @@ except ImportError:
 # ============================================================================
 
 RAG_ENABLE_THRESHOLD = 50
-RAG_MODEL = "BAAI/bge-small-en-v1.5"   # fastembed (local CPU, offline); see rag_embed.py
-EMBEDDING_DIM = 384
+
+# Phase 24 Item 1: single source of truth for model + dim, imported from
+# rag_embed (was a duplicated literal here before this phase). rag_embed.py is
+# pure stdlib until embed() lazily imports fastembed, so this import cannot fail
+# for lack of the venv; the literal fallback below is belt-and-suspenders only.
+if _HAS_EMBED:
+    RAG_MODEL = rag_embed.RAG_EMBED_MODEL
+    EMBEDDING_DIM = rag_embed.EMBEDDING_DIM
+else:                                                          # pragma: no cover
+    RAG_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    EMBEDDING_DIM = 384
 
 
 # ============================================================================
@@ -219,9 +232,20 @@ def incremental_up_to_date(prev: Dict[str, Any], content_hash: str,
     dead L1 path — and both consumers drop any hit whose path isn't a live file,
     silently dropping the promoted memory from recall. Returning False here forces
     a re-embed/refresh so path+tier track reality. `prev` is the stored row dict
-    {content_hash, path, tier}. Pure — no deps, unit-testable without a venv."""
+    {content_hash, path, tier}. Pure — no deps, unit-testable without a venv.
+
+    C1 (fold-in): the path comparison is REALPATH-normalized on both sides (mirrors
+    hook_memory_inject.semantic_top's `_norm`), so a relative-vs-absolute
+    `--memory-dir` invocation for the SAME file compares equal instead of forcing a
+    needless full re-embed. `os.path.realpath` does not require the path to exist,
+    so this stays pure and works on the synthetic paths the unit tests use."""
+    def _norm(p):
+        try:
+            return os.path.realpath(p) if p else p
+        except Exception:
+            return p
     return (prev.get("content_hash", "") == content_hash
-            and prev.get("path", "") == path_str
+            and _norm(prev.get("path", "")) == _norm(path_str)
             and prev.get("tier", "") == tier)
 
 
@@ -445,12 +469,37 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
             db = lancedb.connect(str(index_dir))
             table = get_or_create_table(db)
             if table:
-                for row in table.search().to_list():
-                    existing_rows[row["id"]] = {
-                        "content_hash": row.get("content_hash", ""),
-                        "path": row.get("path", ""),
-                        "tier": row.get("tier", ""),
-                    }
+                existing_table_rows = table.search().to_list()
+                # Phase 24 Item 1 — model-stamp self-heal (Phase 12b pattern): a
+                # table with real rows but a stamp that doesn't match the
+                # CURRENT embedding model (mismatched, or absent — a legacy
+                # pre-Phase-24 index never wrote one) cannot be trusted for an
+                # incremental refresh: unchanged rows would keep OLD-model
+                # vectors sitting beside newly-embedded NEW-model vectors in the
+                # SAME cosine space, silently corrupting every future query (same
+                # dim, so no crash — just wrong answers). Force a full rebuild
+                # exactly once; the loop below then re-embeds everything and the
+                # new stamp is written at the end. A brand-new/empty table is NOT
+                # a mismatch (nothing to migrate) — the check only fires when
+                # there is real prior data.
+                if existing_table_rows:
+                    stamp = read_stamp(index_dir)
+                    if not stamp_matches(stamp, RAG_MODEL, EMBEDDING_DIM):
+                        report["warnings"].append(
+                            "model-stamp mismatch (index stamp="
+                            f"{stamp!r}, current={{'model': {RAG_MODEL!r}, "
+                            f"'dim': {EMBEDDING_DIM}}}) — forcing full rebuild "
+                            "for cosine-space safety"
+                        )
+                        rebuild = True
+                        report["mode"] = "rebuild (stamp-forced)"
+                if not rebuild:
+                    for row in existing_table_rows:
+                        existing_rows[row["id"]] = {
+                            "content_hash": row.get("content_hash", ""),
+                            "path": row.get("path", ""),
+                            "tier": row.get("tier", ""),
+                        }
         except Exception as e:
             report["warnings"].append(f"Failed to load existing index: {e}")
 
@@ -497,7 +546,14 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
                 "tier": mem["tier"],
                 "path": str(path),
                 "content_hash": content_hash,
-                "vector": vec
+                "vector": vec,
+                # Phase 24 Item 4: store the embedded body text so an FTS
+                # (BM25) index can be built alongside the vector column —
+                # a deliberate reversal of the old "index stores no body"
+                # stance (references/rag.md §7). Acceptable because the
+                # index is gitignored/local and always rebuildable from the
+                # markdown truth; nothing new leaves the machine.
+                "text": body,
             }
             rows_to_add.append(row)
             report["embedded"] += 1
@@ -532,6 +588,28 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         table = get_or_create_table(db)
         if table:
             report["table_rows"] = len(table.search().to_list())
+
+            # Phase 24 Item 4: (re)build the FTS (BM25) index on the `text`
+            # column so rag_query.py's hybrid search has a lexical leg for
+            # exact-token queries (script names, ids, error strings) that
+            # cosine alone misses. Native LanceDB FTS — zero new dependencies.
+            # Best-effort: an empty/near-empty table or a transient index-build
+            # hiccup must never fail the whole run (the vector-only path still
+            # works without it — rag_query degrades to vector search).
+            if report["table_rows"] > 0:
+                try:
+                    table.create_fts_index("text", replace=True)
+                except Exception as e:
+                    report["warnings"].append(f"FTS index build failed: {e}")
+
+        # Phase 24 Item 1: stamp the index with the model actually used to
+        # produce every vector now in the table (fresh build or the common
+        # unchanged-rows-preserved incremental case — both are internally
+        # consistent by construction: forced rebuild re-embeds everything above,
+        # and the non-forced path only reaches here when the prior stamp already
+        # matched). Best-effort; a failure here degrades to "no stamp" on the
+        # NEXT run, which is itself handled (treated as mismatch -> rebuild).
+        write_stamp(index_dir, RAG_MODEL, EMBEDDING_DIM)
 
     except Exception as e:
         print(f"[rag_index] LanceDB error: {e}", file=sys.stderr)

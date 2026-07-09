@@ -36,12 +36,16 @@ case "$CMD" in
       echo "[rag_setup] pip install failed (check network)." >&2
       exit 1
     fi
-    echo "[rag_setup] warming the embedding model (one-time ~130MB download)…"
-    "$PY" - <<'PY' || { echo "[rag_setup] model warm-up failed." >&2; exit 1; }
+    echo "[rag_setup] warming the embedding model (one-time ~470MB download, multilingual)…"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "$PY" - "$SCRIPT_DIR" <<'PY' || { echo "[rag_setup] model warm-up failed." >&2; exit 1; }
+import sys
+sys.path.insert(0, sys.argv[1])
+from rag_embed import RAG_EMBED_MODEL, EMBEDDING_DIM   # Phase 24: single source of truth
 from fastembed import TextEmbedding
-m = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+m = TextEmbedding(model_name=RAG_EMBED_MODEL)
 list(m.embed(["warmup"]))
-print("  embedding backend ready (BAAI/bge-small-en-v1.5, 384-dim, CPU, offline)")
+print(f"  embedding backend ready ({RAG_EMBED_MODEL}, {EMBEDDING_DIM}-dim, CPU, offline)")
 PY
     echo "[rag_setup] done. Build the index with: python3 .company/scripts/rag_index.py --rebuild"
     ;;
