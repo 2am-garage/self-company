@@ -86,10 +86,25 @@ engine is never edited:
 ```
 your program ── fire-trigger.sh training-done '{"val_bpb":0.98}' ──┐
                                                                     ▼
-   trigger_engine.py: eval condition → guards(cooldown/dedupe/daily-cap)
-                                                                    │ pass
+   trigger_engine.py --decide (READ-ONLY): condition → cooldown/dedupe/cap
+                                                                    │ fire=true
+                        untrusted: tool-less STAGE-1 parse → schema validation
+                                                                    │ ok, not require_confirm-held
+                            trigger_engine.py --commit: re-check the SAME
+                             guards under the state flock, THEN record()
+                                                                    │ still fires
                                           detached, bounded `claude -p` → Phoebe
 ```
+
+**State only commits after validation (Phase 26 Item 1).** A schema-rejected
+or `require_confirm`-parked payload consumes NOTHING — no cap slot, no
+cooldown/dedupe update — so a malformed or untrusted producer can never burn
+the daily budget by sending garbage (the DoS the privilege-separation split
+below exists to prevent). The `--commit` re-check happens **inside the same
+state flock** `decide_and_record()` already used, so a race that claims the
+slot during the gap converts a would-be fire into a clean HOLD instead of an
+over-fire. `require_confirm` today is a deterministic HOLD-for-manual, not an
+approval queue — see `org/triggers/README.md`.
 
 Decision is deterministic and testable (`trigger_engine.py`); orchestration —
 the bounded, recursion-guarded, detached agent — lives in `fire-trigger.sh`, the
