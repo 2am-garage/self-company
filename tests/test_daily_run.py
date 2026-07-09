@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 
 import _helpers
 
@@ -773,6 +774,364 @@ class TestRuntimeReliability(unittest.TestCase):
         finally:
             if holder:
                 holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+
+def _fake_df_low_space(d):
+    """Plant a fake `df` reporting Available far below any real threshold,
+    regardless of args — used by both the `-Pk` (free KB) and `-P`
+    (filesystem name) calls daily-run.sh makes (same fixed 2-line output
+    satisfies both column extractions)."""
+    bindir = os.path.join(d, "fakebin")
+    os.makedirs(bindir, exist_ok=True)
+    p = os.path.join(bindir, "df")
+    with open(p, "w") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'echo "Filesystem     1024-blocks      Used Available Capacity Mounted on"\n'
+            'echo "fakefs              999999999 999999999 100 99% /"\n'
+        )
+    os.chmod(p, 0o755)
+    return bindir
+
+
+def _fake_tar_always_fails(d):
+    """Plant a fake `tar` that always fails (simulates ENOSPC mid-snapshot)."""
+    bindir = os.path.join(d, "fakebin")
+    os.makedirs(bindir, exist_ok=True)
+    p = os.path.join(bindir, "tar")
+    with open(p, "w") as f:
+        f.write("#!/usr/bin/env bash\necho 'tar: fake ENOSPC failure' >&2\nexit 2\n")
+    os.chmod(p, 0o755)
+    return bindir
+
+
+class TestItem1SafetyFloor(unittest.TestCase):
+    """Phase 25 Item 1 — CRITICAL: never enter the mutating core without a
+    floor; never truncate-write into a full disk. ENOSPC harness — kept
+    permanently in the suite (spec requirement, reproducible)."""
+
+    def test_free_space_preflight_aborts_core_corpus_byte_identical(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-stale", last_reinforced="2026-05-01")  # would decay-drop
+            path = os.path.join(company, "memory", "L0-working", "obs-stale.md")
+            with open(path) as f:
+                before = f.read()
+            bindir = _fake_df_low_space(d)
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"PATH": bindir + os.pathsep + os.environ["PATH"]})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- CORE ABORTED:", text)
+            self.assertIn("free-space preflight", text)
+            self.assertIn("- reinforce: skipped — CORE ABORTED", text)
+            self.assertIn("- decay: skipped — CORE ABORTED", text)
+            self.assertIn("- verify: skipped — CORE ABORTED", text)
+            self.assertIn("- entropy", text)   # read-only stage still runs
+            with open(path) as f:
+                after = f.read()
+            self.assertEqual(before, after)    # corpus byte-identical
+            self.assertTrue(os.path.exists(os.path.join(company, "ops", "core-abort.marker")))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_snapshot_failure_aborts_core_no_stray_tarball(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-stale", last_reinforced="2026-05-01")
+            bindir = _fake_tar_always_fails(d)
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"PATH": bindir + os.pathsep + os.environ["PATH"]})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- CORE ABORTED:", text)
+            self.assertIn("snapshot FAILED", text)
+            bdir = os.path.join(company, "backups")
+            if os.path.isdir(bdir):
+                self.assertEqual(os.listdir(bdir), [])  # no truncated/stray tarball
+            with open(os.path.join(company, "memory", "L0-working", "obs-stale.md")) as f:
+                self.assertNotIn("status: archived", f.read())  # decay never ran
+            self.assertTrue(os.path.exists(os.path.join(company, "ops", "core-abort.marker")))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_agent_skipped_during_abort_no_token_spend(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            bindir = _fake_df_low_space(d)
+            claude_bin = _fake_claude(d)
+            promptfile = os.path.join(d, "prompt.txt")
+            env = {"PATH": claude_bin + os.pathsep + bindir + os.pathsep + os.environ["PATH"],
+                   "FAKE_CLAUDE_PROMPT_FILE": promptfile}
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d], env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- agent: skipped — CORE ABORTED", text)
+            self.assertFalse(os.path.exists(promptfile))  # agent never invoked
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_recovers_cleanly_next_run_with_space_no_manual_step(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-stale", last_reinforced="2026-05-01")
+            bindir = _fake_df_low_space(d)
+            r1 = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"PATH": bindir + os.pathsep + os.environ["PATH"]})
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            self.assertTrue(os.path.exists(os.path.join(company, "ops", "core-abort.marker")))
+            # Next run: real df/tar (healthy) — recovers with NO manual step.
+            r2 = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertFalse(os.path.exists(os.path.join(company, "ops", "core-abort.marker")))
+            with open(os.path.join(company, "memory", "L0-working", "obs-stale.md")) as f:
+                self.assertIn("status: archived", f.read())  # decay finally ran
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_healthy_run_no_abort_line_and_warnings_zero(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-fresh")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertNotIn("CORE ABORTED", text)
+            self.assertIn("- warnings: 0", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+class TestItem3WarningsSurfaced(unittest.TestCase):
+    """Phase 25 Item 3: decay's per-file corruption/rot warnings are surfaced
+    into the daily log BEFORE the temp JSON is reaped, and flip the ledger
+    verdict away from flat/keep — never silently thrown away."""
+
+    def test_corrupt_memory_file_surfaces_warnings_line(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            p = os.path.join(company, "memory", "L0-working", "corrupt.md")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as f:
+                f.write("---\ntier: L0\nowner: Tony\n---\nbody\n")  # missing id
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertRegex(text, r"- warnings: 1 \(first 5:.*missing id")
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_warnings_bearing_run_flagged_warn_not_flat_in_ledger(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            p = os.path.join(company, "memory", "L0-working", "corrupt.md")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as f:
+                f.write("---\ntier: L0\nowner: Tony\n---\nbody\n")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            rc, out, err = _helpers.run_script("report.py", "--company", company)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("`warn`", out)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_clean_run_stays_flat_no_false_alarm(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-fresh")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            rc, out, err = _helpers.run_script("report.py", "--company", company)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("`flat`", out)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+class TestItem4LockHardening(unittest.TestCase):
+    """Phase 25 Item 4: the daily lock must not leak into grandchildren or
+    wedge forever."""
+
+    def _fake_claude_with_grandchild(self, d, survivor_pidfile):
+        """A fake claude that spawns a detached grandchild (SAME process
+        group — no setsid of its own) that traps TERM and survives, while
+        claude ITSELF has no trap and dies promptly on TERM — exactly the
+        'leader dies, orphan survives' case only a GROUP kill catches."""
+        bindir = os.path.join(d, "fakebin")
+        os.makedirs(bindir, exist_ok=True)
+        p = os.path.join(bindir, "claude")
+        with open(p, "w") as f:
+            f.write(
+                '#!/usr/bin/env bash\n'
+                'if [[ "${1:-}" == "auth" ]]; then echo \'{"loggedIn": true}\'; exit 0; fi\n'
+                f'( trap "" TERM; echo $$ > "{survivor_pidfile}"; '
+                'while true; do sleep 0.2; done ) &\n'
+                'disown\n'
+                'while true; do sleep 0.5; done\n')
+        os.chmod(p, 0o755)
+        return bindir
+
+    def test_surviving_grandchild_does_not_block_next_tick_and_gets_killed(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            survivor_pidfile = os.path.join(d, "survivor.pid")
+            bindir = self._fake_claude_with_grandchild(d, survivor_pidfile)
+            env = {"PATH": bindir + os.pathsep + os.environ["PATH"],
+                   "SELF_COMPANY_DAILY_TIMEOUT": "1",
+                   "SELF_COMPANY_TIMEOUT_KILL_AFTER": "2"}
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d], env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for _ in range(100):
+                if os.path.exists(survivor_pidfile):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(os.path.exists(survivor_pidfile), "grandchild never started")
+            with open(survivor_pidfile) as f:
+                pid = int(f.read().strip())
+            alive = True
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                alive = False
+            if alive:
+                os.kill(pid, 9)   # cleanup so we don't leak it
+            self.assertFalse(alive, "surviving grandchild was NOT group-killed")
+            # the next tick must not be blocked by anything this run left behind
+            r2 = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_stale_lock_reported_loudly_not_auto_broken(self):
+        d = _fresh_project()
+        holder = None
+        try:
+            company = os.path.join(d, ".company")
+            ops = os.path.join(company, "ops")
+            os.makedirs(ops, exist_ok=True)
+            old_started = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+            with open(os.path.join(ops, ".daily.lock.holder"), "w") as f:
+                f.write(f"pid=999999\nstarted={old_started}\n")
+            holder = self._hold_lock(company, 3)
+            self._await_ready(company)
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent", "--cron"],
+                      env={"SELF_COMPANY_STALE_LOCK_SECS": "60"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- LOCK STALE:", text)
+            self.assertIn("NOT auto-broken", text)
+        finally:
+            if holder:
+                holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+    def test_fresh_contention_not_misreported_as_stale(self):
+        # a NORMAL contention (holder just started) must stay the routine
+        # "cron tick SKIPPED" message, not a false STALE alarm.
+        d = _fresh_project()
+        holder = None
+        try:
+            company = os.path.join(d, ".company")
+            holder = self._hold_lock(company, 3)
+            self._await_ready(company)
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent", "--cron"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertNotIn("- LOCK STALE:", text)
+            self.assertIn("cron tick SKIPPED", text)
+        finally:
+            if holder:
+                holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+    def test_manual_run_errors_out_after_bounded_wait(self):
+        d = _fresh_project()
+        holder = None
+        try:
+            company = os.path.join(d, ".company")
+            holder = self._hold_lock(company, 5)
+            self._await_ready(company)
+            start = time.monotonic()
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"SELF_COMPANY_MANUAL_LOCK_WAIT": "1"})
+            elapsed = time.monotonic() - start
+            self.assertNotEqual(r.returncode, 0, "manual run must ERROR, not hang forever")
+            self.assertLess(elapsed, 4, "must bound the wait, not hang indefinitely")
+            self.assertIn("could not acquire", r.stderr.lower())
+        finally:
+            if holder:
+                holder.wait()
+            subprocess.run(["rm", "-rf", d])
+
+    def _hold_lock(self, company, hold_secs):
+        ops = os.path.join(company, "ops")
+        os.makedirs(ops, exist_ok=True)
+        lock = os.path.join(ops, ".daily.lock")
+        ready = os.path.join(company, "lock.ready")
+        script = f'exec 9>"{lock}"; flock 9; : > "{ready}"; sleep {hold_secs}'
+        return subprocess.Popen(["bash", "-c", script])
+
+    def _await_ready(self, company):
+        ready = os.path.join(company, "lock.ready")
+        for _ in range(200):
+            if os.path.exists(ready):
+                return
+            time.sleep(0.02)
+        self.fail("lock holder never acquired the lock")
+
+
+class TestC3BackupIntegrity(unittest.TestCase):
+    """C3 (Gibby F7): tar-to-tmp-then-mv on success / rm -f on failure; the
+    rotation glob counts only DATED snapshots (mem-[0-9]*)."""
+
+    def test_special_named_backups_excluded_from_rotation(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            with open(os.path.join(company, "org", "policy.md"), "a") as f:
+                f.write("\n| `BACKUP_KEEP` | **2** | test override | ✓ |\n")
+            bdir = os.path.join(company, "backups")
+            os.makedirs(bdir)
+            specials = ("mem-premanual-20260101T000000Z.tar.gz",
+                       "mem-preL2demote-20260101T000000Z.tar.gz")
+            for name in specials:
+                with open(os.path.join(bdir, name), "w") as f:
+                    f.write("special")
+            _write_mem(company, "obs-fresh")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            files = sorted(os.listdir(bdir))
+            for name in specials:
+                self.assertIn(name, files)  # never touched by rotation
+            dated = [f for f in files if f not in specials]
+            self.assertEqual(len(dated), 1)  # only today's fresh dated snapshot
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_failed_tar_leaves_no_new_tarball(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            bindir = _fake_tar_always_fails(d)
+            _write_mem(company, "obs-fresh")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"PATH": bindir + os.pathsep + os.environ["PATH"]})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            bdir = os.path.join(company, "backups")
+            if os.path.isdir(bdir):
+                self.assertEqual(os.listdir(bdir), [])
+        finally:
             subprocess.run(["rm", "-rf", d])
 
 

@@ -59,6 +59,17 @@ LOGDIR="$COMPANY/ops/logs"
 # (auth pre-flight / agent-fail increment it; a successful agent run deletes it);
 # notify-status.py only READS it to decide escalation. Keeps push agent-only.
 FAIL_MARKER="$COMPANY/ops/auth-fail.marker"
+# Phase 25 Item 1: deterministic CORE-ABORT marker. Written ONLY when the
+# safety floor fails (snapshot failure or a free-space preflight miss) and the
+# mutating core (reinforce/decay/verify --apply) is skipped this run; cleared
+# on the next run that actually passes the floor. report.py/notify-status.py
+# read the DAILY LOG line this same run writes (Item 3's channel) — the
+# marker itself is the durable, externally-inspectable trace.
+CORE_ABORT_MARKER="$COMPANY/ops/core-abort.marker"
+# Item 1.2: free-space preflight threshold in MB, checked on the REALPATH of
+# .company (it may be a symlink/mount — df on the wrong fs is a false pass).
+# A constant, not a corpus-size heuristic; env-overridable for tests/tuning.
+MIN_FREE_MB="${SELF_COMPANY_MIN_FREE_MB:-256}"
 DATE="$(date +%F)"
 LOG="$LOGDIR/daily-$DATE.md"
 
@@ -124,32 +135,97 @@ _run_rag_index=1; _should_run rag_index || _run_rag_index=0
 # agent) on .company/ops/.daily.lock, held for the life of this process (the fd
 # stays open until exit, releasing the lock automatically):
 #   * CRON  => flock -n : if a run already holds it, SKIP this tick with a log line.
-#   * MANUAL => flock (block) : wait for the in-flight run, then run.
+#   * MANUAL => flock -w N : wait, bounded, for the in-flight run; error out (not
+#     hang forever) if it never releases (Item 4.4 — a human must never hang).
 # flock absent (or SELF_COMPANY_NO_FLOCK=1) => ONE warning, run unserialized as
 # today — never fail the cron. Dry-run mutates nothing, so it never locks.
+#
+# Item 4.4: bounded wait for MANUAL (non-cron) invocations, env-overridable.
+MANUAL_LOCK_WAIT="${SELF_COMPANY_MANUAL_LOCK_WAIT:-300}"
+# Item 4.3: stale-lock tripwire threshold — if the CURRENT holder (per the
+# holder marker written just below, right after acquiring) has been running
+# longer than this, a cron-skip REPORTS it loudly instead of a routine
+# contention line (escalate, never auto-break a possibly-live slow run).
+STALE_LOCK_SECS="${SELF_COMPANY_STALE_LOCK_SECS:-3600}"
 LOCK_HELD=0
+LOCKFILE="$COMPANY/ops/.daily.lock"
+LOCK_HOLDER_MARKER="$COMPANY/ops/.daily.lock.holder"
 if ! $DRY_RUN; then
   if command -v flock >/dev/null 2>&1 && [[ "${SELF_COMPANY_NO_FLOCK:-}" != "1" ]]; then
-    LOCKFILE="$COMPANY/ops/.daily.lock"
     mkdir -p "$COMPANY/ops" 2>/dev/null || true
-    if exec {LOCK_FD}>"$LOCKFILE" 2>/dev/null; then
+    # Phase 25: `2>/dev/null` is scoped to a `{ ...; }` GROUP, not bare on the
+    # `exec` — a bare `exec cmd 2>/dev/null` (no group) permanently redirects
+    # the WHOLE REMAINING SCRIPT's stderr to /dev/null (exec's redirections
+    # persist in the current shell by design), which would silently swallow
+    # every later `>&2` message (e.g. Item 4.4's manual-timeout error) and,
+    # under `bash -x`, its own xtrace output. The group's redirection is
+    # restored once the group ends; the exec's OWN fd-open effect (LOCK_FD
+    # staying open) still persists exactly as intended.
+    if { exec {LOCK_FD}>"$LOCKFILE"; } 2>/dev/null; then
       if (( IS_CRON )); then
         if flock -n "$LOCK_FD"; then
           LOCK_HELD=1
         else
-          echo "- lock: another daily-run holds .company/ops/.daily.lock — cron tick SKIPPED (no pile-up); the in-flight run applies this maintenance" >> "$LOG"
+          # Item 4.3: a held lock is routine contention UNLESS the holder marker
+          # (written by whichever run currently holds the lock, right below) says
+          # it has been running longer than STALE_LOCK_SECS — then it is a
+          # wedged/dead-but-not-released run, reported loudly (never auto-broken:
+          # breaking a live slow run's lock is worse than alerting).
+          _holder_age=""
+          if [[ -f "$LOCK_HOLDER_MARKER" ]]; then
+            _holder_started="$(sed -n 's/^started=//p' "$LOCK_HOLDER_MARKER" 2>/dev/null | head -1)"
+            if [[ -n "$_holder_started" ]]; then
+              _started_epoch="$(date -d "$_holder_started" +%s 2>/dev/null || echo "")"
+              _now_epoch="$(date +%s)"
+              if [[ "$_started_epoch" =~ ^[0-9]+$ ]]; then
+                _holder_age=$(( _now_epoch - _started_epoch ))
+              fi
+            fi
+          fi
+          if [[ -n "$_holder_age" ]] && (( _holder_age > STALE_LOCK_SECS )); then
+            echo "- LOCK STALE: .company/ops/.daily.lock has been held ${_holder_age}s (> ${STALE_LOCK_SECS}s) by a run started $_holder_started — NOT auto-broken; investigate a wedged/orphaned run (this tick SKIPPED)" >> "$LOG"
+          else
+            echo "- lock: another daily-run holds .company/ops/.daily.lock — cron tick SKIPPED (no pile-up); the in-flight run applies this maintenance" >> "$LOG"
+          fi
           echo "[daily-run] skipped ($DATE) — mutating core locked by a concurrent run"
           exit 0
         fi
       else
-        flock "$LOCK_FD"   # manual: block until the in-flight run releases, then run
-        LOCK_HELD=1
+        if flock -w "$MANUAL_LOCK_WAIT" "$LOCK_FD"; then
+          LOCK_HELD=1
+        else
+          echo "[daily-run] ERROR: could not acquire .company/ops/.daily.lock within ${MANUAL_LOCK_WAIT}s (another run is in progress) — manual run aborted; see ops/logs for the in-flight run, or raise SELF_COMPANY_MANUAL_LOCK_WAIT" >&2
+          exit 1
+        fi
+      fi
+      if (( LOCK_HELD )); then
+        # Item 4.3: stamp the holder marker (pid + start time) the MOMENT we
+        # acquire — this is what a later contended cron tick reads to judge
+        # staleness. Best-effort; marker trouble never fails the run.
+        { printf 'pid=%s\n' "$$"; printf 'started=%s\n' "$ts"; } \
+          > "$LOCK_HOLDER_MARKER" 2>/dev/null || true
       fi
     fi
   else
     echo "- lock: flock unavailable — mutating core runs UNSERIALIZED (concurrent runs could race .company/memory); install util-linux to enable mutual exclusion" >> "$LOG"
   fi
 fi
+
+# Item 4.1: close the lock fd in every spawn (`{LOCK_FD}>&-`) — bash has no
+# O_CLOEXEC on `exec {fd}>`, so every spawned process (python3, the RAG venv,
+# and especially `claude -p` and whatever IT spawns — MCP servers, tool
+# subprocs) would otherwise inherit a live copy of the flock. One surviving
+# grandchild holding that copy would wedge every future cron tick forever
+# (`flock -n` never succeeds again). Route every spawn in this script through
+# `_run` so the fd is explicitly closed in the child (a no-op when the lock
+# isn't held, e.g. flock absent or --dry-run).
+_run() {
+  if (( LOCK_HELD )); then
+    "$@" {LOCK_FD}>&-
+  else
+    "$@"
+  fi
+}
 
 # --- 1+2. deterministic core: reinforce + decay + verify + entropy ----------
 # Capture each script's JSON to a temp file, then parse via a heredoc that reads
@@ -158,13 +234,44 @@ fi
 DOUT="$(mktemp)"; EOUT="$(mktemp)"; VOUT="$(mktemp)"; ROUT="$(mktemp)"; SERR="$(mktemp)"; IOUT="$(mktemp)"
 trap 'rm -f "$DOUT" "$EOUT" "$VOUT" "$ROUT" "$SERR" "$IOUT"' EXIT
 
-# --- Phase 5 Item 2 (N2): durability floor — pre-apply snapshot -------------
+# --- Phase 25 Item 1.2: free-space preflight ---------------------------------
+# Before the mutating core (reinforce/decay/verify --apply) ever runs, check
+# free bytes on the filesystem of the RESOLVED .company path — .company may be
+# a symlink or its own mount, and `df` on the un-resolved path is a false
+# pass. Below MIN_FREE_MB -> abort the mutating core (same path a snapshot
+# failure takes, below). Skipped when nothing that mutates would run this
+# tick anyway, and never during --dry-run (nothing will mutate).
+CORE_ABORT=0
+CORE_ABORT_REASON=""
+if ! $DRY_RUN && (( _run_backup || _run_reinforce || _run_decay || _run_verify )); then
+  _company_real="$(cd "$COMPANY" 2>/dev/null && pwd -P || echo "$COMPANY")"
+  _free_kb="$(df -Pk "$_company_real" 2>/dev/null | awk 'NR==2{print $4}')"
+  if [[ "$_free_kb" =~ ^[0-9]+$ ]]; then
+    _free_mb=$(( _free_kb / 1024 ))
+    if (( _free_mb < MIN_FREE_MB )); then
+      CORE_ABORT=1
+      _fs_name="$(df -P "$_company_real" 2>/dev/null | awk 'NR==2{print $1}')"
+      CORE_ABORT_REASON="free-space preflight: ${_free_mb}MB < ${MIN_FREE_MB}MB threshold on ${_fs_name:-unknown fs} ($_company_real)"
+    fi
+  fi
+  # `df`/pwd trouble (not "low space" — genuinely inconclusive) fails OPEN:
+  # these are coreutils basics present on any real install, so treating an
+  # inconclusive probe as fatal would break far more healthy runs than it
+  # would catch real disk-full ones (mirrors the auth-probe's own contract).
+fi
+
+# --- Phase 5 Item 2 (N2) / Phase 25 Item 1 + C3: durability floor — pre-apply
+# snapshot ---------------------------------------------------------------
 # BEFORE the first mutating pass (reinforce --apply below), tar the whole
 # memory/ tree to .company/backups/mem-<UTCts>.tar.gz and rotate to keep the
 # newest BACKUP_KEEP (policy §7.8, default 14). One bad --apply, a buggy
 # consolidation, or fs damage is now recoverable: untar over memory/.
-# Dry-run never snapshots (nothing will mutate). Snapshot failure is logged
-# loudly but never aborts the deterministic core (never fail the cron).
+# Dry-run never snapshots (nothing will mutate).
+#
+# Phase 25 Item 1 (CRITICAL): a snapshot FAILURE now ABORTS the mutating core
+# (reinforce/decay/verify --apply do NOT run this tick) instead of the old
+# "proceed without a fresh floor" — the one place best-effort-continue was
+# the bug. Read-only stages (entropy, rag-index) still run below.
 if ! $DRY_RUN && (( ! _run_backup )); then
   echo "- backup: skipped — schedule.yaml gated off tom.backup for this tick" >> "$LOG"
 fi
@@ -179,13 +286,22 @@ except Exception:
   BK_DIR="$COMPANY/backups"
   if (( BACKUP_KEEP == 0 )); then
     # BACKUP_KEEP=0 means backups are disabled — don't snapshot-then-delete.
+    # A DELIBERATE opt-out, not a failure: it does NOT abort the core.
     echo "- backup: disabled (BACKUP_KEEP=0) — mutating passes proceed WITHOUT a snapshot floor" >> "$LOG"
   else
   mkdir -p "$BK_DIR"
   BK_TS="$(date -u +%Y%m%dT%H%M%SZ)"
-  if tar -czf "$BK_DIR/mem-$BK_TS.tar.gz" -C "$COMPANY" memory 2>>"$SERR"; then
+  BK_FINAL="$BK_DIR/mem-$BK_TS.tar.gz"
+  BK_TMP="$BK_FINAL.tmp"
+  # C3 (Gibby F7): tar to a .tmp sibling, `mv` into place ONLY on success — a
+  # failed/killed tar never leaves a truncated tarball posing as the newest
+  # backup (which would turn Item 1's safety floor into a FALSE floor).
+  if tar -czf "$BK_TMP" -C "$COMPANY" memory 2>>"$SERR" && mv -f "$BK_TMP" "$BK_FINAL"; then
     # Rotate: names embed the UTC timestamp, so lexical sort == age sort.
-    mapfile -t _bks < <(ls -1 "$BK_DIR"/mem-*.tar.gz 2>/dev/null | sort)
+    # C3: glob tightened to DATED snapshots only (mem-[0-9]*) so one-off
+    # safety copies (mem-premanual-*/mem-preL2demote-*) stop permanently
+    # occupying keep-slots.
+    mapfile -t _bks < <(ls -1 "$BK_DIR"/mem-[0-9]*.tar.gz 2>/dev/null | sort)
     _n=${#_bks[@]}
     if (( _n > BACKUP_KEEP )); then
       for _old in "${_bks[@]:0:_n-BACKUP_KEEP}"; do rm -f "$_old"; done
@@ -193,9 +309,27 @@ except Exception:
     fi
     echo "- backup: memory -> backups/mem-$BK_TS.tar.gz (keeping $_n/$BACKUP_KEEP)" >> "$LOG"
   else
-    echo "- backup: FAILED to snapshot memory (tar error) — mutating passes proceed WITHOUT a fresh floor; investigate" >> "$LOG"
+    rm -f "$BK_TMP" "$BK_FINAL" 2>/dev/null || true
+    CORE_ABORT=1
+    CORE_ABORT_REASON="snapshot FAILED (tar/mv error) — see script warnings below"
+    echo "- backup: FAILED to snapshot memory (tar error) — CORE ABORTED: reinforce/decay/verify SKIPPED this run; investigate free space/permissions" >> "$LOG"
   fi
   fi
+fi
+
+# --- Phase 25 Item 1: resolve the abort -------------------------------------
+# Write/refresh the durable marker + the loud daily-log line (Item 3's
+# channel — report.py/notify-status.py key on this exact "- CORE ABORTED:"
+# prefix) whenever EITHER the preflight or the snapshot failed. A later
+# healthy run clears any stale marker from a prior abort — "(c) next run with
+# space recovers cleanly with no manual step."
+if (( CORE_ABORT )); then
+  mkdir -p "$(dirname "$CORE_ABORT_MARKER")" 2>/dev/null || true
+  { printf 'last_ts=%s\n' "$ts"; printf 'reason=%s\n' "$CORE_ABORT_REASON"; } \
+    > "$CORE_ABORT_MARKER" 2>/dev/null || true
+  echo "- CORE ABORTED: $CORE_ABORT_REASON — reinforce/decay/verify SKIPPED this run (read-only stages still run); fail-marker written to ops/core-abort.marker" >> "$LOG"
+elif ! $DRY_RUN; then
+  rm -f "$CORE_ABORT_MARKER" 2>/dev/null || true
 fi
 
 # P4 Item 2 — REINFORCE first: deterministic semantic consolidation BEFORE decay,
@@ -207,14 +341,16 @@ fi
 # which can miss under cron. Venv absent => one-line skip (logged below), NEVER a
 # failure. Threshold: the script's own conservative default — never lowered here.
 RAG_PY="$COMPANY/.rag-venv/bin/python"
-REINF_STATE="missing"   # missing | novenv | ran | gated — drives the reinforce log line
-if (( ! _run_reinforce )); then
+REINF_STATE="missing"   # missing | novenv | ran | gated | aborted — drives the reinforce log line
+if (( CORE_ABORT )); then
+  REINF_STATE="aborted"
+elif (( ! _run_reinforce )); then
   REINF_STATE="gated"
 elif [[ -f "$SCRIPTS/reinforce_memory.py" ]]; then
   if [[ -x "$RAG_PY" ]]; then
     reinf_args=(--memory-dir "$MEM")
     $DRY_RUN || reinf_args+=(--apply)
-    SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/reinforce_memory.py" "${reinf_args[@]}" \
+    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/reinforce_memory.py" "${reinf_args[@]}" \
       >"$ROUT" 2>>"$SERR" || true    # nonzero rc must not abort the core
     REINF_STATE="ran"
   else
@@ -222,18 +358,33 @@ elif [[ -f "$SCRIPTS/reinforce_memory.py" ]]; then
   fi
 fi
 
-if (( _run_decay )) && [[ -f "$SCRIPTS/decay.py" ]]; then
+# Phase 25 Item 1: DECAY_STATE/VERIFY_STATE mirror REINF_STATE's shape so a
+# CORE_ABORT (safety-floor failure) skips the mutating passes the SAME way a
+# schedule-gate skip does — just with a distinct, loud log line (below).
+DECAY_STATE="missing"   # missing | gated | aborted | ran
+if (( CORE_ABORT )); then
+  DECAY_STATE="aborted"
+elif (( ! _run_decay )); then
+  DECAY_STATE="gated"
+elif [[ -f "$SCRIPTS/decay.py" ]]; then
   decay_args=(--memory-dir "$MEM" --config "$POLICY")
   $DRY_RUN || decay_args+=(--apply)
-  python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>>"$SERR" || true
+  _run python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>>"$SERR" || true
+  DECAY_STATE="ran"
 fi
 # VERIFY: stamp verified_date on memories whose [session#line] sources trace to a
 # real transcript line (deterministic provenance gate). Before entropy so the KPI
 # reflects the new stamps this round.
-if (( _run_verify )) && [[ -f "$SCRIPTS/verify_memory.py" ]]; then
+VERIFY_STATE="missing"   # missing | gated | aborted | ran
+if (( CORE_ABORT )); then
+  VERIFY_STATE="aborted"
+elif (( ! _run_verify )); then
+  VERIFY_STATE="gated"
+elif [[ -f "$SCRIPTS/verify_memory.py" ]]; then
   verify_args=(--memory-dir "$MEM" --transcripts-dir "$HOME/.claude/projects")
   $DRY_RUN || verify_args+=(--apply)
-  python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>>"$SERR" || true
+  _run python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>>"$SERR" || true
+  VERIFY_STATE="ran"
 fi
 if (( _run_entropy )) && [[ -f "$SCRIPTS/entropy.py" ]]; then
   # P13A-1: entropy MUST always produce its line — it degrades to a Jaccard-only
@@ -253,22 +404,22 @@ if (( _run_entropy )) && [[ -f "$SCRIPTS/entropy.py" ]]; then
   # (SC_RAG_REEXEC=1, Jaccard) pass. A HEALTHY venv (valid JSON) is kept as-is —
   # no downgrade, no double-run.
   if [[ -x "$RAG_PY" ]]; then
-    SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
   fi
   if ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, dict) and "entropy" in d else 1)' "$EOUT" 2>/dev/null; then
     : > "$EOUT"   # drop the venv attempt's absent/garbage stdout, then degrade cleanly
-    SC_RAG_REEXEC=1 python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+    _run env SC_RAG_REEXEC=1 python3 "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
   fi
 fi
 
 DRY_FLAG="$($DRY_RUN && echo 1 || echo 0)"
 python3 - "$DOUT" "$EOUT" "$VOUT" "$LOG" "$DRY_FLAG" "$ROUT" "$REINF_STATE" \
-    "$_run_decay" "$_run_verify" "$_run_entropy" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
+    "$DECAY_STATE" "$VERIFY_STATE" "$_run_entropy" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
 import sys, json
 dpath, epath, vpath, log, dry = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"
 rpath, rstate = sys.argv[6], sys.argv[7]
-dskip = sys.argv[8] == "0"
-vskip = sys.argv[9] == "0"
+dstate = sys.argv[8]     # missing | gated | aborted | ran
+vstate = sys.argv[9]     # missing | gated | aborted | ran
 eskip = sys.argv[10] == "0"
 
 def load(p):
@@ -279,7 +430,9 @@ def load(p):
 
 lines = []
 # P4 Item 2: reinforce ran FIRST — log it first. Every skip/degrade = one line.
-if rstate == "gated":
+if rstate == "aborted":
+    lines.append("- reinforce: skipped — CORE ABORTED (safety floor failed; see above)")
+elif rstate == "gated":
     lines.append("- reinforce: skipped — schedule.yaml gated off tony.reinforce for this tick")
 elif rstate == "novenv":
     lines.append("- reinforce: skipped — RAG venv absent (.company/.rag-venv) — decay/verify/entropy unaffected")
@@ -298,8 +451,10 @@ else:
     else:
         lines.append("- reinforce: no output (errored) — deterministic core continues")
 
-d = load(dpath)
-if dskip:
+d = load(dpath) if dstate == "ran" else None
+if dstate == "aborted":
+    lines.append("- decay: skipped — CORE ABORTED (safety floor failed; see above)")
+elif dstate == "gated":
     lines.append("- decay: skipped — schedule.yaml gated off tony.decay for this tick")
 elif d:
     a = d["actions"]
@@ -312,11 +467,26 @@ elif d:
         lines.append("### Upgrade candidates (for next CONSOLIDATE by Tony)")
         for c in a["upgrade_candidates"]:
             lines.append(f"- {c['id']}: {c['from']} -> {c['to']} (rc {c['reinforce_count']})")
+    # Phase 25 Item 3: surface corruption warnings BEFORE the temp JSON is
+    # reaped (the EXIT trap below deletes $DOUT etc.) instead of computing them
+    # every run and throwing them away. report.py/notify-status.py key on this
+    # exact "- warnings:" prefix to flag a warnings-bearing run (never
+    # flat/keep). A clean run explicitly shows "0" — no false alarms.
+    dwarn = d.get("warnings") or []
+    if dwarn:
+        preview = "; ".join(str(w) for w in dwarn[:5])
+        lines.append(f"- warnings: {len(dwarn)} (first 5: {preview})")
+    else:
+        lines.append("- warnings: 0")
+elif dstate == "ran":
+    lines.append("- decay: no output (script missing or errored)")
 else:
     lines.append("- decay: no output (script missing or errored)")
 
-v = load(vpath)
-if vskip:
+v = load(vpath) if vstate == "ran" else None
+if vstate == "aborted":
+    lines.append("- verify: skipped — CORE ABORTED (safety floor failed; see above)")
+elif vstate == "gated":
     lines.append("- verify: skipped — schedule.yaml gated off gibby.verify for this tick")
 elif v:
     lines.append(
@@ -369,13 +539,13 @@ elif [[ -f "$SCRIPTS/rag_index.py" ]]; then
   # A.2 — deps-free threshold count (works even with NO venv; that is the whole
   # point: tell the Chairman it is worth installing the RAG stack).
   if command -v python3 >/dev/null 2>&1; then
-    SC_RAG_REEXEC=1 python3 "$SCRIPTS/rag_index.py" --threshold-check \
+    _run env SC_RAG_REEXEC=1 python3 "$SCRIPTS/rag_index.py" --threshold-check \
       --memory-dir "$MEM" >/dev/null 2>>"$SERR"
     RAG_OVER=$?
   fi
   # A.1 — incremental index refresh (needs the RAG venv).
   if [[ -x "$RAG_PY" ]]; then
-    SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
+    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
       --memory-dir "$MEM" --index-dir "$MEM/index" >"$IOUT" 2>>"$SERR" || true
     RAGIDX_STATE="ran"
   else
@@ -465,7 +635,7 @@ except Exception:
     # Only employees that actually have at least one memory file (skip the index/
     # subdir itself). No memories -> nothing to embed, no churn.
     compgen -G "$_emp_mem/*.md" >/dev/null 2>&1 || continue
-    SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
+    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
       --memory-dir "$_emp_mem" --index-dir "$_emp_mem/index" >/dev/null 2>>"$SERR" || true
     _emp_refreshed=$((_emp_refreshed + 1))
   done
@@ -482,7 +652,7 @@ fi
 # deterministic — keeps the CEO load-bearing every day). Writes ops/plans/todo-<date>.md.
 if [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   if _should_run survey; then
-    python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" 2>>"$SERR" \
+    _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" 2>>"$SERR" \
       | python3 -c "import sys, json
 try:
     d = json.load(sys.stdin)
@@ -507,7 +677,7 @@ if [[ -f "$SCRIPTS/july_audit.py" ]]; then
     JOUT="$(mktemp)"
     japply=(--company "$COMPANY")
     $DRY_RUN || japply+=(--apply)     # dry-run: print only; --apply: write proposals + log
-    python3 "$SCRIPTS/july_audit.py" "${japply[@]}" >"$JOUT" 2>>"$SERR" || true
+    _run python3 "$SCRIPTS/july_audit.py" "${japply[@]}" >"$JOUT" 2>>"$SERR" || true
     python3 - "$JOUT" >> "$LOG" <<'PY' || echo "- capability audit: ran (log-parse error) — core unaffected" >> "$LOG"
 import sys, json
 try:
@@ -539,7 +709,7 @@ fi
 # skip/fail verdict, one-line description. Read-only over the logs; deterministic.
 if [[ -f "$SCRIPTS/report.py" ]]; then
   if _should_run report; then
-    python3 "$SCRIPTS/report.py" --company "$COMPANY" --write >/dev/null 2>>"$SERR" \
+    _run python3 "$SCRIPTS/report.py" --company "$COMPANY" --write >/dev/null 2>>"$SERR" \
       && echo "- ledger: refreshed ops/reports/ledger.{md,tsv}" >> "$LOG" || true
   else
     echo "- ledger: skipped — schedule.yaml gated off tom.report for this tick" >> "$LOG"
@@ -563,7 +733,7 @@ fi
 if [[ -f "$SCRIPTS/schedule_config.py" ]]; then
   ROSTER_DIR="$COMPANY/ops/schedule"
   mkdir -p "$ROSTER_DIR" 2>/dev/null || true
-  if python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --roster \
+  if _run python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --roster \
        >"$ROSTER_DIR/roster.md.tmp" 2>/dev/null; then
     mv "$ROSTER_DIR/roster.md.tmp" "$ROSTER_DIR/roster.md" 2>/dev/null \
       || rm -f "$ROSTER_DIR/roster.md.tmp"
@@ -620,6 +790,16 @@ _auth_logged_in() {                         # echo: yes | no | unknown
     echo unknown
   fi
 }
+
+# Phase 25 Item 1: the agent step ALSO mutates memory (via Edit/tombstone), so
+# it is part of "the mutating core" for safety-floor purposes even though it
+# is not in the deterministic reinforce/decay/verify sequence. A CORE_ABORT
+# (safety floor failed) skips it too — no point spending tokens attempting
+# merges while corpus write-safety for this tick is unconfirmed.
+if (( CORE_ABORT )) && $RUN_AGENT; then
+  echo "- agent: skipped — CORE ABORTED (safety floor failed; no token spend while corpus write-safety is unconfirmed)" >> "$LOG"
+  RUN_AGENT=false
+fi
 
 # Phase 12: the agent step is owned by Tony; a company may gate it off (or set its
 # sub-cadence) via schedule.yaml. Fail-OPEN — absent config runs it as today.
@@ -798,21 +978,82 @@ EOF
     [[ -n "$_cfg_model" ]] || _cfg_model="claude-sonnet-4-6"
     AGENT_MODEL="${SELF_COMPANY_DAILY_MODEL:-$_cfg_model}"
     printf '\n===== agent run %s =====\n' "$ts" >> "$AGENT_LOG"
-    # Item 1 (TOM-2): hard-kill grace. A lone SIGTERM leaves a claude that traps/
-    # delays TERM running as an orphan past its budget; the next tick then spawns
-    # a SECOND agent (observed 2026-07-08: pids 336454/336455). `timeout -k <grace>`
-    # SIGKILLs the child <grace>s after budget, so no orphan survives past
-    # budget+grace. GNU coreutils supports -k; if this platform's timeout does not,
-    # degrade to a plain SIGTERM timeout (today's behaviour). Grace is env-tunable
-    # (tests use 1s); default 30s.
+    # Item 1 (TOM-2) / Phase 25 Item 4.2: hard-kill grace, upgraded to target
+    # the whole PROCESS GROUP. A lone SIGTERM (or the old `timeout -k`, which
+    # only ever signals its DIRECT child) leaves any subprocess `claude -p`
+    # spawns — an MCP server, a tool subproc — running as an orphan past
+    # budget; the next tick then spawns a SECOND agent alongside it (observed
+    # 2026-07-08: pids 336454/336455). Running the agent under `setsid` makes
+    # it (and everything it spawns, by default fd/pgrp inheritance) members of
+    # ONE new process group whose PGID equals its own PID — `kill -SIG -PID`
+    # (negative = the whole group) then reaches every descendant, not just the
+    # direct child. Grace is env-tunable (tests use 1s); default 30s.
     KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
-    _tmo=(timeout)
-    timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
-    SELF_COMPANY_CAPTURE_ACTIVE=1 "${_tmo[@]}" "$AGENT_TIMEOUT" \
-         "$CLAUDE_BIN" -p "$PROMPT" --model "$AGENT_MODEL" \
-         ${STREAM_ARGS[@]+"${STREAM_ARGS[@]}"} \
-         >>"$AGENT_LOG" 2>&1
-    rc=$?
+    _stage_file="$(mktemp)"
+    if (( LOCK_HELD )); then
+      setsid env SELF_COMPANY_CAPTURE_ACTIVE=1 "$CLAUDE_BIN" -p "$PROMPT" --model "$AGENT_MODEL" \
+           ${STREAM_ARGS[@]+"${STREAM_ARGS[@]}"} \
+           >>"$AGENT_LOG" 2>&1 {LOCK_FD}>&- &
+    else
+      setsid env SELF_COMPANY_CAPTURE_ACTIVE=1 "$CLAUDE_BIN" -p "$PROMPT" --model "$AGENT_MODEL" \
+           ${STREAM_ARGS[@]+"${STREAM_ARGS[@]}"} \
+           >>"$AGENT_LOG" 2>&1 &
+    fi
+    agent_pid=$!
+    # Watchdog: at budget, SIGTERM the group; poll (not a blind sleep — a
+    # clean quick death must not cost the full grace) for the group to die, up
+    # to KILL_AFTER; if it's still alive at the deadline, SIGKILL the group.
+    #
+    # The watchdog itself runs under `setsid` too (its own process group,
+    # positional args since a separate `bash -c` process can't see this
+    # shell's variables): a plain `( ... ) &` subshell would leave its OWN
+    # `sleep` child ORPHANED (reparented, NOT killed) if we cancel just the
+    # subshell's pid on the common early-finish path below — that leaked
+    # `sleep $AGENT_TIMEOUT` still holds the inherited LOCK_FD open, wedging
+    # every future tick exactly like the bug this item fixes. Killing the
+    # watchdog's OWN group (negative pid) takes it and its sleep down together.
+    _watchdog_body='
+      sleep "$1"
+      echo TERM > "$2" 2>/dev/null || true
+      kill -TERM -"$3" 2>/dev/null
+      _deadline=$(( $(date +%s) + $4 ))
+      while kill -0 -"$3" 2>/dev/null && (( $(date +%s) < _deadline )); do
+        sleep 0.2
+      done
+      if kill -0 -"$3" 2>/dev/null; then
+        echo KILL > "$2" 2>/dev/null || true
+        kill -KILL -"$3" 2>/dev/null
+      fi'
+    if (( LOCK_HELD )); then
+      setsid bash -c "$_watchdog_body" _ "$AGENT_TIMEOUT" "$_stage_file" "$agent_pid" "$KILL_AFTER" {LOCK_FD}>&- &
+    else
+      setsid bash -c "$_watchdog_body" _ "$AGENT_TIMEOUT" "$_stage_file" "$agent_pid" "$KILL_AFTER" &
+    fi
+    _watchdog_pid=$!
+    wait "$agent_pid"
+    _real_rc=$?
+    _stage="$(cat "$_stage_file" 2>/dev/null || true)"
+    if [[ -z "$_stage" ]]; then
+      # The agent finished on its own, before the watchdog ever fired —
+      # cancel the WHOLE watchdog group (not just its wrapper pid — see
+      # above) so its still-sleeping `sleep $AGENT_TIMEOUT` dies too instead
+      # of leaking as an orphan; the real exit code stands.
+      kill -TERM -"$_watchdog_pid" 2>/dev/null
+      wait "$_watchdog_pid" 2>/dev/null
+      rc=$_real_rc
+    else
+      # The watchdog already intervened (TERM fired): let it finish its OWN
+      # bounded poll-then-maybe-KILL so a surviving grandchild still gets
+      # SIGKILLed, then read the FINAL stage it reached.
+      wait "$_watchdog_pid" 2>/dev/null
+      _stage="$(cat "$_stage_file" 2>/dev/null || true)"
+      if [[ "$_stage" == "KILL" ]]; then
+        rc=137
+      else
+        rc=124
+      fi
+    fi
+    rm -f "$_stage_file"
     echo "$((RUNS + 1))" > "$COUNTER"   # B1: count the run (it spent tokens) toward the cap
     if (( rc == 0 )); then
       rm -f "$FAIL_MARKER"   # B3: success => auth healthy + streak recovered, reset
