@@ -42,7 +42,7 @@ case "$CMD" in
       echo "[rag_setup] pip install failed (check network)." >&2
       exit 1
     fi
-    echo "[rag_setup] warming the embedding model (one-time ~470MB download, multilingual)…"
+    echo "[rag_setup] warming the embedding + reranker models (one-time downloads: embed ~470MB, reranker ~600MB, multilingual)…"
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     "$PY" - "$SCRIPT_DIR" <<'PY' || { echo "[rag_setup] model warm-up failed." >&2; exit 1; }
 import sys
@@ -52,6 +52,18 @@ from fastembed import TextEmbedding
 m = TextEmbedding(model_name=RAG_EMBED_MODEL)
 list(m.embed(["warmup"]))
 print(f"  embedding backend ready ({RAG_EMBED_MODEL}, {EMBEDDING_DIM}-dim, CPU, offline)")
+# Phase 24 Item 5: warm the cross-encoder reranker too (downloads + compiles the
+# ONNX session once, so the first ask-time hook after install is fast, not a 50s
+# cold load). Reranking degrades gracefully if this is skipped, so warm-up failure
+# is non-fatal here (log + continue) — the rest of RAG still works.
+try:
+    from rag_rerank import RERANK_MODEL
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+    r = TextCrossEncoder(model_name=RERANK_MODEL)
+    list(r.rerank("warmup query", ["warmup document"]))
+    print(f"  reranker backend ready ({RERANK_MODEL}, CPU, offline)")
+except Exception as e:
+    print(f"  reranker warm-up skipped ({e}); semantic injection will use the cosine floor only")
 PY
     echo "[rag_setup] done. Build the index with: python3 .company/scripts/rag_index.py --rebuild"
     ;;

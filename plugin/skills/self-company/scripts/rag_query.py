@@ -146,8 +146,15 @@ def _open_index(index_dir):
     return table
 
 
+# Phase 24 Item 5: default over-retrieve count for reranking — cross-encode this
+# many top candidates, then keep top_k. ~20 short pairs is tens of ms after the
+# model is warm (measured); the candidate cap keeps latency bounded.
+RERANK_FETCH_DEFAULT = 20
+
+
 def query_rag(query_text, top_k=5, index_dir=".company/memory/index",
-              model="nomic-embed-text", query_type="hybrid"):
+              model="nomic-embed-text", query_type="hybrid",
+              rerank=False, rerank_fetch=RERANK_FETCH_DEFAULT):
     """
     Query the RAG index.
 
@@ -161,18 +168,23 @@ def query_rag(query_text, top_k=5, index_dir=".company/memory/index",
             "hybrid" degrades to "vector" automatically on ANY error (e.g. an
             index built before the FTS column/index existed) — never raises for
             that reason.
+        rerank (bool): Phase 24 Item 5 — when True, OVER-retrieve `rerank_fetch`
+            candidates, cross-encode each against the query with the local
+            multilingual reranker (rag_rerank), sort by reranker score, and keep
+            top_k. Each returned hit gains a `rerank_score` field; the consumer
+            gates the semantic injection on THAT (a joint query-document relevance
+            the bi-encoder cosine can't see). GRACEFUL: any reranker failure
+            (backend absent / model load / inference error) silently falls back to
+            the cosine ordering and OMITS `rerank_score`, so the consumer's cosine
+            floor stays in charge — byte-identical to rerank=False.
 
     Returns:
-        list[dict]: Results with keys: id, tier, path, score. `score` is ALWAYS
-        the vector leg's cosine similarity (Elon's explicit gate-placement rule,
-        Phase 24 Item 4): RRF's fused rank-score is NOT comparable to the cosine
-        relevance floor (RAG_MIN_SCORE) callers gate on, so it is never returned
-        as `score` — every hit's score is a true cosine number, computed locally
-        against the row's own stored vector when the fused result doesn't carry
-        the vector leg's `_distance` (a lexical-only/FTS hit). This means the
-        SAME floor gate every consumer already applies to `score` continues to
-        work byte-identically whether the index was queried in vector or hybrid
-        mode — no consumer-side change was needed for Item 4.
+        list[dict]: Results with keys: id, tier, path, score [, rerank_score].
+        `score` is ALWAYS the vector-leg cosine similarity (Elon's Item-4
+        gate-placement rule — never the RRF fused rank-score). When reranking
+        succeeded, `rerank_score` is the cross-encoder's joint relevance logit
+        (higher = more relevant, unbounded ~-6..+6) and the list is sorted by it;
+        `score` (cosine) is still carried for the degrade path and diagnostics.
 
     Raises:
         EmbeddingUnavailable: if the local embedding backend is unavailable
@@ -188,33 +200,80 @@ def query_rag(query_text, top_k=5, index_dir=".company/memory/index",
     # Embed the query
     query_vec = embed(query_text, model)
 
+    # Over-retrieve when reranking so the cross-encoder has a real candidate pool;
+    # include the stored body text (Item 4) so we can cross-encode without a second
+    # read. Non-rerank path is byte-identical to before (fetch == top_k, no text).
+    fetch = max(top_k, rerank_fetch) if rerank else top_k
+
     if query_type == "hybrid":
         try:
-            return _query_hybrid(table, query_text, query_vec, top_k)
+            results = _query_hybrid(table, query_text, query_vec, fetch, include_text=rerank)
         except Exception:
-            pass   # any hybrid-path problem (old schema, FTS unavailable...) -> vector fallback
+            results = _query_vector(table, query_vec, fetch, include_text=rerank)
+    else:
+        results = _query_vector(table, query_vec, fetch, include_text=rerank)
 
-    return _query_vector(table, query_vec, top_k)
+    if rerank:
+        return _apply_rerank(query_text, results, top_k)
+    return results[:top_k]
 
 
-def _query_vector(table, query_vec, top_k):
+def _apply_rerank(query_text, results, top_k):
+    """Phase 24 Item 5: cross-encode the over-retrieved `results` (each carrying a
+    `text` body) against `query_text`, attach `rerank_score`, sort by it, keep
+    top_k. GRACEFUL DEGRADE (non-negotiable): ANY failure — reranker backend
+    absent, model load error, inference error, score-count mismatch — returns the
+    cosine-ordered results (top_k) with NO `rerank_score`, so the consumer's
+    cosine+IDF floor stays in charge exactly as if rerank were never requested.
+    Never raises. Always strips the bulky `text` field from the output."""
+    def _strip(rows):
+        for r in rows:
+            r.pop("text", None)
+        return rows
+
+    try:
+        if not results:
+            return []
+        import rag_rerank
+        docs = [r.get("text") or "" for r in results]
+        scores = rag_rerank.rerank_scores(query_text, docs)
+        if len(scores) != len(results):
+            raise ValueError(f"rerank score count {len(scores)} != {len(results)}")
+        for r, s in zip(results, scores):
+            r["rerank_score"] = s
+        results.sort(key=lambda r: r["rerank_score"], reverse=True)
+        return _strip(results[:top_k])
+    except Exception as e:
+        # Degrade to cosine ordering (results are already sorted by cosine score).
+        print(f"[rag_query] rerank unavailable ({e}); cosine-order fallback",
+              file=sys.stderr)
+        for r in results:
+            r.pop("rerank_score", None)
+        return _strip(results[:top_k])
+
+
+def _row_out(row, score, include_text):
+    """Build one result dict. `text` (the stored body) is included ONLY when a
+    caller needs it for reranking (Item 5) — the normal output never ships bodies."""
+    out = {"id": row["id"], "tier": row["tier"], "path": row["path"], "score": score}
+    if include_text:
+        out["text"] = row.get("text") or ""
+    return out
+
+
+def _query_vector(table, query_vec, top_k, include_text=False):
     """Pure cosine vector search — the pre-Item-4 path, unchanged."""
     results = table.search(query_vec).metric("cosine").limit(top_k).to_list()
     output = []
     for row in results:
         distance = row.get("_distance", 0.0)
         score = 1.0 - distance  # cosine similarity
-        output.append({
-            "id": row["id"],
-            "tier": row["tier"],
-            "path": row["path"],
-            "score": score
-        })
+        output.append(_row_out(row, score, include_text))
     output.sort(key=lambda x: x["score"], reverse=True)
     return output
 
 
-def _query_hybrid(table, query_text, query_vec, top_k):
+def _query_hybrid(table, query_text, query_vec, top_k, include_text=False):
     """Phase 24 Item 4 — vector + BM25/FTS fused via Reciprocal Rank Fusion
     (LanceDB native: Tantivy-or-native FTS + RRFReranker; zero new dependencies).
     Catches an exact-identifier query (script name, id, error string) that pure
@@ -252,12 +311,7 @@ def _query_hybrid(table, query_text, query_vec, top_k):
         else:
             vec = row.get("vector")
             score = _cosine(query_vec, vec) if vec is not None else 0.0
-        output.append({
-            "id": row["id"],
-            "tier": row["tier"],
-            "path": row["path"],
-            "score": score,
-        })
+        output.append(_row_out(row, score, include_text))
     output.sort(key=lambda x: x["score"], reverse=True)
     return output
 
@@ -278,6 +332,12 @@ Examples:
     parser.add_argument("--model", type=str, default="nomic-embed-text", help="ignored (kept for back-compat; fastembed model is fixed)")
     parser.add_argument("--query-type", type=str, default="hybrid", choices=["hybrid", "vector"],
                         help="hybrid (default, Phase 24 Item 4: vector+BM25/FTS via RRF) or vector (pure cosine)")
+    parser.add_argument("--rerank", action="store_true",
+                        help="Phase 24 Item 5: over-retrieve then cross-encode with the local "
+                             "multilingual reranker; adds rerank_score. Degrades to cosine order "
+                             "if the reranker backend is absent.")
+    parser.add_argument("--rerank-fetch", type=int, default=RERANK_FETCH_DEFAULT,
+                        help=f"candidates to over-retrieve before reranking (default {RERANK_FETCH_DEFAULT})")
 
     args = parser.parse_args()
 
@@ -300,6 +360,8 @@ Examples:
             index_dir=args.index_dir,
             model=args.model,
             query_type=args.query_type,
+            rerank=args.rerank,
+            rerank_fetch=args.rerank_fetch,
         )
 
         # Output JSON
