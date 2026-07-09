@@ -617,8 +617,17 @@ class Employee:
         try:
             if not self.rag_memory_enabled:         # flat employee: no RAG store
                 return None
+            # Phase 24 MUST-FIX 2: reject non-STRING input rather than writing
+            # `str(text)` as the body. `remember(None)` / `remember(12345)` /
+            # `remember(['a','b'])` used to silently write a memory whose body
+            # was "None" / "12345" / "['a', 'b']" — junk that later surfaced as
+            # a "- None" bullet in a recall block. "never raises" held but
+            # "well-formed" did not. A memory body must be real text; anything
+            # else is skipped (return None), never written, never raised.
+            if not isinstance(text, str):
+                return None
             normalized = _normalize_memory_text(text)
-            if not normalized:                       # nothing worth recording
+            if not normalized:                       # empty / whitespace-only -> nothing to record
                 return None
             mem_id = f"{_slugify(normalized)}-{_content_hash(normalized)}"
             path = self.memory_dir / f"{mem_id}.md"
