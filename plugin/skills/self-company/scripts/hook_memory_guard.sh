@@ -223,8 +223,13 @@ def _all_words(s):
 
 def raw_has_deleter(s):
     # Any deleter token anywhere in the raw command string, at any nesting depth.
+    # `mv` counts too (GIB R3): a `mv`-AWAY is a disguised delete, treated as a
+    # deleter by tok_is_deleter + the per-command branch — without it here, a
+    # DEPTH>=2 nested `bash -c "bash -c 'mv .company/memory … /tmp'"` slipped the
+    # nested-shell net (single-level mv already denied). No new false positives:
+    # a legit mv can use absolute paths or run un-nested.
     words = set(_all_words(s))
-    if words & DELETERS:
+    if words & DELETERS or "mv" in words:
         return True
     if "find" in words and "-delete" in (s or ""):
         return True

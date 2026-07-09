@@ -377,6 +377,12 @@ class TestMemoryGuardR2FailClosed(_CompanyRepo):
     def test_double_nested_bash_c_denied(self):
         self._deny("bash -c \"bash -c 'rm -rf .company/memory/L0-working'\"")
 
+    def test_double_nested_bash_c_mv_denied(self):
+        # GIB R3: mv-away is a disguised delete; raw_has_deleter must count it so
+        # the nested-shell net catches mv at DEPTH>=2 too (single-level already
+        # denied). Moves the store away otherwise.
+        self._deny("bash -c \"bash -c 'mv .company/memory/L0-working /tmp/stolen'\"")
+
     def test_command_prefix_cd_then_rm_denied(self):
         self._deny("command cd .company/memory && rm -rf L0-working/x")
 
