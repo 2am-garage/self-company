@@ -143,7 +143,13 @@ INJECT_NOTHING = object()
 # The semantic path is ADDITIVE: it augments retrieval ONLY when the local RAG
 # stack is present; the keyword path (rank()) stays the guaranteed-fast floor and
 # the no-venv/degrade path. All bounded so the 30s hook budget is never approached.
-RAG_QUERY_TIMEOUT = _env_num("SELF_COMPANY_INJECT_RAG_TIMEOUT", 7.0, float)  # s
+# Phase 24 Item 5: bumped 7s -> 15s. The rerank subprocess loads TWO ONNX models
+# (embed ~1-2s + cross-encoder ~2s) plus the query; measured ~5.4s warm, so 7s left
+# too little margin for slower hardware / disk. 15s is half the 30s hook budget and
+# a timeout still degrades cleanly to the keyword path. rag_setup.sh warms both
+# models so the first post-install call isn't a ~50s cold load. (Non-rerank callers
+# and the no-venv path never spawn the subprocess, so they are unaffected.)
+RAG_QUERY_TIMEOUT = _env_num("SELF_COMPANY_INJECT_RAG_TIMEOUT", 15.0, float)  # s
 # Ask for more hits than we inject: some will be filtered out as stale/tombstoned/
 # out-of-scope when re-validated against the live candidate set, so over-fetch to
 # still have enough survivors to fill the cap.
@@ -161,13 +167,24 @@ RAG_QUERY_TOPK = max(TOP_K_CAP, TOP_K) * 2
 # 0.419, so the floor sits just below it (0.019 margin) and every real hit clears.
 # It cannot go higher: the reranker escalation is documented in references/rag.md.
 #
-# KNOWN RESIDUAL (Gibby R2, escalated): ONE innocent off-topic prompt — "How
-# should I schedule my morning gym workout?" — scores 0.417 against a scheduler
-# memory (the word "schedule"), inseparable from `merge-gate`'s 0.419 by floor OR
-# margin (their top1/top2 gaps are 0.060 vs 0.062 — near-identical). No cosine
-# threshold cleanly splits innocent-off-topic from on-topic here; a cross-encoder
-# reranker does (measured: gym -2.97 vs merge +1.73). That is Item 5's job.
+# Item 5 (below) closes the one residual the cosine floor cannot: an innocent
+# off-topic prompt ("schedule my morning gym workout", cosine 0.417) that lands in
+# the same band as a real on-topic hit (`merge-gate` 0.419). The floor here is now
+# a cheap PRE-FILTER; the cross-encoder reranker is the final gate.
 RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.40, float)
+
+# --- Phase 24 Item 5: cross-encoder reranker gate --------------------------------
+# When the local multilingual reranker is available, rag_query.py cross-encodes the
+# over-retrieved candidates and returns a `rerank_score` per hit (a joint
+# query-document relevance logit the bi-encoder cosine can't see). A hit then
+# injects iff it clears BOTH the cosine PRE-FILTER (RAG_MIN_SCORE) AND this reranker
+# cutoff — which is what finally rejects the "gym workout" case (its scheduler hit
+# passes cosine 0.417 but reranks to ~-3.0) while keeping every on-topic diagnostic
+# hit (lowest cosine-passing on-topic reranks to -2.51). DATA-DRIVEN cutoff -2.75 =
+# the midpoint of that 0.49 gap. When rag_query returns NO `rerank_score` (reranker
+# backend absent / model-load or inference error / timeout), this gate is skipped
+# and the cosine floor alone decides — byte-identical to the pre-Item-5 behavior.
+RERANK_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RERANK_MIN_SCORE", -2.75, float)
 
 # Stopword set: the closed-class FUNCTION WORDS (articles, pronouns, prepositions,
 # conjunctions, auxiliaries, degree adverbs) plus a few ubiquitous light verbs.
@@ -480,7 +497,11 @@ def semantic_top(company, prompt, candidates):
     try:
         proc = subprocess.run(
             [str(rag_py), query_script, "--query", prompt,
-             "--top-k", str(RAG_QUERY_TOPK), "--index-dir", str(index_dir)],
+             "--top-k", str(RAG_QUERY_TOPK), "--index-dir", str(index_dir),
+             # Phase 24 Item 5: over-retrieve + cross-encode. rag_query degrades to
+             # cosine order (omits rerank_score) if the reranker backend is absent,
+             # so passing --rerank is always safe.
+             "--rerank"],
             capture_output=True, text=True, timeout=RAG_QUERY_TIMEOUT,
             # SC_RAG_REEXEC=1: rag_py IS the venv python, so rag_query must not
             # re-exec again. Bounds the process tree to one killable child so the
@@ -520,7 +541,7 @@ def semantic_top(company, prompt, candidates):
     by_path = {_norm(path): (tier, fm, body, path)
                for (tier, fm, body, path) in candidates}
     out, seen = [], set()
-    any_cleared_floor = False              # did ANY hit clear the cosine floor?
+    any_cleared_floor = False              # did ANY hit clear ALL active gates?
     for h in hits:
         if not isinstance(h, dict):
             continue
@@ -532,9 +553,25 @@ def semantic_top(company, prompt, candidates):
         # (nan < x is False) and bypass the relevance gate. Treat it as below-floor
         # so the gate stays honest. (Re-validation already blocks any stale leak,
         # so this is gate-integrity, not a security fix.)
-        if not math.isfinite(score) or score < RAG_MIN_SCORE:  # relevance-gated
+        if not math.isfinite(score) or score < RAG_MIN_SCORE:  # cosine PRE-FILTER
             continue
-        any_cleared_floor = True           # a hit was semantically relevant
+        # Phase 24 Item 5: the cross-encoder reranker is the FINAL gate when
+        # present. A hit that passes the cosine pre-filter but scores below the
+        # reranker cutoff is off-topic (the "gym workout" case: cosine 0.417 but
+        # rerank ~-3.0). When rag_query returned NO rerank_score (reranker backend
+        # absent / model-load or inference error / timeout -> cosine-order
+        # fallback), `rr` is None and this check is SKIPPED, so the cosine floor
+        # alone decides — byte-identical to the pre-Item-5 behavior. A non-finite
+        # rerank score is treated as below-cutoff (gate integrity, mirrors cosine).
+        rr = h.get("rerank_score")
+        if rr is not None:
+            try:
+                rrf = float(rr)
+            except (TypeError, ValueError):
+                rrf = None
+            if rrf is None or not math.isfinite(rrf) or rrf < RERANK_MIN_SCORE:
+                continue
+        any_cleared_floor = True           # a hit cleared cosine (+ reranker if present)
         raw = h.get("path")
         if not raw:
             continue
@@ -553,19 +590,20 @@ def semantic_top(company, prompt, candidates):
         return out
 
     # No usable hits after re-validation. Phase 24 MUST-FIX 1(a) — distinguish:
-    #  * NO hit cleared the cosine floor -> the semantic layer definitively found
-    #    nothing relevant (off-topic). Return INJECT_NOTHING so the caller injects
-    #    NOTHING and does NOT fall through to the weaker keyword gate (which would
-    #    inject on a single incidental word). THIS is the off-topic-English fix.
-    #  * some hit DID clear the floor but every above-floor hit was dropped by
-    #    path re-validation (stale / deleted / tombstoned / out-of-scope index
-    #    rows) -> an index-FRESHNESS gap, not a relevance verdict -> fall back to
-    #    the keyword path (None), preserving the Phase-13 stale-hit degrade
-    #    (e.g. a deleted top hit still lets the keyword path find a live match).
+    #  * NO hit cleared the relevance gates (cosine pre-filter + reranker) -> the
+    #    semantic layer definitively found nothing relevant (off-topic). Return
+    #    INJECT_NOTHING so the caller injects NOTHING and does NOT fall through to
+    #    the weaker keyword gate. THIS is the off-topic fix (English incidental-word
+    #    AND the reranker-rejected "gym workout" case).
+    #  * some hit DID clear the gates but every such hit was dropped by path
+    #    re-validation (stale / deleted / tombstoned / out-of-scope index rows) ->
+    #    an index-FRESHNESS gap, not a relevance verdict -> fall back to the keyword
+    #    path (None), preserving the Phase-13 stale-hit degrade (e.g. a deleted top
+    #    hit still lets the keyword path find a live match).
     if any_cleared_floor:
-        _debug("above-floor hits all stale/out-of-scope -> keyword fallback")
+        _debug("relevant hits all stale/out-of-scope -> keyword fallback")
         return None
-    _debug("no semantic hit cleared the floor -> definitive nothing (no injection)")
+    _debug("no semantic hit cleared the relevance gates -> definitive nothing (no injection)")
     return INJECT_NOTHING
 
 

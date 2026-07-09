@@ -89,7 +89,9 @@ def _env_num(name, default, cast):
 
 # Recall shells rag_query.py with a HARD timeout (mirrors hook_memory_inject's
 # ask-time budget discipline) so recall can never block a dispatch.
-_RECALL_TIMEOUT = _env_num("SELF_COMPANY_RECALL_TIMEOUT", 7.0, float)
+# Phase 24 Item 5: bumped 7s -> 15s — the rerank subprocess loads two ONNX models
+# (~5.4s warm); a timeout still degrades cleanly to []/cosine order.
+_RECALL_TIMEOUT = _env_num("SELF_COMPANY_RECALL_TIMEOUT", 15.0, float)
 
 # Dispatch-injection budget cap (Phase 18b). recall_context() renders each recalled
 # memory to at most this many chars so the "Relevant past experience:" block can
@@ -110,6 +112,12 @@ _DISPATCH_INJECT_BUDGET = _env_num("SELF_COMPANY_DISPATCH_INJECT_BUDGET", 900, i
 # copy — see that module's comment for the sweep numbers (0.40 = highest floor that
 # keeps every on-topic diagnostic hit; lowest true-positive is 0.419).
 _SHARED_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.40, float)
+
+# Phase 24 Item 5: cross-encoder reranker cutoff — the FINAL gate for the shared
+# dispatch read, in parity with hook_memory_inject.RERANK_MIN_SCORE (same env var,
+# same data-driven -2.75). When rag_query returns no rerank_score (reranker backend
+# absent / degraded), this gate is skipped and the cosine floor alone decides.
+_RERANK_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RERANK_MIN_SCORE", -2.75, float)
 
 # Injection block headers — kept as module constants so the own-store and shared
 # blocks are rendered by ONE renderer (_render_memory_block) and stay distinct,
@@ -711,7 +719,10 @@ class Employee:
             try:
                 proc = subprocess.run(
                     [str(rag_py), str(query_script), "--query", q,
-                     "--top-k", str(k), "--index-dir", str(index_dir)],
+                     "--top-k", str(k), "--index-dir", str(index_dir),
+                     # Phase 24 Item 5: rerank for better own-store ordering.
+                     # Degrades to cosine order if the reranker backend is absent.
+                     "--rerank"],
                     capture_output=True, text=True, timeout=_RECALL_TIMEOUT,
                     # rag_py IS the venv python -> rag_query must not re-exec again
                     # (bounds the tree to one killable child so the timeout is hard).
@@ -833,7 +844,10 @@ class Employee:
             try:
                 proc = subprocess.run(
                     [str(rag_py), str(query_script), "--query", q,
-                     "--top-k", str(k * 2), "--index-dir", str(index_dir)],
+                     "--top-k", str(k * 2), "--index-dir", str(index_dir),
+                     # Phase 24 Item 5: cross-encoder rerank (same as the ask-time
+                     # hook). Degrades to cosine order if the backend is absent.
+                     "--rerank"],
                     capture_output=True, text=True, timeout=_RECALL_TIMEOUT,
                     env={**os.environ, "SC_RAG_REEXEC": "1"})
             except Exception:
@@ -857,8 +871,19 @@ class Employee:
                     score = float(h.get("score"))
                 except (TypeError, ValueError):
                     continue
-                if not math.isfinite(score) or score < _SHARED_MIN_SCORE:
+                if not math.isfinite(score) or score < _SHARED_MIN_SCORE:  # cosine PRE-FILTER
                     continue
+                # Phase 24 Item 5: reranker is the FINAL gate when present (parity
+                # with hook_memory_inject). Absent rerank_score (backend degraded)
+                # -> cosine floor alone decides, byte-identical to pre-Item-5.
+                rr = h.get("rerank_score")
+                if rr is not None:
+                    try:
+                        rrf = float(rr)
+                    except (TypeError, ValueError):
+                        rrf = None
+                    if rrf is None or not math.isfinite(rrf) or rrf < _RERANK_MIN_SCORE:
+                        continue
                 raw = h.get("path")
                 if not raw:
                     continue
