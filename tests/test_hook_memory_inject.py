@@ -19,6 +19,7 @@ Locks:
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -30,6 +31,40 @@ _spec = importlib.util.spec_from_file_location(
     os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"))
 hmi = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hmi)
+
+# Phase 24 Item 2 — venv-gated regression fixture wiring (mirrors
+# test_employee_memory.py's HAS_VENV pattern): these tests need REAL
+# cross-lingual embeddings (a mocked rag_query.py cannot prove anything about
+# the MODEL), so they build a real scratch index via the repo's own
+# .company/.rag-venv and skip cleanly when it is absent.
+REPO_VENV_DIR = os.path.join(_helpers.REPO_ROOT, ".company", ".rag-venv")
+REPO_VENV_PY = os.path.join(REPO_VENV_DIR, "bin", "python")
+
+
+def _has_rag_venv():
+    if not (os.path.exists(REPO_VENV_PY) and os.access(REPO_VENV_PY, os.X_OK)):
+        return False
+    try:
+        proc = subprocess.run([REPO_VENV_PY, "-c", "import lancedb, fastembed"],
+                              capture_output=True, timeout=60)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+HAS_VENV = _has_rag_venv()
+
+
+def _build_real_index(company):
+    """Rebuild a scratch corpus's index via the REAL rag_index.py + venv (not
+    the fake-bash-shim trick the other RAG tests use) — the whole point of this
+    class is to exercise the REAL embedding model's cross-lingual behavior."""
+    mem = os.path.join(company, "memory")
+    return subprocess.run(
+        [REPO_VENV_PY, os.path.join(_helpers.SCRIPTS_DIR, "rag_index.py"),
+         "--memory-dir", mem, "--index-dir", os.path.join(mem, "index"), "--rebuild"],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "SC_RAG_REEXEC": "1"})
 
 
 def _write_mem(company, tier_dir, name, *, body, tier="L2",
@@ -491,6 +526,154 @@ class TestMemoryInject(unittest.TestCase):
                       parsed["hookSpecificOutput"]["additionalContext"])
         # Generous: a subprocess spawn + stdlib scan of 150 files is well < 5s.
         self.assertLess(elapsed, 5.0)
+
+
+class TestKeywordFallbackDistinguishesEmptyFromUnparseable(unittest.TestCase):
+    """Phase 24 Item 2 fix (deps-free, no venv needed — pure logic bug):
+    rank()'s recency-fallback branch must trigger ONLY for a truly empty/blank
+    prompt, never for a non-empty prompt that merely tokenizes to nothing
+    (e.g. pure CJK, since `_tokens` is ASCII-only) — otherwise an off-topic CJK
+    prompt silently gets the freshest memories injected regardless of
+    relevance, which is exactly what TestMultilingualRelevanceGate proves end-
+    to-end (venv-gated) above."""
+
+    @staticmethod
+    def _candidate(id_, body, tier="L2", rc=1):
+        fm = {"id": id_, "reinforce_count": rc, "last_reinforced": "2026-01-01"}
+        return (tier, fm, body, f"/mem/{id_}.md")
+
+    def test_truly_empty_prompt_falls_back_to_recency(self):
+        cands = [self._candidate("a", "something"), self._candidate("b", "something else")]
+        out = hmi.rank("", cands)
+        self.assertEqual(len(out), 2)          # recency fallback returns candidates
+
+    def test_blank_prompt_falls_back_to_recency(self):
+        cands = [self._candidate("a", "something")]
+        out = hmi.rank("   \n  ", cands)
+        self.assertEqual(len(out), 1)
+
+    def test_cjk_only_prompt_returns_nothing(self):
+        cands = [self._candidate("a", "something"), self._candidate("b", "something else")]
+        out = hmi.rank("義大利麵要怎麼煮？", cands)
+        self.assertEqual(out, [], "a real (non-Latin) prompt must never take the recency fallback")
+
+
+@unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
+class TestMultilingualRelevanceGate(unittest.TestCase):
+    """Phase 24 Item 2 — the hook's relevance-gate contract ("nothing above the
+    floor -> inject nothing") must hold for NON-ENGLISH prompts, end-to-end
+    through the REAL hook + a REAL rebuilt index (not a mocked rag_query.py —
+    Item 1's fix IS the embedding model, so only real embeddings can prove it).
+
+    Locks the live diagnosis (spec, Phase 24 Item 1): with the old
+    English-only `bge-small-en-v1.5` model, EVERY prompt (on- or off-topic,
+    any language) scored 0.45-0.65 cosine against the Chairman's memories, so
+    the 0.30 floor filtered nothing — a genuinely off-topic Chinese prompt
+    ("how do I cook pasta?") injected the Chairman's Chinese-language-
+    preference memory, identical to what an on-topic query would surface.
+    `test_offtopic_would_have_failed_pre_swap` reproduces that exact failure
+    against the OLD model/floor to prove the regression is real, then the
+    other two tests prove the CURRENT (multilingual model + retuned floor)
+    behavior is correct."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        # Symlink the WHOLE venv dir (not just the python binary) so pyvenv.cfg
+        # is reachable — mirrors test_employee_memory.py's _make_company(venv=True).
+        os.symlink(REPO_VENV_DIR, os.path.join(self.company, ".rag-venv"))
+        # A small fixture corpus mirroring the LIVE memory that triggered the
+        # diagnosis, plus decoys, so this stays deterministic and never touches
+        # the real .company/memory store.
+        _write_mem(self.company, "L2-cold", "chairman-reply-language-chinese",
+                   body="When replying to the Chairman, staff must answer in "
+                        "Traditional Chinese. Keep code, identifiers, file "
+                        "paths, commands, and technical terms in English.")
+        _write_mem(self.company, "L2-cold", "database-backup",
+                   body="Maintains postgres databases and requires automated "
+                        "nightly backups at 2am with dump rotation.")
+        _write_mem(self.company, "L2-cold", "merge-gate",
+                   body="The company may merge its own pull request without "
+                        "waiting for approval, provided the full test suite "
+                        "passes and integration checks are green.")
+        rc = _build_real_index(self.company)
+        if rc.returncode != 0:
+            self.skipTest(f"rag_index unavailable/offline: {rc.stderr}")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_offtopic_chinese_prompt_injects_nothing(self):
+        # "How do I cook pasta?" in Traditional Chinese — genuinely unrelated
+        # to every fixture memory. Must clear NOTHING under the current
+        # multilingual-model + retuned-floor behavior.
+        _write_transcript(self.transcript, ["義大利麵要怎麼煮？"])
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "off-topic Chinese prompt must inject nothing")
+
+    def test_ontopic_chinese_prompt_injects_right_memory(self):
+        # Cross-lingual: a Traditional Chinese question about reply language
+        # must retrieve the (English-body) chairman-reply-language-chinese
+        # memory specifically, not a decoy — proving the multilingual model
+        # actually bridges the language gap, not just "injects something".
+        _write_transcript(self.transcript, ["回覆董事長要用什麼語言？"])
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "on-topic Chinese prompt should inject")
+        ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Traditional Chinese", ctx)
+
+    def test_offtopic_would_have_failed_pre_swap(self):
+        # Historical proof (Item 2's acceptance): re-run the SAME off-topic
+        # Chinese prompt against the SAME fixture corpus, but scored the OLD
+        # way — bge-small-en-v1.5 cosine, 0.30 floor — via a tiny inline
+        # reproduction of the pre-Item-1 scoring (no network; loads the model
+        # bge-small-en-v1.5 already ships in fastembed's local cache from any
+        # prior warm-up, or downloads once). Confirms the bug was real: the
+        # off-topic prompt's top score clears the OLD 0.30 floor.
+        prog = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from fastembed import TextEmbedding\n"
+            "m = TextEmbedding(model_name='BAAI/bge-small-en-v1.5')\n"
+            "def emb(t): return list(m.embed([t]))[0]\n"
+            "import numpy as np\n"
+            "q = emb(sys.argv[2])\n"
+            "bodies = json.loads(sys.argv[3])\n"
+            "scores = []\n"
+            "for b in bodies:\n"
+            "    v = emb(b)\n"
+            "    cos = float(np.dot(q, v) / (np.linalg.norm(q) * np.linalg.norm(v)))\n"
+            "    scores.append(cos)\n"
+            "print(json.dumps(scores))\n"
+        )
+        bodies = [
+            "When replying to the Chairman, staff must answer in Traditional "
+            "Chinese. Keep code, identifiers, file paths, commands, and "
+            "technical terms in English.",
+            "Maintains postgres databases and requires automated nightly "
+            "backups at 2am with dump rotation.",
+            "The company may merge its own pull request without waiting for "
+            "approval, provided the full test suite passes and integration "
+            "checks are green.",
+        ]
+        query = "義大利麵要怎麼煮？"
+        proc = subprocess.run(
+            [REPO_VENV_PY, "-c", prog, _helpers.SCRIPTS_DIR, query, json.dumps(bodies)],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "SC_RAG_REEXEC": "1"})
+        if proc.returncode != 0:
+            self.skipTest(f"legacy model unavailable/offline: {proc.stderr}")
+        scores = json.loads(proc.stdout)
+        old_floor = 0.30
+        self.assertTrue(
+            any(s >= old_floor for s in scores),
+            f"expected the OLD English-only model to score >= {old_floor} on an "
+            f"off-topic Chinese prompt (the live bug this phase fixes); got {scores}")
 
 
 if __name__ == "__main__":
