@@ -121,7 +121,7 @@ rm -rf .company/memory/index && python3 .company/scripts/rag_index.py --rebuild
 - **Table**: `memory`.
 - **Row schema**: `{ id, tier, path, content_hash, vector[384], text }`. **Phase 24 Item 4** added `text` (the embedded body) so a native FTS (BM25) index can be built alongside the vector column — see §7 for why storing body text is now acceptable (a reversal of the original "no body in index" stance).
 - **FTS index**: a native LanceDB full-text index on `text` (Tantivy-or-native backend, no new dependency), rebuilt after every index run. Backs the lexical leg of hybrid search (§7).
-- **Model stamp**: `.rag_stamp.json` — a small JSON sidecar next to the LanceDB table (`{"model": ..., "dim": ...}`), written by `rag_index.py` after every successful build. See §13 for the full migration/rollback mechanism this enables.
+- **Model stamp**: `.rag_stamp.json` — a small JSON sidecar next to the LanceDB table (`{"model": ..., "dim": ..., "lib": ...}` — model name, embedding dimension, and the fastembed library version), written by `rag_index.py` after every successful build. See §13 for the full migration/rollback mechanism this enables.
 - **Scope**: L1 + L2 active memories only.
 
 Because paths are always stored, retrieval always resolves back to live markdown files (and a stale/tombstoned id simply maps to a file the consumer can re-check) — the `text` column is a query-time optimization, never the source of truth; the live markdown body is what gets injected.
@@ -178,7 +178,9 @@ To hand off a repo or machine, wipe `.company/` (or just `.company/memory/index/
 
 Before Phase 24, the index stored **no body text** — only `{id, tier, path, content_hash, vector}` — specifically so the index held nothing the markdown didn't already hold; a leaked/copied index was never more sensitive than the markdown itself, and retrieval always resolved back through `path` to the live file.
 
-**Phase 24 Item 4 adds a `text` column** (the embedded body) so a native BM25/FTS index can be built alongside the vector column — pure cosine misses exact-token queries (script names, ids, error strings), precisely the queries a self-company asks about itself; Anthropic's contextual-retrieval work measured embeddings+BM25 hybrid cutting top-20 retrieval failure ~49%.
+**Phase 24 Item 4 adds a `text` column** (the embedded body) so a native BM25/FTS index can be built alongside the vector column. The rationale is that pure cosine can miss exact-token queries (script names, ids, error strings), and Anthropic's contextual-retrieval work measured embeddings+BM25 hybrid cutting top-20 retrieval failure ~49% on large corpora.
+
+> **Measured caveat (be honest — this was Gibby-checked).** On OUR current corpus (~55 active memories, multilingual MiniLM), hybrid's effect is **marginal to nil**: across a set of exact-identifier probes (`PR #28`, `id_ed25519`, `nomic-embed-text 768`, `BACKUP_KEEP tarballs`, …) hybrid returned **byte-identical rankings** to pure vector — the multilingual model's subword tokenizer already places these tokens well, and BM25 rescued nothing cosine missed. Item 4 therefore ships as a **safety net with headroom** (it costs nothing extra — it rode Item 1's one rebuild, adds no dependency, and the gate placement below makes it strictly no-worse than vector), not as a measured win on today's data. Its value should reappear as the corpus grows or gains more code-token-heavy memories; re-measure then before claiming a benefit.
 
 This is safe because nothing about the trust boundary changed:
 - The index (now including `text`) is **still gitignored, still local, still rebuildable** from the markdown truth in one command — it just now redundantly duplicates content that was already sitting in `.company/memory/` on the same machine.
@@ -187,7 +189,7 @@ This is safe because nothing about the trust boundary changed:
 
 ### Hybrid query (vector + BM25/FTS, fused via RRF)
 
-`rag_query.py` defaults to `query_type="hybrid"`: it runs a vector (cosine) search and a full-text (BM25) search over `text`, then fuses the two rankings with LanceDB's `RRFReranker` (Reciprocal Rank Fusion). This catches, for example, a query for an exact script name or error string that pure cosine ranks low but BM25 ranks first.
+`rag_query.py` defaults to `query_type="hybrid"`: it runs a vector (cosine) search and a full-text (BM25) search over `text`, then fuses the two rankings with LanceDB's `RRFReranker` (Reciprocal Rank Fusion). The intent is to catch a query for an exact script name or error string that pure cosine ranks low but BM25 ranks first — though, per the measured caveat above, that scenario doesn't yet occur on our small corpus.
 
 **Gate placement — the one real risk (Elon's explicit flag).** RRF produces a rank-fusion score, not a cosine similarity — it must never be used as, or silently replace, the relevance floor (`SELF_COMPANY_INJECT_RAG_MIN_SCORE`) every consumer gates on. So `rag_query.py`'s hybrid path ALWAYS returns the TRUE vector-leg cosine as `score`:
 - A hit the vector leg also found carries a restored `_distance` -> `score = 1 - distance`, identical to the pure-vector path.
@@ -322,11 +324,11 @@ A SECOND bug surfaced during this measurement (not the embedding model): `hook_m
 
 ### The migration mechanism — model-stamping
 
-Same dimension does NOT mean same vector space: `bge-small-en-v1.5` and the multilingual MiniLM are both 384-dim but geometrically unrelated. Scoring a NEW-model query vector against OLD-model row vectors would silently produce meaningless cosine numbers — no crash (dims match), just wrong answers. `rag_stamp.py` is the shared seam that prevents this:
+Same dimension does NOT mean same vector space: `bge-small-en-v1.5` and the multilingual MiniLM are both 384-dim but geometrically unrelated. Scoring a NEW-model query vector against OLD-model row vectors would silently produce meaningless cosine numbers — no crash (dims match), just wrong answers. The SAME hazard exists across **fastembed library versions**: the same model name can change its output vectors between releases (the multilingual MiniLM switched from CLS to mean pooling), so the stamp includes the library version too (MUST-FIX 4). `rag_stamp.py` is the shared seam that prevents all of this:
 
-1. **Stamp** — `rag_index.py` writes `{model, dim}` to `.rag_stamp.json` next to the LanceDB table after every successful build (full or incremental).
-2. **Refuse** — `rag_query.py` checks the stamp before scoring; a mismatch OR a missing stamp (a legacy pre-Phase-24 index that never wrote one) is treated identically to "index absent" — the SAME exit-2/`FileNotFoundError` signal every consumer already degrades on. No consumer (`hook_memory_inject`, `Employee.recall`/`recall_shared`) needed its own stamp-check code; they all inherit the refusal for free because they all shell out to `rag_query.py`.
-3. **Self-heal** — `rag_index.py` ALSO checks the stamp on its own incremental refresh: a table with real rows but a mismatched/absent stamp forces a full rebuild (re-embeds everything under the CURRENT model), then writes the fresh stamp. This means `daily-run.sh`'s existing (unmodified) incremental invocation self-heals automatically — no bash changes were needed, no manual step, no window where a mixed-model table could exist (Phase 12b self-heal pattern: plugin update lands → next tick detects the mismatch → rebuilds → correct).
+1. **Stamp** — `rag_index.py` writes `{model, dim, lib}` (model name, embedding dimension, fastembed version) to `.rag_stamp.json` next to the LanceDB table after every successful build (full or incremental).
+2. **Refuse** — `rag_query.py` checks the stamp before scoring; a mismatch on ANY of model / dim / lib, OR a missing stamp (a legacy pre-Phase-24 index that never wrote one), is treated identically to "index absent" — the SAME exit-2/`FileNotFoundError` signal every consumer already degrades on. No consumer (`hook_memory_inject`, `Employee.recall`/`recall_shared`) needed its own stamp-check code; they all inherit the refusal for free because they all shell out to `rag_query.py`.
+3. **Self-heal** — `rag_index.py` ALSO checks the stamp on its own incremental refresh: a table with real rows but a mismatched/absent stamp forces a full rebuild (re-embeds everything under the CURRENT model + library), then writes the fresh stamp. This means `daily-run.sh`'s existing (unmodified) incremental invocation self-heals automatically — no bash changes were needed, no manual step, no window where a mixed-model table could exist (Phase 12b self-heal pattern: plugin update lands → next tick detects the mismatch → rebuilds → correct). fastembed is also PINNED in `rag_setup.sh` (`fastembed==<version>`) so an unintended upgrade can't happen silently; a deliberate bump changes the stamped `lib` and self-heals.
 
 ### Rollback
 
