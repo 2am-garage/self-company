@@ -695,5 +695,119 @@ class TestCaptureTimeoutBudget(unittest.TestCase):
         self.assertLess(captured["timeout"], 120)
 
 
+class TestC1DailyLockReinforce(unittest.TestCase):
+    """C1 (F8, folded into Phase 25): the reinforce-of-EXISTING-memory REWRITE
+    path takes a NON-BLOCKING flock on .daily.lock (the SAME lockfile
+    daily-run.sh holds for its whole mutating pass) — on contention it skips
+    (fail-safe: a missed reinforce is noise, a corrupted tier is not). New-L0
+    creation stays lock-free."""
+
+    def _company(self, d, mid="canonical-fact"):
+        c = os.path.join(d, ".company")
+        _helpers.write_memory(
+            os.path.join(c, "memory", "L0-working", f"{mid}.md"),
+            id=mid, sources='["[old#1]"]', created="2026-07-02",
+            last_reinforced="2026-07-02", reinforce_count=1,
+            body="Chairman uses vim daily.")
+        return c
+
+    def _hold_lock(self, company, hold_secs, ready_path):
+        import subprocess
+        lock = os.path.join(company, "ops", ".daily.lock")
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        script = f'exec 9>"{lock}"; flock 9; : > "{ready_path}"; sleep {hold_secs}'
+        return subprocess.Popen(["bash", "-c", script])
+
+    def _await_ready(self, ready_path):
+        import time
+        for _ in range(200):
+            if os.path.exists(ready_path):
+                return
+            time.sleep(0.02)
+        self.fail("lock holder never acquired the lock")
+
+    def test_contended_lock_skips_reinforce_fail_safe(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            ready = os.path.join(d, "lock.ready")
+            holder = self._hold_lock(c, 2, ready)
+            try:
+                self._await_ready(ready)
+                path = os.path.join(c, "memory", "L0-working", "canonical-fact.md")
+                ok = ct._try_daily_lock_reinforce(c, path, [7], "sess-1", "2026-07-03")
+                self.assertFalse(ok, "reinforce must be SKIPPED under lock contention")
+                with open(path) as f:
+                    txt = f.read()
+                self.assertIn("reinforce_count: 1", txt)   # untouched
+                self.assertNotIn("sess-1", txt)             # no interleaved rewrite
+            finally:
+                holder.wait()
+
+    def test_uncontended_lock_bump_succeeds(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            path = os.path.join(c, "memory", "L0-working", "canonical-fact.md")
+            ok = ct._try_daily_lock_reinforce(c, path, [7], "sess-1", "2026-07-03")
+            self.assertTrue(ok)
+            with open(path) as f:
+                txt = f.read()
+            self.assertIn("reinforce_count: 2", txt)
+
+    def test_new_l0_creation_stays_lock_free_during_contention(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            ready = os.path.join(d, "lock.ready")
+            holder = self._hold_lock(c, 2, ready)
+            try:
+                self._await_ready(ready)
+                written, reinforced = ct.write_l0(
+                    [{"id": "brand-new-fact", "body": "a new fact", "source_lines": [3]}],
+                    "sess-2", c, today="2026-07-03")
+                self.assertEqual(written, ["brand-new-fact"])
+            finally:
+                holder.wait()
+
+
+class TestC2CooldownAtomicCheckAndMark(unittest.TestCase):
+    """C2 (Gibby #5): check_and_mark_cooldown is atomic under one flock — two
+    concurrent invocations for the SAME session must yield exactly ONE
+    'proceed' (the old unlocked check-then-set race let BOTH proceed, which
+    the doc's "second is a no-op" claim assumed away but did not enforce)."""
+
+    def test_two_simultaneous_calls_exactly_one_proceeds(self):
+        import threading
+        with tempfile.TemporaryDirectory() as d:
+            c = os.path.join(d, ".company")
+            os.makedirs(c, exist_ok=True)
+            results = []
+            barrier = threading.Barrier(2)
+
+            def attempt():
+                barrier.wait()
+                ok = ct.check_and_mark_cooldown(c, "sess-race", minutes=30)
+                results.append(ok)
+
+            threads = [threading.Thread(target=attempt) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(sorted(results), [False, True])
+
+    def test_second_call_is_throttled_after_first_marks(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = os.path.join(d, ".company")
+            os.makedirs(c, exist_ok=True)
+            self.assertTrue(ct.check_and_mark_cooldown(c, "sess-a", minutes=30))
+            self.assertFalse(ct.check_and_mark_cooldown(c, "sess-a", minutes=30))
+
+    def test_different_sessions_both_proceed(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = os.path.join(d, ".company")
+            os.makedirs(c, exist_ok=True)
+            self.assertTrue(ct.check_and_mark_cooldown(c, "sess-a", minutes=30))
+            self.assertTrue(ct.check_and_mark_cooldown(c, "sess-b", minutes=30))
+
+
 if __name__ == "__main__":
     unittest.main()
