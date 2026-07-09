@@ -1,10 +1,12 @@
 # RAG Playbook — Retrieval-Augmented Memory Search
 
-> **Tony's domain.** RAG is a local, offline vector index (LanceDB + fastembed) over the markdown memory store, used to catch semantic matches keyword search misses. It is **wired into the pipeline** as of Phase 13 — the daily index refresh (Stage A) and ask-time semantic injection (Stage B, v0.1.5) both run live. The one piece that isn't pre-installed is the local venv; until you run the one command below the company transparently uses the keyword floor:
+> **Tony's domain.** RAG is a local, offline vector index (LanceDB + fastembed) over the markdown memory store, used to catch semantic matches keyword search misses. It is **wired into the pipeline** as of Phase 13 — the daily index refresh (Stage A) and ask-time semantic injection (Stage B, v0.1.5) both run live. As of **Phase 24** the index is also **hybrid** (vector + BM25/FTS fused via RRF, §7) and **model-stamped** (§13 — the migration mechanism for a future embedding-model swap). The one piece that isn't pre-installed is the local venv; until you run the one command below the company transparently uses the keyword floor:
 > ```bash
 > bash .company/scripts/rag_setup.sh install
 > ```
-> This creates a private venv at `.company/.rag-venv` and installs **LanceDB + fastembed** (`BAAI/bge-small-en-v1.5`, 384-dim, local CPU, no daemon, fully offline). No Ollama. Everything degrades gracefully: with no venv the pipeline runs exactly as before.
+> This creates a private venv at `.company/.rag-venv` and installs **LanceDB + fastembed** (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384-dim, MULTILINGUAL, local CPU, no daemon, fully offline). No Ollama. Everything degrades gracefully: with no venv the pipeline runs exactly as before.
+>
+> **Phase 24 — why the model changed.** The original `BAAI/bge-small-en-v1.5` was English-only: it compressed every query (any language) into an undiscriminating 0.45–0.65 cosine band, so the injection floor filtered nothing, and the Chairman's default language (Traditional Chinese) retrieved WORSE than random — an off-topic Chinese prompt injected the same memory an on-topic one would. The multilingual swap fixes this; see §1 and §13 for the full diagnosis, measurement, and rollback story.
 
 ---
 
@@ -66,7 +68,7 @@ The RAG **logic is wired** (daily index refresh + ask-time semantic injection), 
 bash .company/scripts/rag_setup.sh install
 ```
 
-Creates `.company/.rag-venv`, installs LanceDB + fastembed, and warms the embedding model (one-time ~130 MB download of `BAAI/bge-small-en-v1.5`). `rag_index.py` / `rag_query.py` auto re-exec into that venv, so plain `python3 .company/scripts/rag_*.py` just works afterward.
+Creates `.company/.rag-venv`, installs LanceDB + fastembed, and warms the embedding model (one-time ~470 MB download of `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, multilingual). `rag_index.py` / `rag_query.py` auto re-exec into that venv, so plain `python3 .company/scripts/rag_*.py` just works afterward.
 
 Other subcommands:
 ```bash
@@ -117,10 +119,12 @@ rm -rf .company/memory/index && python3 .company/scripts/rag_index.py --rebuild
 
 - **Location**: `.company/memory/index/` (LanceDB, gitignored, private). Configurable via `RAG_INDEX_PATH` (policy.md §8).
 - **Table**: `memory`.
-- **Row schema**: `{ id, tier, path, content_hash, vector[384] }`. The index stores **no body text** — only a pointer (`path`) back to the markdown source plus the content hash (for incremental skip) and the embedding vector.
+- **Row schema**: `{ id, tier, path, content_hash, vector[384], text }`. **Phase 24 Item 4** added `text` (the embedded body) so a native FTS (BM25) index can be built alongside the vector column — see §7 for why storing body text is now acceptable (a reversal of the original "no body in index" stance).
+- **FTS index**: a native LanceDB full-text index on `text` (Tantivy-or-native backend, no new dependency), rebuilt after every index run. Backs the lexical leg of hybrid search (§7).
+- **Model stamp**: `.rag_stamp.json` — a small JSON sidecar next to the LanceDB table (`{"model": ..., "dim": ...}`), written by `rag_index.py` after every successful build. See §13 for the full migration/rollback mechanism this enables.
 - **Scope**: L1 + L2 active memories only.
 
-Because only paths are stored, retrieval always resolves back to live markdown files (and a stale/tombstoned id simply maps to a file the consumer can re-check).
+Because paths are always stored, retrieval always resolves back to live markdown files (and a stale/tombstoned id simply maps to a file the consumer can re-check) — the `text` column is a query-time optimization, never the source of truth; the live markdown body is what gets injected.
 
 ---
 
@@ -138,6 +142,7 @@ python3 .company/scripts/rag_query.py --query "what does the Chairman prefer for
 | `--top-k` | 5 | Number of results |
 | `--index-dir` | `.company/memory/index` | LanceDB index path |
 | `--model` | (ignored) | Accepted for back-compat; the fastembed model is fixed |
+| `--query-type` | `hybrid` | `hybrid` (Phase 24 Item 4: vector + BM25/FTS fused via RRF) or `vector` (pure cosine, the pre-Item-4 path). Hybrid degrades to vector automatically on any error (e.g. an index built before the FTS column/index existed). |
 
 **Output (JSON)** — one row per hit, best first:
 ```json
@@ -159,7 +164,7 @@ The scripts hint at this fallback whenever they exit 2.
 
 ---
 
-## 7. Privacy & Security
+## 7. Privacy & Security, and Hybrid Retrieval (Phase 24 Item 4)
 
 RAG is **offline only** — a hard rule.
 
@@ -168,6 +173,27 @@ RAG is **offline only** — a hard rule.
 - **Rebuildable**: delete the index anytime without information loss — markdown is the truth.
 
 To hand off a repo or machine, wipe `.company/` (or just `.company/memory/index/`) to remove the indexed copy.
+
+### Body-in-index (a deliberate reversal)
+
+Before Phase 24, the index stored **no body text** — only `{id, tier, path, content_hash, vector}` — specifically so the index held nothing the markdown didn't already hold; a leaked/copied index was never more sensitive than the markdown itself, and retrieval always resolved back through `path` to the live file.
+
+**Phase 24 Item 4 adds a `text` column** (the embedded body) so a native BM25/FTS index can be built alongside the vector column — pure cosine misses exact-token queries (script names, ids, error strings), precisely the queries a self-company asks about itself; Anthropic's contextual-retrieval work measured embeddings+BM25 hybrid cutting top-20 retrieval failure ~49%.
+
+This is safe because nothing about the trust boundary changed:
+- The index (now including `text`) is **still gitignored, still local, still rebuildable** from the markdown truth in one command — it just now redundantly duplicates content that was already sitting in `.company/memory/` on the same machine.
+- **No new dependency, no new network exposure.** LanceDB's FTS is native (Tantivy-or-native backend, ships with `lancedb` already installed by `rag_setup.sh`).
+- Retrieval still ultimately re-validates and injects the **live markdown body** via `path` (never the indexed copy) — every consumer's re-validation logic (hook_memory_inject, `Employee.recall`/`recall_shared`) is unchanged by this.
+
+### Hybrid query (vector + BM25/FTS, fused via RRF)
+
+`rag_query.py` defaults to `query_type="hybrid"`: it runs a vector (cosine) search and a full-text (BM25) search over `text`, then fuses the two rankings with LanceDB's `RRFReranker` (Reciprocal Rank Fusion). This catches, for example, a query for an exact script name or error string that pure cosine ranks low but BM25 ranks first.
+
+**Gate placement — the one real risk (Elon's explicit flag).** RRF produces a rank-fusion score, not a cosine similarity — it must never be used as, or silently replace, the relevance floor (`SELF_COMPANY_INJECT_RAG_MIN_SCORE`) every consumer gates on. So `rag_query.py`'s hybrid path ALWAYS returns the TRUE vector-leg cosine as `score`:
+- A hit the vector leg also found carries a restored `_distance` -> `score = 1 - distance`, identical to the pure-vector path.
+- An **FTS-only** hit (the vector leg never surfaced it — e.g. an exact token match at low semantic similarity) has no `_distance` to restore, so `rag_query.py` computes the cosine directly against that row's own stored vector and the query vector. It is **never** given a free pass past the floor — an FTS-only hit still has to clear `RAG_MIN_SCORE` like any other hit.
+
+Net effect: every consumer's existing floor-gating code is untouched by Item 4 — hybrid mode returns the same `{id, tier, path, score}` shape with an honest cosine `score`, so "off-topic prompt injects nothing" (Item 2's tests) stays true post-fusion with zero consumer-side changes. `--query-type vector` is still available (CLI + `query_rag(..., query_type="vector")`) for the pure pre-Item-4 behavior, and hybrid mode itself degrades to vector automatically on any error (e.g. querying an index built before the FTS column/index existed).
 
 ---
 
@@ -196,6 +222,14 @@ It only counts active L1/L2 and exits 0 (at/over threshold) or 1 (under) — the
 ### Never fails the core
 
 The daily index refresh (§4) is wired so that an absent **or broken** venv, or a nonzero index run, degrades to a single logged line — the deterministic core (reinforce/decay/verify/entropy/capture) always completes and `daily-run.sh` always exits 0.
+
+### Stale or missing model stamp (Phase 24 Item 1)
+
+`rag_query.py` refuses to score against an index whose model stamp doesn't match the CURRENT embedding model (or has no stamp at all — a legacy pre-Phase-24 index). It raises the SAME `FileNotFoundError`/exit-2 signal as "no index yet", which every consumer already treats as index-absent — no per-consumer special-casing needed:
+```
+[rag_query] Index at ... has a stale or missing model stamp (stamp=..., current model=...) — treat as absent; rebuild with rag_index.py --rebuild (auto-heals on the next daily tick).
+```
+`rag_index.py` self-heals this automatically on its NEXT run (even an incremental one, no flag needed): a table with real rows but a mismatched/absent stamp forces a full rebuild, then writes the new stamp. See §13 for the full mechanism.
 
 ### Environment escape hatches
 
@@ -226,6 +260,9 @@ Index empty (no L1/L2 yet), query too specific, or RAG below threshold. Check wi
 ### "Index file is corrupted / LanceDB won't open"
 Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
 
+### "A query returns wrong-language / obviously irrelevant results" (pre-Phase-24 symptom)
+This was the Phase 24 diagnosis: an English-only embedding model on a non-English query. Confirm the model in use (`rag_embed.RAG_EMBED_MODEL`) is the multilingual one and that `references/rag.md §1`'s floor applies; if the index predates the swap, the next daily tick self-heals it (§13), or force it now: `rag_index.py --rebuild`.
+
 ---
 
 ## 10. RAG Lifecycle
@@ -235,27 +272,64 @@ Delete and rebuild: `rm -rf .company/memory/index && rag_index.py --rebuild`.
 | **Monitor** | Tony (daily, deps-free) | `--threshold-check` in daily-run surfaces an activation candidate | Active L1+L2 ≥ 50 and venv not installed |
 | **Decide** | Elon | Approve activation | Threshold crossed or Chairman orders |
 | **Setup** | Tom / human (one-time) | `rag_setup.sh install` | Before first refresh |
-| **Refresh** | Tony (daily, automatic) | Incremental `rag_index.py` after reinforce+decay | Keeps the index in sync with markdown |
-| **Query** | manual CLI + live ask-time injection (`hook_memory_inject.py`, Stage B / v0.1.5) + dispatch-time shared read (`Employee.recall_shared`, Phase 18c, `shared_memory_read` employees) | `rag_query.py` | Search by meaning |
-| **Rebuild** | Tony (as needed) | `--rebuild` | After major cleanup / corruption |
-| **Degrade** | All | Exit 2 + grep fallback; core never fails | Venv absent/broken |
+| **Refresh** | Tony (daily, automatic) | Incremental `rag_index.py` after reinforce+decay; self-heals a full rebuild on a model-stamp mismatch (§13) | Keeps the index in sync with markdown |
+| **Query** | manual CLI + live ask-time injection (`hook_memory_inject.py`, Stage B / v0.1.5) + dispatch-time shared read (`Employee.recall_shared`, Phase 18c, `shared_memory_read` employees) | `rag_query.py` (hybrid by default, §7) | Search by meaning + exact token |
+| **Rebuild** | Tony (as needed) | `--rebuild` | After major cleanup / corruption / model swap |
+| **Degrade** | All | Exit 2 + grep fallback; core never fails | Venv absent/broken/stale-stamp |
 
 ---
 
 ## 11. Integration with Company Workflow
 
-- **Daily core** (`daily-run.sh`): the RAG-index refresh + threshold surface run after the reinforce/decay/verify/entropy core, owned by Tony, gated via `org/schedule.yaml`. Venv absent/broken → one logged skip line, core unaffected.
+- **Daily core** (`daily-run.sh`): the RAG-index refresh + threshold surface run after the reinforce/decay/verify/entropy core, owned by Tony, gated via `org/schedule.yaml`. Venv absent/broken → one logged skip line, core unaffected. A model-stamp mismatch (§13) is surfaced as its own log line and self-heals with a forced full rebuild — no manual step.
 - **In-process dedup** (`reinforce_memory.py`, `entropy.py`): use `rag_embed` directly (Path A, §1) — separate from the LanceDB index.
-- **Policy tunables** (`org/policy.md §8`): `RAG_ENABLE_THRESHOLD`, `RAG_MODEL`, `RAG_INDEX_PATH`.
+- **Policy tunables** (`org/policy.md §8`): `RAG_ENABLE_THRESHOLD`, `RAG_MODEL`, `RAG_INDEX_PATH`, `SELF_COMPANY_INJECT_RAG_MIN_SCORE`.
 - **Stage B (shipped v0.1.5)**: semantic ask-time injection in `hook_memory_inject.py` consumes `rag_query.py` with a tight timeout and falls back to the keyword path when the venv is absent.
 - **Shared read at dispatch (Phase 18c)**: a `shared_memory_read` employee (elon by default) also consumes `rag_query.py` against the SHARED index at DISPATCH — via `Employee.recall_shared` / `dispatch_context` — so a headless worker carries the Chairman's standing directives, not just the interactive hook. Same gate + live re-validation; the dispatcher sets `SC_NO_MEMORY_INJECT=1` on the worker so the worker's own `UserPromptSubmit` hook no-ops (no double injection).
+- **Per-employee memory (Phase 18/24 Item 3)**: the 5 rag-mode employees (tony/mike/elon/phoebe/july) capture experience via `Employee.remember()` (a concrete, runnable persona step as of Phase 24 — see each `persona.md`'s "Capture (task close)" section), indexed by the SAME `rag_index.py`/`Employee.recall_context` path — physically isolated per employee, same model + stamp + hybrid machinery as the shared index.
 
 ---
 
 ## 12. References
 
-- **Scripts**: `.company/scripts/rag_setup.sh`, `rag_index.py`, `rag_query.py`, `rag_embed.py`.
+- **Scripts**: `.company/scripts/rag_setup.sh`, `rag_index.py`, `rag_query.py`, `rag_embed.py`, `rag_stamp.py`.
 - **Index location**: `.company/memory/index/` (LanceDB, gitignored).
 - **Policy tunables**: `org/policy.md §8 RAG`.
 - **Design**: `design/self-company-design.md §8`.
 - **Memory tiers & frontmatter**: `design/self-company-design.md §2` / §4.
+
+---
+
+## 13. Model Swaps, Stamping & Rollback (Phase 24 Item 1)
+
+### The diagnosis
+
+`BAAI/bge-small-en-v1.5` is English-only. Measured live on the real corpus (154 memories at diagnosis time): it compressed EVERY query — on- or off-topic, any language — into a narrow 0.45–0.65 cosine band, so the injection floor (`RAG_MIN_SCORE=0.30`) filtered nothing (17/17 diagnostic queries had all top-10 hits ≥ 0.30). Chinese queries were WORSE than random (hit@1 0.20 vs EN 0.62) — and the Chairman communicates in Traditional Chinese by default, so this was the default path, not a corner case. An off-topic Chinese prompt ("how to cook pasta") injected the SAME memory an on-topic Chinese query would, silently violating the hook's own "never pollute with irrelevant memory" rule on every Chinese prompt.
+
+### The fix and the measurement
+
+Swapped to `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` — still 384-dim (`EMBEDDING_DIM` did NOT change; the heavier `bge-m3`, 1024-dim SOTA multilingual, was deliberately NOT chosen — it would force a schema/assertion migration for quality gains not yet measured as needed). Re-measured on the real corpus (55 active L1/L2 memories at the time of this phase, EN+ZH+off-topic diagnostic queries, before vs after the model swap AND Item 4's hybrid+RRF):
+
+| Metric | Before (bge-small-en, vector-only) | After (multilingual + hybrid/RRF) |
+|---|---|---|
+| EN hit@1 / MRR | 0.750 / 0.830 | 0.875 / 0.906 |
+| ZH hit@1 / MRR | 0.375 / 0.396 | 0.625 / 0.750 |
+| Off-topic top-1 score (EN+ZH, 11 probes) | 0.489–0.648 | 0.091–0.306 |
+
+The retuned floor `SELF_COMPANY_INJECT_RAG_MIN_SCORE = 0.35` (was 0.30) sits in the resulting gap between the off-topic ceiling (~0.31) and the lowest true on-topic top-1 score (~0.42).
+
+A SECOND bug surfaced during this measurement (not the embedding model): `hook_memory_inject.rank()`'s keyword-path recency fallback fired whenever the prompt tokenized to nothing — which is true for BOTH a genuinely empty prompt AND any non-empty pure-CJK prompt (the fast tokenizer is ASCII-only). Fixed to fall back to recency ONLY on a truly blank prompt; a real non-Latin-script prompt with no semantic match now correctly injects nothing (`tests/test_hook_memory_inject.py::TestKeywordFallbackDistinguishesEmptyFromUnparseable` / `TestMultilingualRelevanceGate`).
+
+### The migration mechanism — model-stamping
+
+Same dimension does NOT mean same vector space: `bge-small-en-v1.5` and the multilingual MiniLM are both 384-dim but geometrically unrelated. Scoring a NEW-model query vector against OLD-model row vectors would silently produce meaningless cosine numbers — no crash (dims match), just wrong answers. `rag_stamp.py` is the shared seam that prevents this:
+
+1. **Stamp** — `rag_index.py` writes `{model, dim}` to `.rag_stamp.json` next to the LanceDB table after every successful build (full or incremental).
+2. **Refuse** — `rag_query.py` checks the stamp before scoring; a mismatch OR a missing stamp (a legacy pre-Phase-24 index that never wrote one) is treated identically to "index absent" — the SAME exit-2/`FileNotFoundError` signal every consumer already degrades on. No consumer (`hook_memory_inject`, `Employee.recall`/`recall_shared`) needed its own stamp-check code; they all inherit the refusal for free because they all shell out to `rag_query.py`.
+3. **Self-heal** — `rag_index.py` ALSO checks the stamp on its own incremental refresh: a table with real rows but a mismatched/absent stamp forces a full rebuild (re-embeds everything under the CURRENT model), then writes the fresh stamp. This means `daily-run.sh`'s existing (unmodified) incremental invocation self-heals automatically — no bash changes were needed, no manual step, no window where a mixed-model table could exist (Phase 12b self-heal pattern: plugin update lands → next tick detects the mismatch → rebuilds → correct).
+
+### Rollback
+
+Rollback is real and cheap, in either direction:
+- **Revert the model**: change `RAG_EMBED_MODEL` back in `rag_embed.py`. The next tick's stamp-mismatch self-heal rebuilds the index under the old model automatically.
+- **Revert everything**: `rm -rf .company/memory/index && rag_index.py --rebuild` always restores a fully consistent index from the markdown truth (the index is a derivative cache, never a source of truth) — no data is ever at risk in either direction.

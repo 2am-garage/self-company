@@ -368,13 +368,15 @@ original Ollama design to the shipped one.
 
 RAG infrastructure is built and wired; only the local venv ships uninstalled:
 - **Embedding**: **fastembed** (ONNX, CPU, fully offline, no daemon), model
-  `BAAI/bge-small-en-v1.5` (384-dim), via `scripts/rag_embed.py`. No Ollama, no HTTP,
-  no network at query time. (The original Ollama/`nomic-embed-text`/768-dim design was
-  superseded — see `references/rag.md` and `policy.md §8`.)
-- **Vector store**: LanceDB (embedded, serverless), index at `.company/memory/index/`. Derivative of markdown truth, always rebuildable.
-- **Scripts**: `rag_index.py` / `rag_query.py` (+ `rag_embed.py`, `rag_setup.sh`) run
+  `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-dim, MULTILINGUAL —
+  Phase 24), via `scripts/rag_embed.py`. No Ollama, no HTTP, no network at query time.
+  (The original Ollama/`nomic-embed-text`/768-dim design, then the English-only
+  `BAAI/bge-small-en-v1.5`/384-dim, were both superseded — see `references/rag.md §1`
+  and `policy.md §8`.)
+- **Vector store**: LanceDB (embedded, serverless), index at `.company/memory/index/`. Derivative of markdown truth, always rebuildable. Model-stamped (Phase 24): a stale/missing stamp is treated as index-absent, never silently scored. Also carries a native FTS (BM25) index on the embedded body text (Phase 24 Item 4 — hybrid vector+lexical retrieval via RRF fusion).
+- **Scripts**: `rag_index.py` / `rag_query.py` (+ `rag_embed.py`, `rag_stamp.py`, `rag_setup.sh`) run
   from the skill/plugin per code-data separation — NOT copied into `.company/`.
-- **Trigger**: the index refresh is wired into `daily-run.sh` (incremental, idempotent, Tony-owned). Activation is surfaced (a) auto when L1+L2 memory count crosses threshold, OR (b) by Chairman manual order; the venv ships uninstalled until then.
+- **Trigger**: the index refresh is wired into `daily-run.sh` (incremental, idempotent, Tony-owned; self-heals a full rebuild on a model-stamp mismatch). Activation is surfaced (a) auto when L1+L2 memory count crosses threshold, OR (b) by Chairman manual order; the venv ships uninstalled until then.
 - **Owner**: Tony builds/maintains the index; Tony + Gibby query it (Gibby for semantic dup/contradiction search during VERIFY). Others access through Tony.
 
 **Graceful degradation**: If the RAG venv (fastembed) or LanceDB is unavailable, a clear actionable message to stderr, exit non-zero. No uncaught tracebacks. Falls back to Jaccard / full-text over `.company/memory`.
