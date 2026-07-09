@@ -57,7 +57,8 @@ from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 # defunct->archived normalization, and serialize key order layered on top.
 from frontmatter import (split as _fm_split, parse as _fm_parse,
                          serialize as _fm_serialize,
-                         SOURCE_ITEM_RE, tokenize_sources)
+                         SOURCE_ITEM_RE, tokenize_sources,
+                         _atomic_write)
 
 
 # ============================================================================
@@ -415,7 +416,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                                          "created", "last_reinforced", "reinforce_count",
                                          "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
-            path.write_text(new_content)
+            _atomic_write(path, new_content, encoding="utf-8")
             return True
 
         elif action == "demote":
@@ -433,7 +434,10 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
 
             new_path = path.parent.parent / "L0-working" / path.name
             new_path.parent.mkdir(parents=True, exist_ok=True)
-            new_path.write_text(new_content)
+            # Item 2: write the new-path file COMPLETELY (atomically) before any
+            # unlink below — an interruption must leave at least one complete
+            # copy, never zero.
+            _atomic_write(new_path, new_content, encoding="utf-8")
 
             # Same-path guard (mirrors the promote branch): if the file is
             # physically already in L0-working but its frontmatter said tier: L1
@@ -492,7 +496,10 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                 new_path = memory_root / TIER_DIRS["L1"] / path.name
 
             new_path.parent.mkdir(parents=True, exist_ok=True)
-            new_path.write_text(new_content)
+            # Item 2: write the new-path file COMPLETELY (atomically) before any
+            # unlink below — an interruption must leave at least one complete
+            # copy, never zero.
+            _atomic_write(new_path, new_content, encoding="utf-8")
             # Guard idempotency: only unlink the old file if it's a different path
             # (never delete the file we just wrote).
             if new_path.resolve() != path.resolve():
@@ -508,7 +515,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                                          "created", "last_reinforced", "reinforce_count",
                                          "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
-            path.write_text(new_content)
+            _atomic_write(path, new_content, encoding="utf-8")
             return True
 
         elif action in ["keep", "upgrade-candidate", "l2-keep"]:
@@ -522,7 +529,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                                          "created", "last_reinforced", "reinforce_count",
                                          "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
-            path.write_text(new_content)
+            _atomic_write(path, new_content, encoding="utf-8")
             return True
 
     except Exception as e:

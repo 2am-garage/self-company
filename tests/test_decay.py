@@ -542,5 +542,91 @@ class TestFrontmatterMigration(unittest.TestCase):
         self.assertEqual(mem["_body"], "")
 
 
+class TestItem2AtomicWriteNeverZeroCopies(unittest.TestCase):
+    """Phase 25 Item 2: decay's writes route through the shared
+    frontmatter._atomic_write. For the tier-promotion MOVE paths (demote,
+    promote) the new-path file is written COMPLETELY before the old path is
+    ever unlinked — a write failure (ENOSPC, simulated here) must leave the
+    OLD file exactly as it was: never zero complete copies, never a
+    half-written new file masquerading as real."""
+
+    CONTENT = ("---\nid: obs\ntier: L0\nowner: Tony\n"
+              'sources: ["[s#1]"]\n'
+              "created: 2026-06-01\nlast_reinforced: 2026-07-01\n"
+              "reinforce_count: 2\ndecay_score: 1.0\nstatus: active\n"
+              "---\nbody\n")
+
+    def _write_l0(self, mem_dir):
+        l0 = os.path.join(mem_dir, "L0-working")
+        os.makedirs(l0, exist_ok=True)
+        p = os.path.join(l0, "obs.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(self.CONTENT)
+        return p
+
+    def test_promote_write_failure_leaves_old_file_intact(self):
+        import unittest.mock as mock
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            mem_dir = os.path.join(d, "memory")
+            p = self._write_l0(mem_dir)
+            fm = decay.parse_frontmatter(self.CONTENT)
+            info = {"decay_score": 0.9}
+            real_atomic = decay._atomic_write
+
+            def boom(path, *a, **kw):
+                if "L1-warm" in str(path):
+                    raise OSError(28, "No space left on device")
+                return real_atomic(path, *a, **kw)
+
+            with mock.patch.object(decay, "_atomic_write", side_effect=boom):
+                ok = decay.apply_action(Path(p), "promote", fm, info)
+            self.assertFalse(ok)  # apply_action's except-catch reports failure
+            # OLD file (L0) is COMPLETELY intact — never zero copies.
+            self.assertTrue(os.path.exists(p))
+            with open(p, encoding="utf-8") as f:
+                self.assertEqual(f.read(), self.CONTENT)
+            # NEW file (L1) was never fully written — no half-written stray.
+            self.assertFalse(
+                os.path.exists(os.path.join(mem_dir, "L1-warm", "obs.md")))
+            # no stray temp files anywhere under mem_dir
+            leftovers = [f for _, _, files in os.walk(mem_dir) for f in files
+                        if ".tmp" in f]
+            self.assertEqual(leftovers, [])
+
+    def test_demote_write_failure_leaves_old_file_intact(self):
+        import unittest.mock as mock
+        from pathlib import Path
+        content = ("---\nid: obs\ntier: L1\nowner: Tony\n"
+                  'sources: ["[s#1]"]\n'
+                  "created: 2026-06-01\nlast_reinforced: 2026-05-01\n"
+                  "reinforce_count: 1\ndecay_score: 0.1\nstatus: active\n"
+                  "---\nbody\n")
+        with tempfile.TemporaryDirectory() as d:
+            mem_dir = os.path.join(d, "memory")
+            l1 = os.path.join(mem_dir, "L1-warm")
+            os.makedirs(l1, exist_ok=True)
+            p = os.path.join(l1, "obs.md")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content)
+            fm = decay.parse_frontmatter(content)
+            info = {"decay_score": 0.1}
+            real_atomic = decay._atomic_write
+
+            def boom(path, *a, **kw):
+                if "L0-working" in str(path):
+                    raise OSError(28, "No space left on device")
+                return real_atomic(path, *a, **kw)
+
+            with mock.patch.object(decay, "_atomic_write", side_effect=boom):
+                ok = decay.apply_action(Path(p), "demote", fm, info)
+            self.assertFalse(ok)
+            self.assertTrue(os.path.exists(p))
+            with open(p, encoding="utf-8") as f:
+                self.assertEqual(f.read(), content)
+            self.assertFalse(
+                os.path.exists(os.path.join(mem_dir, "L0-working", "obs.md")))
+
+
 if __name__ == "__main__":
     unittest.main()
