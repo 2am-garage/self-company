@@ -676,5 +676,164 @@ class TestMultilingualRelevanceGate(unittest.TestCase):
             f"off-topic Chinese prompt (the live bug this phase fixes); got {scores}")
 
 
+# A realistic-sized corpus (32 memories) mirroring the real .company themes —
+# big enough to expose the off-topic-English keyword-collision bug that a 3-memory
+# synthetic fixture hides (Gibby MUST-FIX 1). None of these bodies contain the
+# CONTENT words of the off-topic probes below (tire/bike/risotto/photosynthesis/
+# yoga/wine/…); the ONLY possible overlaps are generic connectors (change/without/
+# going/make/…), which the hardened keyword gate must NOT treat as relevance.
+_REALISTIC_CORPUS = [
+    ("git-identity", "Keep the existing git identity; never add a Co-Authored-By or Claude attribution trailer to commits. Commits are the Chairman's only."),
+    ("database-backups", "Maintains postgres databases and requires automated nightly backups at 2am with dump rotation."),
+    ("merge-gate", "The company may merge its own pull request when the full test suite passes and integration checks are green."),
+    ("verify-before-commit", "Never trust, always test: verify scripts actually run before committing, and red-team every implementation."),
+    ("chinese-replies", "When replying to the Chairman, staff answer in Traditional Chinese, keeping code and identifiers in English."),
+    ("list-format", "Prefers list format for summaries and overviews of complex information when detailed specs are unavailable."),
+    ("completion-confirm", "Seeks explicit confirmation that work is actually implemented before considering a task finished."),
+    ("delegation-phoebe", "Routes testing, skill optimization, and quality architecture work to Phoebe as collaborative design."),
+    ("model-optimization", "Assigns agent models by task requirement, deploying stronger reasoning models for specification writing."),
+    ("granular-commits", "Wants granular reversible commits pushed as a pull request rather than one large squashed change."),
+    ("entropy-metric", "Treats entropy as the memory-quality KPI; after each maintenance cycle entropy should drop or stay flat."),
+    ("approval-gate", "Structural changes need Elon sign-off; routine persona tweaks within scope do not require approval."),
+    ("rag-connect", "The RAG index should be connected into the pipeline, never deleted; it is a derivative of markdown truth."),
+    ("sub-agent-isolation", "Dispatches build work to employee subagents; Bob builds and Gibby attacks in separate isolated agents."),
+    ("four-daily-runs", "Runs the company loop four times daily on a cron schedule to keep memory consolidation fresh."),
+    ("token-budget", "Watches token cost across sub-companies; a holding orchestrator manages children instead of many crons."),
+    ("permission-minimal", "Prefers minimal permission overhead and least-privilege capability slices for each employee."),
+    ("repo-scoped", "The skill is repo-scoped; company memory stays private under a gitignored directory, never pushed."),
+    ("org-hierarchy", "Elon is CEO reporting to the Chairman; Phoebe plans and dispatches; July stewards people and capabilities."),
+    ("payroll-ops", "The Chairman runs actual company payroll operations and expects the org to model real execution structure."),
+    ("diagnostic-first", "Sequences work diagnostic-first: measure the real problem before proposing or building a solution."),
+    ("event-triggers", "Wants event-driven triggers designed with depth, not shallow polling, for autonomous work initiation."),
+    ("inclusive-design", "Values inclusive, accessibility-conscious design in anything user-facing the company produces."),
+    ("code-switching", "Communicates bilingually, code-switching between Chinese and English depending on the operational context."),
+    ("weekly-research", "Mike runs a weekly external research survey to surface new tooling and capability options for review."),
+    ("self-merge", "Since a stated date the Chairman authorizes self-merge of the company's own PR after a green test suite."),
+    ("format-flexible", "Presentation format is flexible; readability for the Chairman matters more than a rigid template."),
+    ("improvement-solicit", "Solicits improvement proposals before big decisions, expecting grounded metrics rather than gut calls."),
+    ("decay-tiers", "Memory decays across L0, L1, and L2 tiers; durable identity-level facts are promoted to the cold tier."),
+    ("supervisor-dispatch", "Autonomous dispatch flows through the supervisor, injecting standing directives into headless workers."),
+    ("charter-authority", "Charter-level rules carry standing authority and supersede one-off instructions unless explicitly revoked."),
+    ("scheduled-reports", "Tom produces a scheduled daily report so the Chairman can review company activity at a glance."),
+]
+
+# Off-topic English probes whose ONLY possible token overlap with the corpus is a
+# generic connector (change / without / make / good / …), all of which the
+# hardened stoplist + specificity gate must treat as noise. These are exactly the
+# class of prompt Gibby reproduced injecting on the real corpus.
+_OFFTOPIC_EN = [
+    "How do I change a flat tire on a mountain bike?",
+    "What's a good recipe for mushroom risotto?",
+    "Can you explain how photosynthesis works?",
+    "What are some beginner yoga poses I should try?",
+    "How do I get a red wine stain out of a white shirt?",
+    "What's the best way to brew espresso at home?",
+    "Which planets in the solar system have rings?",
+    "How long should I roast a whole chicken?",
+]
+
+# On-topic English probes that MUST still inject (guard against over-tightening).
+_ONTOPIC_EN = [
+    ("what's the rule about commit authorship and Claude attribution", "attribution"),
+    ("how often are the databases backed up", "backups"),
+    ("can the company merge its own pull requests", "merge"),
+    ("does the chairman want confirmation before work is done", "confirmation"),
+]
+
+
+def _write_corpus(company, corpus):
+    for name, body in corpus:
+        _write_mem(company, "L2-cold", name, body=body, reinforce_count=2)
+
+
+class TestOffTopicEnglishKeywordPath(unittest.TestCase):
+    """Phase 24 MUST-FIX 1(b), DEPS-FREE (no venv): the NO-VENV keyword degrade
+    path must not inject an unrelated memory on a single incidental connector
+    word. Runs against a realistic 32-memory corpus (a 3-memory fixture hides
+    this) with SC_NO_RAG so the semantic path is forced off — exactly the
+    keyword-only path Gibby attacked."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        _write_corpus(self.company, _REALISTIC_CORPUS)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_no_rag(self):
+        env = {**os.environ, "SC_NO_RAG": "1"}   # force the keyword path
+        proc = subprocess.run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", self.transcript],
+            capture_output=True, text=True, input="", env=env)
+        return proc.returncode, proc.stdout.strip()
+
+    def test_offtopic_english_injects_nothing_keyword_path(self):
+        for prompt in _OFFTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, out = self._run_no_rag()
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, "",
+                             f"off-topic English must inject nothing on the keyword "
+                             f"path; leaked on: {prompt!r} -> {out[:160]}")
+
+    def test_ontopic_english_still_injects_keyword_path(self):
+        # Guard against over-tightening: real on-topic prompts must still inject.
+        for prompt, needle in _ONTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, out = self._run_no_rag()
+            self.assertEqual(rc, 0)
+            self.assertNotEqual(out, "",
+                                f"on-topic English must still inject on the keyword "
+                                f"path; went silent on: {prompt!r}")
+
+
+@unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
+class TestOffTopicEnglishSemanticPath(unittest.TestCase):
+    """Phase 24 MUST-FIX 1(a), venv-gated: with the semantic path AVAILABLE, an
+    off-topic English prompt whose nearest neighbors are all below the cosine
+    floor must inject NOTHING — semantic_top() returns the INJECT_NOTHING
+    verdict and run() must NOT fall through to the keyword gate. Real index over
+    the realistic 32-memory corpus (the bug was invisible on a 3-memory one)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        os.symlink(REPO_VENV_DIR, os.path.join(self.company, ".rag-venv"))
+        _write_corpus(self.company, _REALISTIC_CORPUS)
+        rc = _build_real_index(self.company)
+        if rc.returncode != 0:
+            self.skipTest(f"rag_index unavailable/offline: {rc.stderr}")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_offtopic_english_injects_nothing_with_venv(self):
+        for prompt in _OFFTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+            self.assertEqual(rc, 0)
+            self.assertEqual(raw, "",
+                             f"off-topic English must inject nothing with the semantic "
+                             f"path available; leaked on: {prompt!r} -> {raw[:160]}")
+
+    def test_ontopic_english_still_injects_with_venv(self):
+        for prompt, _needle in _ONTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+            self.assertEqual(rc, 0)
+            self.assertIsNotNone(parsed,
+                                 f"on-topic English must still inject with venv; "
+                                 f"went silent on: {prompt!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

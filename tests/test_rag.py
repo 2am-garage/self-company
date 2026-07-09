@@ -253,6 +253,23 @@ class TestModelStamp(unittest.TestCase):
             self.assertIsNone(rag_stamp.read_stamp(d))
             self.assertFalse(rag_stamp.stamp_matches(None, "model-a", 384))
 
+    def test_lib_version_is_part_of_the_stamp(self):
+        # Phase 24 MUST-FIX 4: a fastembed-version change (same model+dim) must
+        # count as a mismatch so the index self-heals.
+        rag_stamp = self._mod()
+        with tempfile.TemporaryDirectory() as d:
+            rag_stamp.write_stamp(d, "model-a", 384, "0.8.0")
+            stamp = rag_stamp.read_stamp(d)
+            self.assertEqual(stamp.get("lib"), "0.8.0")
+            self.assertTrue(rag_stamp.stamp_matches(stamp, "model-a", 384, "0.8.0"))
+            # different lib -> mismatch (triggers rebuild)
+            self.assertFalse(rag_stamp.stamp_matches(stamp, "model-a", 384, "0.9.0"))
+            # a legacy stamp WITHOUT a lib key mismatches once we start passing lib
+            legacy = {"model": "model-a", "dim": 384}
+            self.assertFalse(rag_stamp.stamp_matches(legacy, "model-a", 384, "0.8.0"))
+            # lib not supplied (deps-free caller) -> lib dimension not checked
+            self.assertTrue(rag_stamp.stamp_matches(legacy, "model-a", 384))
+
     def test_malformed_stamp_file_degrades_to_none(self):
         rag_stamp = self._mod()
         with tempfile.TemporaryDirectory() as d:
