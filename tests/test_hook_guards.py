@@ -353,6 +353,73 @@ class TestMemoryGuardCdEquivalentsAndWrappers(_CompanyRepo):
         self._allow("pushd /tmp && rm -rf scratch")
 
 
+class TestMemoryGuardR2FailClosed(_CompanyRepo):
+    """GIB re-attack R2 — decisively fail-closed. Two blunt rules replace the
+    per-spelling whack-a-mole: (a) transparent prefixes (command/builtin/time/
+    exec/nohup/nice/env) are stripped recursively so a `cd` behind them still
+    moves the simulated cwd; (b) a nested shell (bash/sh/… -c, eval, xargs,
+    source) plus ANY deleter token anywhere -> DENY."""
+
+    def _decision(self, out):
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    def _deny(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "deny", cmd)
+
+    def _allow(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "allow", cmd)
+
+    # The 4 spellings that still deleted a real file before R2 ---------------
+    def test_double_nested_bash_c_denied(self):
+        self._deny("bash -c \"bash -c 'rm -rf .company/memory/L0-working'\"")
+
+    def test_command_prefix_cd_then_rm_denied(self):
+        self._deny("command cd .company/memory && rm -rf L0-working/x")
+
+    def test_time_prefix_cd_then_rm_denied(self):
+        self._deny("time cd .company/memory && rm -rf L0-working/x")
+
+    def test_builtin_prefix_cd_then_rm_denied(self):
+        self._deny("builtin cd .company/memory && rm -rf L0-working/x")
+
+    # Recursive prefix stacking + other transparent prefixes ----------------
+    def test_stacked_transparent_prefixes_cd_then_rm_denied(self):
+        self._deny("command builtin cd .company/memory && rm -rf L0-working/x")
+
+    def test_nice_prefix_with_option_cd_then_rm_denied(self):
+        self._deny("nice -n 10 cd .company/memory && rm -rf L0-working/x")
+
+    def test_exec_prefix_deleter_in_store_denied(self):
+        self._deny("cd .company/memory && exec rm -rf L0-working")
+
+    def test_source_with_deleter_denied(self):
+        # `source`/`.` is a nested-shell indicator; deleter present -> deny.
+        self._deny("source ./cleanup.sh && rm -rf .company/memory")
+
+    # Transparent prefixes must NOT introduce false positives ---------------
+    def test_time_ls_allowed(self):
+        self._allow("time ls")
+
+    def test_command_rm_outside_allowed(self):
+        self._allow("command rm /tmp/x")
+
+    def test_nice_tar_allowed(self):
+        self._allow("nice tar -czf /tmp/backup.tgz .")
+
+    def test_env_assignment_echo_allowed(self):
+        self._allow("env FOO=1 echo hi")
+
+    def test_time_prefix_cd_outside_then_rm_allowed(self):
+        self._allow("time cd /tmp && rm -rf scratch")
+
+    def test_command_builtin_cd_outside_allowed(self):
+        self._allow("command builtin cd /tmp && rm -rf junk")
+
+
 class TestMemoryLint(_CompanyRepo):
     def _rel(self, name):
         return os.path.join(".company", "memory", "L0-working", name)

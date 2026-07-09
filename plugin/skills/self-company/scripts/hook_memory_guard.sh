@@ -45,6 +45,30 @@
 # (unbalanced-quote) command that still mentions a deleter — is DENIED rather
 # than silently allowed.
 #
+# GIB R2 — DECISIVELY fail-closed (stop the spelling whack-a-mole). Two blunt,
+# comprehensive rules replace per-spelling handling:
+#   (a) TRANSPARENT PREFIXES: `command` / `builtin` / `time` / `exec` / `nohup`
+#       / `nice` / `env` are stripped RECURSIVELY to find the real command, so
+#       a `cd` behind any stack of them (`command builtin cd …`) still updates
+#       the simulated cwd.
+#   (b) NESTED SHELL + ANY DELETER = DENY: if the command invokes a nested shell
+#       (`bash/sh/zsh/dash/ksh -c`, `eval`, `xargs`, `source`/`.`) AND a deleter
+#       token (rm/rmdir/unlink/shred/truncate/find…-delete) appears ANYWHERE at
+#       ANY nesting depth, DENY without trying to prove the buried payload safe.
+#       This subsumes arbitrarily-nested `bash -c "bash -c '…rm…'"` in one rule.
+# Net: a deleter that reaches the store, OR a deleter alongside a nested shell /
+# unresolvable cd -> DENY. Only a fully-parseable, cwd-resolved command whose
+# every deleter target provably lands OUTSIDE the store -> ALLOW.
+#
+# HONEST SCOPE (per Elon): this is a best-effort DEFENSE-IN-DEPTH TRIPWIRE
+# against an injected/mistaken assistant, NOT a hard security boundary. A
+# determined adversary with shell access has many ways to remove files the
+# static analysis of a single command string can't all foresee (write a helper
+# script and run it, base64-decode a payload, etc.). The REAL recovery
+# mechanism is the tar-snapshot floor (pre-mutation `ops/backups/` snapshots,
+# policy §7.8). So a truly exotic residual evasion is ACCEPTED, not a merge
+# blocker; the tripwire raises the cost of the common/accidental cases.
+#
 # CONTRACT (PreToolUse): reads stdin JSON {tool_name, tool_input:{command}, cwd}.
 #   DENY : exit 0, stdout {"hookSpecificOutput":{"hookEventName":"PreToolUse",
 #          "permissionDecision":"deny","permissionDecisionReason":"..."}}
@@ -85,6 +109,15 @@ DELETERS = {"rm", "unlink", "shred", "rmdir", "truncate"}
 CD_CMDS = {"cd", "pushd"}                       # GIB re-attack: pushd is a cd too
 SHELL_INTERPRETERS = {"bash", "sh", "dash", "zsh", "ksh", "ash", "fish"}
 NESTED_WRAPPERS = {"eval", "xargs"}             # run another command we can't resolve
+# GIB R2 — transparent wrapper prefixes: they run the REAL command that follows
+# (and, for the shell-builtin cd, in the SAME shell, so a `cd` behind them still
+# persists). Strip them RECURSIVELY to find the real head. `env` is here too but
+# handled specially (its -C/--chdir is non-persistent) in check_command.
+TRANSPARENT_PREFIX = {"command", "builtin", "time", "exec", "nohup", "nice", "env"}
+# GIB R2 — a nested-shell indicator anywhere in the command. If one is present
+# AND a deleter token appears anywhere (any nesting depth), we do NOT try to
+# prove the payload safe — we DENY. Decisive fail-closed, no spelling whack-a-mole.
+NESTED_INDICATORS = SHELL_INTERPRETERS | {"eval", "xargs", "source"}
 AMBIG_CHARS = set("$`*?[]")
 PUNCT = set("();<>|&")                          # shell control punctuation
 
@@ -181,6 +214,31 @@ def text_has_hard_deleter(s):
     words = re.findall(r"[A-Za-z0-9_./-]+", s or "")
     return any(_basename(w) in DELETERS for w in words)
 
+
+def _all_words(s):
+    # Quoting-AGNOSTIC scan: we WANT to see inside quotes (a deleter buried in a
+    # nested `bash -c "…"` string must still be counted). Returns basenames.
+    return [_basename(w) for w in re.findall(r"[A-Za-z0-9_./-]+", s or "")]
+
+
+def raw_has_deleter(s):
+    # Any deleter token anywhere in the raw command string, at any nesting depth.
+    words = set(_all_words(s))
+    if words & DELETERS:
+        return True
+    if "find" in words and "-delete" in (s or ""):
+        return True
+    return False
+
+
+def has_nested_shell(s):
+    # A shell interpreter invocation (bash/sh/… -c), eval, xargs, or source —
+    # anywhere. Whole-word (basename) match so `refresh.sh`/`ssh`/`myeval` don't
+    # trip it. Also the bare-dot `.` source builtin used as a command.
+    if set(_all_words(s)) & NESTED_INDICATORS:
+        return True
+    return bool(re.search(r"(?:^|[;&|(]\s*)\.\s", s or ""))
+
 try:
     data = json.load(sys.stdin)
 except Exception:
@@ -193,6 +251,17 @@ if not isinstance(data, dict) or data.get("tool_name") != "Bash":
 cmd = ((data.get("tool_input") or {}) if isinstance(data.get("tool_input"), dict) else {}).get("command") or ""
 if not isinstance(cmd, str) or not cmd.strip():
     allow()
+
+# GIB R2 — DECISIVE fail-closed rule (stop the spelling whack-a-mole). If the
+# command wraps a nested shell (`bash/sh/… -c`, `eval`, `xargs`, `source`, `.`)
+# AND a deleter token appears ANYWHERE at ANY nesting depth, we do NOT try to
+# prove the buried payload targets outside the store — we DENY. This subsumes
+# arbitrarily-nested `bash -c "bash -c '…rm…'"` and every future shell-wrapping
+# spelling in one rule. False positives are cheap here (a legit deleter can
+# always use an absolute path outside .company, and no legit workflow buries a
+# store-deleting rm inside a nested shell in a self-company repo).
+if has_nested_shell(cmd) and raw_has_deleter(cmd):
+    deny(STRUCT_REASON)
 
 # Item 3: the harness's own persisted cwd at the moment this command is about
 # to run — the ground truth a `cd` in a PRIOR, separate tool call already
@@ -304,6 +373,20 @@ def _parse_env(rest):
     return cd_target, rest[j:]
 
 
+def _strip_prefix_opts(head, rest):
+    # Skip a transparent prefix's OWN leading options so we land on the REAL
+    # command (`nice -n 10 rm …` -> `rm …`, `command -p rm …` -> `rm …`).
+    j = 0
+    while j < len(rest):
+        t = rest[j]
+        if head == "nice" and t == "-n":
+            j += 2; continue           # nice -n <adjustment>
+        if t.startswith("-"):
+            j += 1; continue
+        break
+    return rest[j:]
+
+
 def check_command(toks, cwd):
     """Analyze one simple command. Returns the (persistently) updated cwd; may
     deny() and never return."""
@@ -318,6 +401,11 @@ def check_command(toks, cwd):
     if head in CD_CMDS:
         return _apply_cd(cwd, _cd_target(args))
 
+    # GIB R2 — transparent wrapper prefixes. `env` is special (its chdir is
+    # NON-persistent); the rest (`command`/`builtin`/`time`/`exec`/`nohup`/
+    # `nice`) run the following command in the SAME shell, so a `cd` behind them
+    # persists — strip and RE-DISPATCH on the real head, returning its cwd. This
+    # is recursive, so `command builtin cd …` unwraps fully.
     if head == "env":
         cd_t, inner = _parse_env(args)
         eff = cwd
@@ -325,6 +413,8 @@ def check_command(toks, cwd):
             eff = _apply_cd(cwd, cd_t)
         check_command(inner, eff)      # non-persistent chdir -> discard result
         return cwd
+    if head in TRANSPARENT_PREFIX:
+        return check_command(_strip_prefix_opts(head, args), cwd)
 
     if head in SHELL_INTERPRETERS:
         # A nested shell (`bash -c "cd … && rm …"`) we won't recursively
