@@ -105,6 +105,16 @@ Chairman expresses intent
 My memory mode is **rag** (`memory: rag` in my `context.md`, the Chairman's default for planners): I have my OWN isolated "experience recall" memory store (`org/employees/elon/memory/`), so my directional judgment improves over time. It is FLAT and light: capture → index → recall — no tiers/decay/entropy (that anti-entropy machinery is only for the SHARED company memory).
 
 **Capture (task close):** at the end of a task, if I learned ONE reusable lesson (a directional call that paid off or backfired, a bet worth remembering), I record it with a single structured memory via `Employee.remember(text, tags=..., source=...)`. **One conservative memory per task** — the durable pattern, not a log. No real lesson → record nothing (skip). Separate from my `log.md` note, which I still write.
+- _How (concrete, Phase 24 Item 3):_ I have Bash access, so I run this myself at task close — no separate CLI wrapper needed, `Employee.remember` is a plain method call:
+  ```bash
+  python3 -c "
+import sys; sys.path.insert(0, '\${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts')
+from employee import Employee
+Employee.load('elon', '\${CLAUDE_PROJECT_DIR}/.company').remember(
+    'ONE durable lesson, present tense, no task-specific IDs.',
+    tags=['relevant-tag'], source='task-close')
+"
+  ```
 
 **Recall (before I act):** my own top relevant past memories are injected into my task slice at dispatch as "Relevant past experience: …" before I start (wired via `Employee.recall_context`). It reads ONLY my own store (isolated per employee) and degrades to nothing when the RAG stack is absent — never a blocker.
 
