@@ -31,6 +31,12 @@ def _run(args, fake, extra_env=None):
                           stdin=subprocess.DEVNULL, env=env)
 
 
+def _real_python3():
+    """Absolute path of the interpreter running the suite (for a shim target)."""
+    import sys
+    return sys.executable
+
+
 class ScheduleTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -109,6 +115,52 @@ class TestNamespacedOwnership(ScheduleTestBase):
                      if "self-company-daily" in ln and self.A in ln)
         self.assertIn("project=", daily)
         self.assertIn("path=" + self.A, daily)
+
+
+class TestCronPath(ScheduleTestBase):
+    """TOM-PATH (Phase 22): the baked cron PATH must include the dir of the
+    python3 schedule.sh was installed with, so a pyenv/conda python3 outside the
+    four hardcoded dirs is still found by the cron line's `python3 …` calls (the
+    whole deterministic core). Standard /usr/bin/python3 installs stay unchanged."""
+
+    def _path_prefix(self, line):
+        # Extract the PATH='...' the runner exports.
+        import re
+        m = re.search(r"PATH='([^']*)'", line)
+        self.assertIsNotNone(m, "no PATH= in cron line: " + line)
+        return m.group(1)
+
+    def test_pyenv_python_dir_is_prepended(self):
+        # Plant a python3 in a NON-standard dir and put it first on PATH; the
+        # baked PATH must prepend that dir so cron can find this python3.
+        pybin = os.path.join(self.tmp, "pyenv-shims")
+        os.makedirs(pybin)
+        shim = os.path.join(pybin, "python3")
+        with open(shim, "w") as f:
+            f.write('#!/bin/sh\nexec "%s" "$@"\n' % _real_python3())
+        os.chmod(shim, 0o755)
+        env = {"PATH": pybin + ":" + os.environ.get("PATH", "")}
+        r = _run(["install", self.A], self.fake, extra_env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        daily = next(ln for ln in self._sc_lines()
+                     if "self-company-daily" in ln and self.A in ln)
+        prefix = self._path_prefix(daily)
+        self.assertTrue(prefix.startswith(pybin + ":"),
+                        "python3's dir not prepended: " + prefix)
+        # dedup: the pyenv dir must appear exactly once.
+        self.assertEqual(prefix.split(":").count(pybin), 1, prefix)
+
+    def test_standard_python3_not_duplicated(self):
+        # A python3 in /usr/bin (already a baked entry) must NOT be prepended.
+        env = {"PATH": "/usr/bin:/bin"}
+        if not os.path.exists("/usr/bin/python3"):
+            self.skipTest("no /usr/bin/python3 on this box")
+        r = _run(["install", self.A], self.fake, extra_env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        daily = next(ln for ln in self._sc_lines()
+                     if "self-company-daily" in ln and self.A in ln)
+        prefix = self._path_prefix(daily)
+        self.assertEqual(prefix.split(":").count("/usr/bin"), 1, prefix)
 
 
 class TestLegacyMigration(ScheduleTestBase):

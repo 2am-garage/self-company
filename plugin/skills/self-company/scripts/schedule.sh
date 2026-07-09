@@ -187,8 +187,23 @@ if [[ -f "$CFG_FILE" && -f "$SCRIPTS_DIR/schedule_config.py" ]]; then
   fi
 fi
 
-# cron has a minimal PATH; prepend the claude dir and /usr/bin so python3+claude resolve.
-PATH_PREFIX="PATH='$CLAUDE_DIR:/usr/local/bin:/usr/bin:/bin'"
+# cron has a minimal PATH; prepend the claude dir and /usr/bin so python3+claude
+# resolve. CRITICAL (TOM-PATH): also prepend the dir of the python3 we were
+# installed with — a pyenv/conda/asdf python3 lives OUTSIDE the four hardcoded
+# dirs, so without this the cron line's `python3 …` calls (the entire
+# deterministic core in daily-run.sh) fail and are swallowed by `|| true`, a
+# silent green no-op. Resolve it at install time and prepend, deduped against the
+# baked entries so a standard /usr/bin/python3 install is byte-unchanged.
+_PATH_ENTRIES="$CLAUDE_DIR:/usr/local/bin:/usr/bin:/bin"
+_PY3_BIN="$(command -v python3 2>/dev/null || true)"
+if [[ -n "$_PY3_BIN" ]]; then
+  _PY3_DIR="$(dirname "$_PY3_BIN")"
+  case ":$_PATH_ENTRIES:" in
+    *":$_PY3_DIR:"*) : ;;                              # already baked in — no dup
+    *) _PATH_ENTRIES="$_PY3_DIR:$_PATH_ENTRIES" ;;     # prepend python3's own dir
+  esac
+fi
+PATH_PREFIX="PATH='$_PATH_ENTRIES'"
 MARK="$MARK_DAILY project=$PROJ_KEY path=$PROJECT_DIR"
 MARK_RES="$MARK_RESEARCH project=$PROJ_KEY path=$PROJECT_DIR"
 MARK_FLT="$MARK_FLEET project=$PROJ_KEY path=$PROJECT_DIR"
