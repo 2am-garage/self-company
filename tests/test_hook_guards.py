@@ -189,6 +189,103 @@ class TestMemoryGuard(_CompanyRepo):
         self.assertEqual(out.strip(), "")
 
 
+class TestMemoryGuardCdBypass(_CompanyRepo):
+    """Phase 26 Item 3 — the guard must resolve the Bash tool's cwd (not just
+    pattern-match the command's own literal tokens), so a `cd` into the store
+    can no longer walk a deleter around it. 'Resolve, don't track': the hook
+    reads the `cwd` the harness reports and realpath-resolves every deleter
+    argument against it (following symlinks/`..`), simulating any `cd` WITHIN
+    the same command string."""
+
+    def _decision(self, out):
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    def test_two_step_cd_then_relative_rm_denied_one_liner(self):
+        # cd + rm joined in ONE command string (in-hook cd simulation).
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd .company/memory; rm -rf L0-working/*"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_two_step_cd_then_relative_rm_denied_via_persisted_cwd(self):
+        # Simulates a SEPARATE prior tool call having already cd'd: the
+        # harness reports the NEW cwd on THIS call, with no cd in the command
+        # itself. Pure resolve-via-cwd, no in-command simulation needed.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "cwd": os.path.join(self.root, ".company", "memory"),
+             "tool_input": {"command": "rm -rf L0-working/*"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_cd_company_and_rm_memory_denied(self):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd .company && rm -rf memory"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_relative_traversal_from_inside_company_denied(self):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "cwd": os.path.join(self.root, ".company", "ops"),
+             "tool_input": {"command": "rm -rf ../memory/L0-working/x.md"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_symlink_into_memory_denied(self):
+        link = os.path.join(self.root, "evil_link")
+        os.symlink(self.mem, link)
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": f"rm -rf {link}/x.md"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_ambiguous_cd_with_relative_deleter_fails_closed(self):
+        # A cd target we can't resolve (variable expansion) followed by a
+        # RELATIVE deleter arg must fail CLOSED — we cannot prove it's safe.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": 'cd "$SOME_VAR" && rm -rf notes'}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_ambiguous_cd_with_absolute_deleter_outside_allowed(self):
+        # An absolute deleter target is unaffected by any earlier cd, so it
+        # can still be proven safe even when the cd itself is unresolvable.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": 'cd "$SOME_VAR" && rm -rf /tmp/definitely-outside'}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_cd_and_rm_entirely_outside_store_allowed(self):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd /tmp && rm -rf some-unrelated-file"}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_cd_into_project_dir_literally_named_memory_allowed(self):
+        # A project's OWN "memory" dir (a sibling of .company, not under it)
+        # must not be confused with the store just because of the name.
+        other_memory = os.path.join(self.root, "memory")
+        os.makedirs(other_memory)
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd memory && rm -rf notes.md"}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_plain_cd_into_memory_without_deleter_allowed(self):
+        # cd alone (no deleter anywhere in the command) is not destructive.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd .company/memory && ls"}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+
 class TestMemoryLint(_CompanyRepo):
     def _rel(self, name):
         return os.path.join(".company", "memory", "L0-working", name)
