@@ -636,7 +636,16 @@ class Employee:
                 fm.append(f"source: {src}")
             fm.append("---")
             self.memory_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text("\n".join(fm) + "\n" + body + "\n", encoding="utf-8")
+            content = "\n".join(fm) + "\n" + body + "\n"
+            # Phase 25 Item 2: route through the shared atomic-write helper
+            # (write-temp-same-dir + os.replace) so a killed/ENOSPC write can
+            # never leave a truncated per-employee memory file. `frontmatter`
+            # is a best-effort import (None if somehow missing) — degrade to
+            # the plain write in that case rather than ever raising.
+            if frontmatter is not None:
+                frontmatter._atomic_write(path, content, encoding="utf-8")
+            else:                                          # pragma: no cover
+                path.write_text(content, encoding="utf-8")
             return path
         except Exception:
             return None

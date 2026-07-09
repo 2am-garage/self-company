@@ -32,8 +32,14 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+try:                            # POSIX advisory locking; absent on some platforms
+    import fcntl
+except ImportError:             # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 # Bucket 2 (Phase 14): the shared sibling modules (policy_config, tombstone,
 # frontmatter) live in THIS directory. Put it on sys.path FIRST so the hard
@@ -59,7 +65,8 @@ from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 # dir) so the ten scanners can't drift. This also single-sources the SOURCE_ITEM_RE
 # that used to sit inline here (byte-identical to reinforce_memory.py's copy).
 from frontmatter import (parse as _fm_parse, serialize as _fm_serialize,
-                         SOURCE_ITEM_RE, tokenize_sources)  # noqa: F401
+                         SOURCE_ITEM_RE, tokenize_sources,
+                         _atomic_write)  # noqa: F401
 
 RECURSION_GUARD = "SELF_COMPANY_CAPTURE_ACTIVE"
 DEFAULT_MODEL = os.environ.get("SELF_COMPANY_CAPTURE_MODEL", "claude-haiku-4-5-20251001")
@@ -76,6 +83,16 @@ DEFAULT_CAPTURE_COOLDOWN_MINUTES = 30
 # One small JSON map {safe-session-id: iso-timestamp} under <company>/ops/,
 # mirroring the other ops dotfile markers (.last_notified, logs/.agent_runs_*).
 COOLDOWN_MARKER = ".capture-cooldown.json"
+
+# C1 (F8, folded into Phase 25): the SAME lockfile daily-run.sh holds for the
+# whole mutating core (reinforce/decay/verify --apply). CAPTURE's
+# reinforce-of-EXISTING-memory REWRITE path (_bump_reinforce, below) takes
+# this lock NON-BLOCKING so a Stop hook firing during a cron decay pass can
+# never interleave a rewrite with it (resurrecting a demoted file / duping an
+# id across tiers). On contention it SKIPS the reinforce (fail-safe: a missed
+# reinforce is noise; a corrupted tier is not). New-L0 CREATION is never
+# gated by this lock — only the rewrite-of-an-existing-memory path is.
+DAILY_LOCK_NAME = ".daily.lock"
 
 # Reinforce-not-duplicate (survey F3, second half): a compact digest of RECENT
 # L0 memories is fed to the prompt so the model returns
@@ -459,11 +476,43 @@ def _bump_reinforce(path, source_lines, safe_sid, today):
             fm["last_reinforced"] = today
         if "sources" in fm and items:
             fm["sources"] = "[" + ", ".join(items) + "]"
-        Path(path).write_text(
-            _fm_serialize(fm, body, order=list(fm)), encoding="utf-8")
+        _atomic_write(path, _fm_serialize(fm, body, order=list(fm)), encoding="utf-8")
         return True
     except Exception:
         return False
+
+
+def _try_daily_lock_reinforce(company_dir, path, source_lines, safe_sid, today):
+    """C1 (F8): attempt `_bump_reinforce` under a NON-BLOCKING flock on
+    `.daily.lock` — the SAME lockfile daily-run.sh holds for its whole
+    mutating pass (reinforce/decay/verify --apply). Returns True on a
+    successful bump; False if the lock is contended (a concurrent daily-run
+    holds it) or the bump itself fails. Either False case falls back to the
+    normal new-observation path in `write_l0` (fail-safe: a missed reinforce
+    is noise; an interleaved rewrite racing decay is not). `fcntl` absent
+    (non-POSIX) degrades to best-effort (unlocked), never blocking CAPTURE."""
+    if fcntl is None:  # pragma: no cover - non-POSIX fallback
+        return _bump_reinforce(path, source_lines, safe_sid, today)
+    lockfile = Path(company_dir) / "ops" / DAILY_LOCK_NAME
+    try:
+        lockfile.parent.mkdir(parents=True, exist_ok=True)
+        f = open(lockfile, "a+")
+    except OSError:
+        return _bump_reinforce(path, source_lines, safe_sid, today)  # can't open; best-effort
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False   # contended by a concurrent daily-run — skip this round
+        try:
+            return _bump_reinforce(path, source_lines, safe_sid, today)
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        f.close()
 
 
 def recent_l0_digest(company_dir, now=None, window_hours=RECENT_WINDOW_HOURS,
@@ -522,7 +571,8 @@ def write_l0(observations, session_id, company_dir, today=None):
             if id_paths is None:
                 id_paths = _memory_id_paths(company_dir)
             tpath = id_paths.get(target)
-            if tpath is not None and _bump_reinforce(tpath, srcs, safe_sid, today):
+            if tpath is not None and _try_daily_lock_reinforce(
+                    company_dir, tpath, srcs, safe_sid, today):
                 reinforced.append(target)
                 continue
             # Unknown target (or bump failed): treat as a normal NEW
@@ -552,7 +602,8 @@ def write_l0(observations, session_id, company_dir, today=None):
         # L2-cold/<category>/ (see decay.py::L2_CATEGORIES).
         category = _norm_category(obs.get("category"))
 
-        path.write_text(
+        _atomic_write(
+            path,
             "---\n"
             f"id: {oid}\n"
             "tier: L0\n"
@@ -645,10 +696,54 @@ def mark_capture(company_dir, session_id, minutes=None, now=None):
                     keep[k] = v
             except (ValueError, TypeError):
                 continue
-        (ops / COOLDOWN_MARKER).write_text(
-            json.dumps(keep, sort_keys=True) + "\n", encoding="utf-8")
+        _atomic_write(ops / COOLDOWN_MARKER,
+                     json.dumps(keep, sort_keys=True) + "\n", encoding="utf-8")
     except Exception:
         pass  # marker trouble must never break the hook
+
+
+@contextmanager
+def _cooldown_lock(company_dir):
+    """C2 (Gibby #5): exclusive advisory lock spanning the cooldown CHECK +
+    MARK (mirrors trigger_engine.py's `_state_lock`). Without this, the
+    check-then-set was an unlocked JSON round-trip: Stop + PreCompact-rescue
+    firing close together could both observe `cooldown_active() == False`
+    before either called `mark_capture()`, so BOTH proceeded — two concurrent
+    extractions and a duplicate L0 (the doc's "second is a no-op" claim was
+    false). Degrades to unlocked best-effort (one stderr warning) if `fcntl`
+    is unavailable — never blocks the Stop hook forever."""
+    ops = Path(company_dir) / "ops"
+    ops.mkdir(parents=True, exist_ok=True)
+    lockp = ops / (COOLDOWN_MARKER + ".lock")
+    if fcntl is None:  # pragma: no cover - non-POSIX fallback
+        print("[capture-trigger] WARNING: fcntl unavailable; capture cooldown "
+              "check+mark is NOT concurrency-safe (best-effort)", file=sys.stderr)
+        yield
+        return
+    f = open(lockp, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
+def check_and_mark_cooldown(company_dir, session_id, minutes=None, now=None):
+    """C2 (Gibby #5): atomic check-then-mark under ONE flock. Returns True iff
+    THIS call should PROCEED (not throttled) — and if so, marks the attempt for
+    `session_id` BEFORE releasing the lock, so a second concurrent call for the
+    SAME session (Stop + PreCompact-rescue racing) always observes the mark and
+    is throttled. Marking earlier (right here, before any transcript read or
+    prompt build) only tightens the existing "protects the model spend"
+    contract — it can never spend MORE tokens than the old later-mark did."""
+    with _cooldown_lock(company_dir):
+        throttled = cooldown_active(company_dir, session_id, minutes=minutes, now=now)
+        if not throttled:
+            mark_capture(company_dir, session_id, minutes=minutes, now=now)
+        return not throttled
 
 
 def _log_throttle(company_dir, session_id, minutes):
@@ -724,13 +819,24 @@ def _main_impl(argv=None):
 
     # F3 cooldown gate — BEFORE any transcript read or model call. A throttled
     # fire is a one-line-logged no-op with exit 0 (the Stop hook must never
-    # block a session). --dry-run bypasses enforcement (it is a diagnostic
-    # tool and makes no model call anyway) but reports the state.
+    # block a session). --dry-run bypasses enforcement (it is a diagnostic,
+    # read-only PEEK — never marks) but reports the state.
+    #
+    # C2 (Gibby #5): the REAL (non-dry-run) path performs an ATOMIC
+    # check-then-mark under one flock (check_and_mark_cooldown) so two
+    # concurrent invocations for the SAME session (Stop + PreCompact-rescue
+    # firing close together) can never both pass the check before either
+    # marks. The mark now happens HERE — before any transcript read or prompt
+    # build — strictly earlier than the old post-prompt `mark_capture()` call,
+    # which only tightens the "protects the model spend" contract.
     minutes = cooldown_minutes(company)
-    throttled = cooldown_active(company, session, minutes=minutes)
-    if throttled and not args.dry_run:
-        _log_throttle(company, session, minutes)
-        return 0
+    if args.dry_run:
+        throttled = cooldown_active(company, session, minutes=minutes)
+    else:
+        throttled = not check_and_mark_cooldown(company, session, minutes=minutes)
+        if throttled:
+            _log_throttle(company, session, minutes)
+            return 0
 
     chairman = extract_chairman_lines(transcript)
     if not chairman:
@@ -751,9 +857,6 @@ def _main_impl(argv=None):
         }, ensure_ascii=False))
         return 0
 
-    # Mark the ATTEMPT before the call: the throttle protects the model spend,
-    # so even an empty/failed extraction cools this session down.
-    mark_capture(company, session, minutes=minutes)
     observations = run_capture_model(prompt, model=args.model)
     written, reinforced = write_l0(observations, session, company)
 

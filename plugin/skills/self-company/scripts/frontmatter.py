@@ -24,7 +24,67 @@ here is to make the fragile string-slicing identical everywhere.
 Pure stdlib. No side effects. Import once; wrap with your own layer.
 """
 
+import os
 import re
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Phase 25 Item 2: the ONE shared atomic-write helper.
+#
+# Every memory writer (decay.py, reinforce_memory.py, verify_memory.py,
+# capture-trigger.py, employee.py, trigger_engine.py) used a truncating
+# in-place `path.write_text(...)` — Python's `open('w')` truncates FIRST, then
+# writes, so a SIGKILL/OOM/ENOSPC mid-write leaves a truncated file. The next
+# run's frontmatter parse then sees a corrupt/incomplete file (or a missing
+# `id:` line) and the memory is silently lost while its corpse blocks the slug.
+#
+# This is trigger_engine.py's pre-existing `_atomic_write_json` pattern
+# (write-temp-in-same-dir + `os.replace`), generalized to raw text so every
+# memory writer can share ONE implementation instead of five drifting copies.
+# `os.replace` is atomic on POSIX and is guaranteed to be on the SAME
+# filesystem by construction (the temp file is a sibling of `path`), so no
+# cross-device rename ever happens.
+#
+# No fsync: the threat model here is process death (SIGKILL/OOM) and ENOSPC,
+# NOT power loss — fsync-ing every memory write for a threat this module does
+# not defend against would be gold-plating.
+# ---------------------------------------------------------------------------
+
+
+def _atomic_write(path, content, encoding="utf-8"):
+    """Write `content` to `path` atomically.
+
+    Writes to a temp file in the SAME directory as `path`, then `os.replace()`s
+    it into place. On ANY failure (including an ENOSPC raised mid-`write()`,
+    which fails on the TEMP file — the original is never touched) the temp
+    file is removed (best-effort) and the exception re-raised: `path` is left
+    completely untouched — either its old content (if it existed) or absent.
+
+    A killed writer (SIGKILL between temp-creation and `os.replace`) cannot run
+    this cleanup — the OS gives no chance to — so a stray `.tmp*` file may
+    remain in that specific case. It is harmless: every scanner here globs
+    `*.md`, so a `.tmp*` sibling is never picked up as a memory file. The
+    invariant this function guarantees regardless is the one that matters:
+    `path` itself is NEVER seen partially written, truncated, or zero-byte —
+    a reader always sees either the complete old file or the complete new one.
+
+    `path` may be a str or Path. Creates parent directories if needed (mirrors
+    every caller's existing `mkdir(parents=True, exist_ok=True)` pattern).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding=encoding) as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
 
 # ---------------------------------------------------------------------------
 # Source-token extractor (C2 dedupe target)

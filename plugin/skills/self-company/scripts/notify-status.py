@@ -173,7 +173,11 @@ def collect_runs(company, since):
             i += 1
             if ts is None or "dry-run" in tail:
                 continue
-            block = {"ts": ts, "drop": 0, "memories": None, "entropy": None, "agent": None}
+            block = {"ts": ts, "drop": 0, "memories": None, "entropy": None, "agent": None,
+                     # Phase 25 Item 1/3/4.3: safety-floor signals, computed
+                     # every run and previously invisible outside the log.
+                     "warnings": 0, "core_aborted": False, "abort_reason": None,
+                     "lock_stale": False}
             # Extend the block until the NEXT "## Daily run" — not any "## " — so the
             # agent's own "## Consolidation pass" sub-heading and the trailing
             # "- agent ... ok" line stay inside this run's block.
@@ -186,6 +190,14 @@ def collect_runs(company, since):
                 if em:
                     block["entropy"] = float(em.group(1))
                     block["memories"] = int(em.group(2))
+                wm = re.match(r"^- warnings: (\d+)", ln)
+                if wm:
+                    block["warnings"] += int(wm.group(1))
+                if ln.startswith("- CORE ABORTED:"):
+                    block["core_aborted"] = True
+                    block["abort_reason"] = ln[len("- CORE ABORTED:"):].strip()
+                if ln.startswith("- LOCK STALE:"):
+                    block["lock_stale"] = True
                 # B3 (Item 3): honest outcome classes, aligned with report.py —
                 # the old `" ok" in ln` substring test rendered failed/timeout/
                 # AUTH_FAIL runs as benign "skipped" in the catch-up summary.
@@ -225,6 +237,13 @@ def summarize(runs):
     if fails:
         # B3: failures are never summarized away as benign skips.
         s += f", {fails} agent-fail"
+    # Phase 25 Item 3: memory-rot warnings are never summarized away either.
+    warned = sum(b.get("warnings", 0) for b in runs)
+    if warned:
+        s += f", {warned} warning(s)"
+    aborts = sum(1 for b in runs if b.get("core_aborted"))
+    if aborts:
+        s += f", {aborts} CORE ABORTED"
     return s
 
 
@@ -253,6 +272,12 @@ def recent_ledger_md(company, n=8):
 
 def substantive(company, runs):
     """Did anything worth a push actually change across the new runs?"""
+    # Phase 25 Item 1/3: an aborted core or a surfaced memory-rot warning is
+    # ALWAYS worth a push — these must never wait behind "did entropy move".
+    if any(b.get("core_aborted") for b in runs):
+        return True
+    if any(b.get("warnings") for b in runs):
+        return True
     if any(b["drop"] for b in runs):
         return True
     ents = [b["entropy"] for b in runs if b["entropy"] is not None]
@@ -267,6 +292,24 @@ def substantive(company, runs):
     if todo.exists() and re.search(r"^\s*\d+\.", todo.read_text(encoding="utf-8"), re.M):
         return True
     return False
+
+
+def core_abort_escalation_line(runs):
+    """Phase 25 Item 1: a HIGH-priority escalation string when the MOST
+    RECENT run's deterministic core was ABORTED (safety floor failed), else
+    "". Mirrors escalation_line()'s shape but keys on the log-parsed
+    core_aborted flag (the SAME channel Item 3's warnings ride) rather than a
+    separate fail-streak marker — a single abort is worth surfacing
+    immediately, not only after a streak."""
+    if not runs:
+        return ""
+    last = runs[-1]
+    if not last.get("core_aborted"):
+        return ""
+    reason = last.get("abort_reason") or "safety floor failed"
+    return (f"‼ CORE ABORTED — the deterministic memory core (reinforce/decay/"
+            f"verify) did NOT run: {reason}. Investigate free space; "
+            f"ops/core-abort.marker is present until a healthy run clears it.")
 
 
 def main(argv=None):
@@ -326,6 +369,13 @@ def main(argv=None):
             ctx = ("[self-company] ‼ HIGH-PRIORITY ESCALATION — surface this to the "
                    "Chairman FIRST, before the ledger: " + esc + "\n\n" + ctx)
 
+        # Phase 25 Item 1: a CORE-ABORT escalation is likewise HIGH-priority and
+        # independent of the fail-streak marker (a single abort matters
+        # immediately, not only after a streak) — prepend it too.
+        abort_esc = core_abort_escalation_line(all_runs)
+        if abort_esc:
+            ctx = ("[self-company] " + abort_esc + "\n\n" + ctx)
+
         new_runs = collect_runs(company, read_marker(company))
         if new_runs and substantive(company, new_runs):
             ctx += (f"\n\nAlso, {len(new_runs)} new run(s) since last seen — {summarize(new_runs)}. "
@@ -346,9 +396,11 @@ def main(argv=None):
         "fail_streak": fail_count,
         "fail_reason": fail_reason,
         "escalation": escalation_line(company),
+        "core_abort_escalation": core_abort_escalation_line(runs),
         "details": [{"ts": b["ts"].isoformat(), "drop": b["drop"],
                      "memories": b["memories"], "entropy": b["entropy"],
-                     "agent": b["agent"]} for b in runs],
+                     "agent": b["agent"], "warnings": b.get("warnings", 0),
+                     "core_aborted": b.get("core_aborted", False)} for b in runs],
     }, ensure_ascii=False))
     return 0
 
