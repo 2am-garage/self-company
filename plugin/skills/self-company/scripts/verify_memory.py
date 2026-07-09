@@ -75,7 +75,8 @@ from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 # tracing/stamping logic on top.
 from frontmatter import (split as _fm_split, parse as _fm_parse,
                          serialize as _fm_serialize,
-                         SOURCE_ITEM_RE, tokenize_sources)
+                         SOURCE_ITEM_RE, tokenize_sources,
+                         _atomic_write)
 
 
 def is_charter_claim(fm):
@@ -200,7 +201,7 @@ def _stamp(path, text, today, by="Gibby"):
     close = fences[1]
     inject = [f"verified_date: {today}", f"verified_by: {by}"]
     new = lines[:close] + inject + lines[close:]
-    path.write_text("\n".join(new), encoding="utf-8")
+    _atomic_write(path, "\n".join(new), encoding="utf-8")
 
 
 def main(argv=None):

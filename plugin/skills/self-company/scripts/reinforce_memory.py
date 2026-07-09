@@ -57,7 +57,8 @@ from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 # in-place line rewrite needs it) and all sources/rc merge logic layered on top.
 from frontmatter import (split as _fm_split, parse as _fm_parse,
                          serialize as _fm_serialize,
-                         SOURCE_ITEM_RE, tokenize_sources)
+                         SOURCE_ITEM_RE, tokenize_sources,
+                         _atomic_write)
 
 try:
     import rag_embed
@@ -217,7 +218,7 @@ def apply_reinforcement(canon_mem, absorbed_mem, today):
         inserts.append("sources: [" + ", ".join(new_sources) + "]")
     if inserts:
         lines[close:close] = inserts   # insert before the closing fence
-    Path(canon_mem["path"]).write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write(canon_mem["path"], "\n".join(lines), encoding="utf-8")
     _tombstone_absorbed(absorbed_mem, today)
 
 
@@ -268,7 +269,7 @@ def _tombstone_absorbed(absorbed_mem, today):
         inserts.append(f"invalid_at: {today}")
     if inserts:
         lines[close:close] = inserts   # insert before the closing fence
-    Path(absorbed_mem["path"]).write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write(absorbed_mem["path"], "\n".join(lines), encoding="utf-8")
 
 
 def nearest_pairs(mems, threshold):
