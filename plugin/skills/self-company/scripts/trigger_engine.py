@@ -172,29 +172,33 @@ def _parse_duration(v):
 
 # --- Item 1: defensive config coercion + state parsing (never crash-and-wedge) --
 
-def _coerce_int(value, default):
+def _coerce_int(value, default, minimum=None):
     """Tolerant int coercion. Returns (int, ok). A missing/blank field falls back
     to `default` with ok=True; a PRESENT-but-unparseable field returns
     (default, False) so the caller can HOLD (fail-closed) with a visible reason
-    rather than raising ValueError out of decide()."""
+    rather than raising ValueError out of decide(). When `minimum` is given, a
+    parsed value below it is rejected (ok=False) so a nonsensical negative
+    budget/cap is an intentional HOLD, never silently forwarded."""
     if value is None:
         return default, True
     if isinstance(value, bool):          # avoid True->1 config surprises
         return default, False
-    if isinstance(value, int):
-        return value, True
-    if isinstance(value, float):
-        return int(value), True
-    s = str(value).strip()
-    if s == "":
-        return default, True
-    try:
-        return int(s), True
-    except ValueError:
+    if isinstance(value, (int, float)):
+        n, parsed = int(value), True
+    else:
+        s = str(value).strip()
+        if s == "":
+            return default, True
         try:
-            return int(float(s)), True    # tolerate "20000.0"
+            n, parsed = int(s), True
         except ValueError:
-            return default, False         # e.g. "20k" -> bad config, HOLD
+            try:
+                n, parsed = int(float(s)), True   # tolerate "20000.0"
+            except ValueError:
+                return default, False             # e.g. "20k" -> bad config, HOLD
+    if parsed and minimum is not None and n < minimum:
+        return default, False                     # e.g. budget:-50 -> bad config, HOLD
+    return n, True
 
 
 def _coerce_duration(v):
@@ -254,14 +258,24 @@ def _state_path(company, name):
     return Path(company) / STATE_SUBDIR / f"{name}.json"
 
 
+def _default_state():
+    return {"last_fired": None, "last_hash": None, "fires": {}}
+
+
 def load_state(company, name):
+    """Return the trigger's state dict. NORMALIZED (GIB re-attack): any non-dict
+    shape — a missing file, unparseable JSON, or valid-JSON-but-not-an-object
+    (``null`` / ``[]`` / a bare scalar) — degrades to defaults so every consumer
+    (decide/record/_fires_today) is dict-safe and a corrupt file can never
+    crash-and-wedge the trigger."""
     p = _state_path(company, name)
     if not p.exists():
-        return {"last_fired": None, "last_hash": None, "fires": {}}
+        return _default_state()
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
-        return {"last_fired": None, "last_hash": None, "fires": {}}
+        return _default_state()
+    return data if isinstance(data, dict) else _default_state()
 
 
 def _now():
@@ -280,7 +294,8 @@ def decide(company, name, payload):
         return {"fire": False, "reason": f"unknown trigger '{name}'", "trigger": name}
 
     phash = _payload_hash(payload)
-    budget, budget_ok = _coerce_int(d.get("budget"), DEFAULT_BUDGET)
+    # budget >= 1: a negative/zero budget is nonsensical for a token cap -> HOLD.
+    budget, budget_ok = _coerce_int(d.get("budget"), DEFAULT_BUDGET, minimum=1)
     base = {"trigger": name, "payload_hash": phash,
             "action": str(d.get("action", "")).strip(),
             "budget": budget,
@@ -290,7 +305,8 @@ def decide(company, name, payload):
     # config coercion (fail-closed on a malformed value, with a visible reason)
     if not budget_ok:
         return {**base, "fire": False, "reason": "bad config: budget"}
-    cap, cap_ok = _coerce_int(d.get("max_fires_per_day"), MAX_FIRES_PER_DAY)
+    # cap >= 0: 0 is a legitimate "disabled" (holds every fire); negative is bad.
+    cap, cap_ok = _coerce_int(d.get("max_fires_per_day"), MAX_FIRES_PER_DAY, minimum=0)
     if not cap_ok:
         return {**base, "fire": False, "reason": "bad config: max_fires_per_day"}
     cd, cd_ok = _coerce_duration(d.get("cooldown", 0))
@@ -436,7 +452,19 @@ INTENT_MAX_FIELD_STR = 500
 INTENT_MAX_KEY = 64
 INTENT_MAX_FIELDS = 32
 INTENT_RISKS = ("low", "normal", "high")
-_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")   # all C0 controls + DEL (incl. \n \r \t)
+# Reject anything that could act as a newline / invisible / direction-flipping
+# break-out inside a single-line field: C0 controls + DEL + C1 (incl. U+0085 NEL),
+# NBSP, Unicode line/paragraph separators (U+2028/U+2029), bidi controls
+# (embeddings/overrides/isolates + ALM), zero-width & word-joiner/BOM, and the
+# assorted Unicode space separators.  (GIB re-attack: the old [\x00-\x1f\x7f]
+# passed U+0085/U+2028/U+2029/U+202E/U+200B/U+00A0 straight through.)
+_CTRL_RE = re.compile(
+    "[\x00-\x1f\x7f-\xa0"                    # C0, DEL, C1 (incl. NEL U+0085), NBSP
+    "\u061c\u1680"                              # Arabic letter mark, Ogham space mark
+    "\u2000-\u200f"                             # en/em/thin spaces, zero-widths, LRM/RLM
+    "\u2028\u2029\u202a-\u202e"               # line/para separators, bidi embed/override
+    "\u2060-\u2064\u2066-\u206f"              # word joiner, invisibles, bidi isolates
+    "\u3000\ufeff]")                            # ideographic space, ZWNBSP/BOM
 
 
 def _clean_scalar_str(s, cap):
