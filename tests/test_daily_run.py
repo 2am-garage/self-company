@@ -837,6 +837,31 @@ class TestItem1SafetyFloor(unittest.TestCase):
         finally:
             subprocess.run(["rm", "-rf", d])
 
+    def test_preflight_abort_writes_no_tarball_to_low_disk(self):
+        # Gibby re-attack MUST-FIX 2: when the free-space preflight aborts (disk
+        # below floor), the tar snapshot must NOT run — no full memory tarball
+        # gets written to the very filesystem we just judged unsafely low. The
+        # new-plan-file writers (elon_survey/july_audit) are skipped too.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-fresh")
+            bindir = _fake_df_low_space(d)
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"PATH": bindir + os.pathsep + os.environ["PATH"]})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- CORE ABORTED:", text)
+            self.assertIn("- backup: skipped — free-space preflight already ABORTED", text)
+            # NO tarball written to the low-disk filesystem
+            bdir = os.path.join(company, "backups")
+            if os.path.isdir(bdir):
+                self.assertEqual([f for f in os.listdir(bdir) if f.endswith(".tar.gz")], [])
+            # the new-plan-file writers are skipped too (ideally-part of MUST-FIX 2)
+            self.assertIn("- elon survey: skipped — CORE ABORTED", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
     def test_snapshot_failure_aborts_core_no_stray_tarball(self):
         d = _fresh_project()
         try:

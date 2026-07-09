@@ -211,14 +211,26 @@ if ! $DRY_RUN; then
   fi
 fi
 
-# Item 4.1: close the lock fd in every spawn (`{LOCK_FD}>&-`) — bash has no
-# O_CLOEXEC on `exec {fd}>`, so every spawned process (python3, the RAG venv,
-# and especially `claude -p` and whatever IT spawns — MCP servers, tool
-# subprocs) would otherwise inherit a live copy of the flock. One surviving
-# grandchild holding that copy would wedge every future cron tick forever
-# (`flock -n` never succeeds again). Route every spawn in this script through
-# `_run` so the fd is explicitly closed in the child (a no-op when the lock
-# isn't held, e.g. flock absent or --dry-run).
+# Item 4.1: close the lock fd (`{LOCK_FD}>&-`) in every spawn that could leave
+# a LONG-LIVED survivor holding a copy of it — bash has no O_CLOEXEC on
+# `exec {fd}>`, so a child inherits a live copy of the flock, and one survivor
+# that outlives this run would wedge every future cron tick forever (`flock -n`
+# never succeeds again). The ONLY spawns that can produce such a survivor are
+# the ones that run a self-company SCRIPT or the agent — the RAG-venv passes
+# (reinforce/entropy/rag-index/per-employee-index), the deterministic scripts
+# (decay/verify/elon_survey/july_audit/report/roster), and especially
+# `claude -p` and whatever IT forks (MCP servers, tool subprocs). ALL of those
+# go through `_run` (below) or, for the agent, `setsid` + a process-group kill.
+#
+# Gibby re-attack SHOULD-FIX 3b — accurate scope: this does NOT (and need not)
+# wrap the remaining inline `python3 -c` config queries and the log-parse
+# heredocs scattered below. Those are SYNCHRONOUS, short-lived helpers that
+# compute-and-exit — the shell `wait`s on each one and it forks nothing that
+# can detach. They inherit the fd only for their brief lifetime and release it
+# on exit, so they can never be the survivor that wedges a later tick. The
+# invariant enforced here is precisely "no long-lived process inherits the
+# lock," not "no process ever sees the fd." `_run` is a no-op when the lock
+# isn't held (flock absent or --dry-run).
 _run() {
   if (( LOCK_HELD )); then
     "$@" {LOCK_FD}>&-
@@ -275,7 +287,16 @@ fi
 if ! $DRY_RUN && (( ! _run_backup )); then
   echo "- backup: skipped — schedule.yaml gated off tom.backup for this tick" >> "$LOG"
 fi
-if ! $DRY_RUN && (( _run_backup )) && [[ -d "$MEM" ]]; then
+# Gibby re-attack fix (MUST-FIX 2): if the free-space preflight ALREADY set
+# CORE_ABORT (disk below the floor), do NOT run the tar snapshot — writing a
+# full memory tarball to the very filesystem we just judged unsafely low would
+# spend the last of the disk on a backup for a core that will not run. The
+# tar-FAILURE→abort path below is the OTHER case (df passed but tar died); this
+# guard is the preflight-detected case. Log the skip so the reason is visible.
+if ! $DRY_RUN && (( _run_backup )) && (( CORE_ABORT )); then
+  echo "- backup: skipped — free-space preflight already ABORTED the core (no tarball written to a low-disk filesystem)" >> "$LOG"
+fi
+if ! $DRY_RUN && (( _run_backup )) && (( ! CORE_ABORT )) && [[ -d "$MEM" ]]; then
   BACKUP_KEEP="$(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
 try:
     from policy_config import load_policy_constants as L
@@ -495,6 +516,15 @@ elif v:
     )
     if v["unverifiable"]:
         lines.append(f"  - unverifiable (sources don't trace): {v['unverifiable'][:8]}")
+    # Phase 25 Item 3 (SHOULD-FIX 3a): verify's OWN corruption warnings — so a
+    # corrupt/truncated memory surfaces even on a tick where decay is
+    # schedule-gated off. Emitted as its own "- warnings: N" line (only when
+    # N>0, to avoid a redundant baseline zero — decay already emits the "0"
+    # when it runs); report.py/notify-status.py sum every such line.
+    vwarn = v.get("warnings") or []
+    if vwarn:
+        vpreview = "; ".join(str(w) for w in vwarn[:5])
+        lines.append(f"- warnings: {len(vwarn)} (first 5: {vpreview})")
 
 e = load(epath)
 if eskip:
@@ -650,7 +680,13 @@ fi
 
 # Elon's daily survey: a prioritized TODO from current metrics (read-only,
 # deterministic — keeps the CEO load-bearing every day). Writes ops/plans/todo-<date>.md.
-if [[ -f "$SCRIPTS/elon_survey.py" ]]; then
+# Gibby re-attack fix (MUST-FIX 2, "ideally"): on a low-disk CORE_ABORT tick,
+# do NOT spend disk writing a new plan file either — the abort itself is what
+# needs surfacing, not a fresh todo. (The ledger below still runs: it is how
+# the abort becomes visible in report.py's ledger.)
+if (( CORE_ABORT )) && [[ -f "$SCRIPTS/elon_survey.py" ]]; then
+  echo "- elon survey: skipped — CORE ABORTED (no new plan file written to a low-disk filesystem)" >> "$LOG"
+elif [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   if _should_run survey; then
     _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" 2>>"$SERR" \
       | python3 -c "import sys, json
@@ -672,7 +708,11 @@ fi
 # red/blue-pair items marked human-review. Env-source absence => "unknown" + skip,
 # never a crash. Low-churn: set `july: { cadence: weekly }` in schedule.yaml
 # (recommended); gated here by should_run.
-if [[ -f "$SCRIPTS/july_audit.py" ]]; then
+# Gibby re-attack fix (MUST-FIX 2, "ideally"): a low-disk CORE_ABORT tick skips
+# writing new proposal files too — same reasoning as elon_survey above.
+if (( CORE_ABORT )) && [[ -f "$SCRIPTS/july_audit.py" ]]; then
+  echo "- capability audit: skipped — CORE ABORTED (no new proposal file written to a low-disk filesystem)" >> "$LOG"
+elif [[ -f "$SCRIPTS/july_audit.py" ]]; then
   if _should_run july_audit; then
     JOUT="$(mktemp)"
     japply=(--company "$COMPANY")
