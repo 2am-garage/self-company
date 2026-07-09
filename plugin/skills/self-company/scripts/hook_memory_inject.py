@@ -89,6 +89,27 @@ MIN_OVERLAP = 1                  # relevance floor: >=1 shared keyword or silent
 HIGH_RC = _env_num("SELF_COMPANY_INJECT_HIGH_RC", 2, int)  # L1 gate
 TIER_WEIGHT = {"L2": 1.0, "L1": 0.6}
 
+# Phase 24 MUST-FIX 1(b): a single incidental overlap on a short generic word is
+# how off-topic ENGLISH prompts sneak past the keyword floor (Gibby: "how do I
+# CHANGE a flat tire" injected a git-workflow memory on the word "change"). A
+# LONE overlapping token must be either "specific" (>= SPECIFIC_TOKEN_LEN chars)
+# or a meaningful fraction (>= MIN_OVERLAP_RATIO) of the prompt's distinct
+# tokens; otherwise it does not clear the gate. This hardens the KEYWORD degrade
+# path (no-venv); the primary defense is the expanded stoplist below plus the
+# semantic layer's definitive no-match verdict (INJECT_NOTHING) when RAG is up.
+SPECIFIC_TOKEN_LEN = 5
+MIN_OVERLAP_RATIO = _env_num("SELF_COMPANY_INJECT_MIN_OVERLAP_RATIO", 0.34, float)
+
+# Phase 24 MUST-FIX 1(a): a DISTINCT signal for "the semantic layer ran and
+# found nothing at or above the relevance floor" — a DEFINITIVE relevance
+# verdict that means inject NOTHING, NOT the same as None ("RAG unavailable /
+# degraded -> fall back to the keyword path"). Before this fix, semantic_top()
+# collapsed both cases to None, so an off-topic prompt whose (working) semantic
+# search correctly returned only sub-floor hits fell THROUGH to the weaker
+# keyword gate and got injected on a single incidental word. A unique sentinel
+# (not an empty list) makes run() unable to confuse the two.
+INJECT_NOTHING = object()
+
 # --- Phase 13 Stage B (B.1): RAG semantic-retrieval knobs ---------------------
 # The semantic path is ADDITIVE: it augments retrieval ONLY when the local RAG
 # stack is present; the keyword path (rank()) stays the guaranteed-fast floor and
@@ -113,6 +134,11 @@ RAG_QUERY_TOPK = max(TOP_K_CAP, TOP_K) * 2
 RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.35, float)
 
 # Small stopword set so incidental common words don't manufacture "relevance".
+# Phase 24 MUST-FIX 1(b): expanded with the generic connectors / light verbs that
+# let off-topic English prompts collide on ONE incidental word (change, without,
+# going, need, want, like, work, help, set, way, thing, …). These carry no topic
+# so a lone overlap on them is noise, never relevance. Content words (neovim,
+# terraform, chinese, backup, …) are untouched, so real matches are unaffected.
 _STOP = frozenset("""
 a an the this that these those and or but if then else for of to in on at by
 with from into over under is are was were be been being do does did doing have
@@ -120,6 +146,12 @@ has had having i you he she it we they me him her us them my your his its our
 their what which who whom how when where why all any some no not can could would
 should will shall may might must about as so than too very just also again more
 most such only own same both each few other new use using used get got make made
+change changed changing without within going need needs needed want wants wanted
+like likes work works working help helps helping set sets setting thing things
+way ways know knows think thinks look looks looking find finds tell tells give
+gives take takes keep keeps come comes put puts run running still back even well
+around along across able really actually maybe perhaps please thanks thank okay
+sure something anything everything someone anyone everyone here there where
 """.split())
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -274,9 +306,19 @@ def rank(prompt, candidates):
     scored = []
     for tier, fm, body, path in candidates:
         hay = _tokens(" ".join((fm.get("id", ""), fm.get("category", ""), body)))
-        overlap = len(p_tokens & hay)
+        overlap_tokens = p_tokens & hay
+        overlap = len(overlap_tokens)
         if overlap < MIN_OVERLAP:            # relevance gate
             continue
+        # Phase 24 MUST-FIX 1(b): a LONE overlapping token clears the gate only
+        # if it is specific (long enough to be topical) OR a meaningful fraction
+        # of the prompt — so one short incidental word (that survived the
+        # stoplist) can't manufacture relevance on the no-venv keyword path.
+        if overlap == 1:
+            lone = next(iter(overlap_tokens))
+            if (len(lone) < SPECIFIC_TOKEN_LEN
+                    and (overlap / len(p_tokens)) < MIN_OVERLAP_RATIO):
+                continue
         weight = TIER_WEIGHT.get(tier, 0.5)
         rc = _int(fm.get("reinforce_count"), 1)
         score = overlap * weight * max(rc, 1)
@@ -305,11 +347,20 @@ def semantic_top(company, prompt, candidates):
     When the local RAG stack (the project's `.company/.rag-venv` + a non-empty
     LanceDB index) is available, ask `rag_query.py` for the memories SEMANTICALLY
     closest to `prompt`, then map those hits back to the LIVE candidate files.
-    Returns a list in the SAME shape rank() returns — [(tier, fm, body, path), ...]
-    — or **None** to signal "fall back to the keyword path". None is returned for
-    ANY of: SC_NO_RAG set, no venv, absent/empty index, empty prompt, subprocess
-    timeout, rag_query nonzero/garbage output, or zero usable (post-revalidation)
-    hits. NEVER raises — any error degrades to None (keyword floor).
+
+    Three-way return (Phase 24 MUST-FIX 1(a) — the distinction is load-bearing):
+      * a non-empty **list** [(tier, fm, body, path), …] — inject these.
+      * **INJECT_NOTHING** — the semantic layer RAN and definitively found
+        nothing at/above the relevance floor (an off-topic prompt). This is a
+        real "nothing relevant" verdict; the caller must inject NOTHING and must
+        NOT fall through to the weaker keyword gate. This is what stops an
+        off-topic ENGLISH prompt from being injected on one incidental word.
+      * **None** — RAG is genuinely UNAVAILABLE / could not answer (SC_NO_RAG,
+        no venv, absent/empty index, empty prompt, subprocess timeout, nonzero/
+        garbage output, OR above-floor hits that were all stale/out-of-scope so
+        the index couldn't be trusted). Only THIS case falls back to keyword.
+
+    NEVER raises — any error degrades to None (keyword floor).
 
     Re-validation (critical): the index is L1/L2 only (Phase 13 D-A) and refreshes
     only daily (Stage A), so its rows are CANDIDATES to re-verify, not truth. We
@@ -391,6 +442,7 @@ def semantic_top(company, prompt, candidates):
     by_path = {_norm(path): (tier, fm, body, path)
                for (tier, fm, body, path) in candidates}
     out, seen = [], set()
+    any_cleared_floor = False              # did ANY hit clear the cosine floor?
     for h in hits:
         if not isinstance(h, dict):
             continue
@@ -404,6 +456,7 @@ def semantic_top(company, prompt, candidates):
         # so this is gate-integrity, not a security fix.)
         if not math.isfinite(score) or score < RAG_MIN_SCORE:  # relevance-gated
             continue
+        any_cleared_floor = True           # a hit was semantically relevant
         raw = h.get("path")
         if not raw:
             continue
@@ -418,10 +471,24 @@ def semantic_top(company, prompt, candidates):
         if len(out) >= min(TOP_K, TOP_K_CAP):
             break
 
-    if not out:
-        _debug("no usable semantic hits after re-validation")
+    if out:
+        return out
+
+    # No usable hits after re-validation. Phase 24 MUST-FIX 1(a) — distinguish:
+    #  * NO hit cleared the cosine floor -> the semantic layer definitively found
+    #    nothing relevant (off-topic). Return INJECT_NOTHING so the caller injects
+    #    NOTHING and does NOT fall through to the weaker keyword gate (which would
+    #    inject on a single incidental word). THIS is the off-topic-English fix.
+    #  * some hit DID clear the floor but every above-floor hit was dropped by
+    #    path re-validation (stale / deleted / tombstoned / out-of-scope index
+    #    rows) -> an index-FRESHNESS gap, not a relevance verdict -> fall back to
+    #    the keyword path (None), preserving the Phase-13 stale-hit degrade
+    #    (e.g. a deleted top hit still lets the keyword path find a live match).
+    if any_cleared_floor:
+        _debug("above-floor hits all stale/out-of-scope -> keyword fallback")
         return None
-    return out
+    _debug("no semantic hit cleared the floor -> definitive nothing (no injection)")
+    return INJECT_NOTHING
 
 
 def build_context(top):
@@ -474,8 +541,15 @@ def run(company_arg, transcript_arg):
     if not candidates:
         return ""
     prompt = latest_prompt(transcript_arg)
-    # Semantic first; None => any degrade condition => the original keyword path.
+    # Semantic first. Phase 24 MUST-FIX 1(a): three outcomes —
+    #  * INJECT_NOTHING => the semantic layer ran and found nothing above the
+    #    relevance floor (off-topic) => inject nothing; do NOT fall through to
+    #    the keyword gate (which would inject on one incidental word).
+    #  * None => RAG genuinely unavailable/degraded => the original keyword path.
+    #  * a list => inject it.
     top = semantic_top(company, prompt, candidates)
+    if top is INJECT_NOTHING:
+        return ""
     if top is None:
         top = rank(prompt, candidates)
     return build_context(top)
