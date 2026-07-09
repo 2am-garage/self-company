@@ -354,21 +354,24 @@ moment the plugin is installed — **no per-repo `install-hook.sh` edit**. Every
 runs the canonical script via `${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/<script>`,
 so the wiring survives plugin version bumps with zero stale-path snapshots.
 
-**The 7 hooks** (event → matcher → script, per `hooks/hooks.json`):
+**The 8 registrations across 7 events** (event → matcher → script, per `hooks/hooks.json`).
+`SessionStart` fires **two** scripts, so 8 registrations map onto 7 distinct events:
 
 | Event | Matcher | Script | Timeout | What it does |
 |---|---|---|---|---|
 | `Stop` | — | `capture-trigger.py --company "$CLAUDE_PROJECT_DIR/.company"` | 120s | CAPTURE: cheap real-time memory capture (cooldown-guarded). |
 | `SessionStart` | `startup\|resume\|clear\|compact` | `notify-status.py --emit-hook --company …` | 120s | Catch-up push of unattended runs (push only, self-acks). |
+| `SessionStart` | `startup\|resume\|clear\|compact` | `hook_schedule_guard.sh` | 120s | Cron self-heal: re-installs this project's crontab tick if its signature drifted or the line is missing (idempotent; see "SessionStart sync + self-heal" above). |
 | `UserPromptSubmit` | — | `hook_memory_inject.py` | **30s** | Ask-time memory injection: ranks L2/high-rc L1 by a **fast stdlib** scorer and injects top-k as `additionalContext`. Relevance-gated (injects nothing if nothing scores), token-capped, never blocks. **No fastembed cold-start on this path** (30s cap). |
 | `PreCompact` | `auto\|manual` | `hook_precompact_capture.sh` | 120s | Capture-rescue over the pre-compaction transcript before facts are summarized away; reuses the Stop cooldown to de-dup; never blocks compaction. |
-| `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`mv`-away of any path under `.company/memory/` (physical deletion is the decay reap's job — Phase 6). Broadens in-script; emits `permissionDecision` with reason. |
+| `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`shred`/`rmdir`/`truncate`/`find … -delete`/`mv`-away of any path under `.company/memory/` **or the `.company` store root** (`rm -rf .company` wipes memory too — physical deletion is the decay reap's job, Phase 6). Broadens in-script; emits `permissionDecision` with reason. |
 | `PostToolUse` | `Write\|Edit` | `hook_memory_lint.py` | 10s | Validates frontmatter of any `.company/memory/**.md` write (id/tier/status/sources, tombstone vocab); `block`s malformed writes with a reason. Non-memory files untouched. |
 | `SessionEnd` | — | `hook_sessionend_verify.sh` | 120s | Runs the deterministic verify pass so this session's fresh captures are source-stamped before the next SessionStart report. Side-effect only; never fails the session. |
 
 > Matcher key is `matcher` (real Claude Code schema). `PreToolUse` matches all `Bash`
-> and the guard script itself narrows to the dangerous `.company/memory` reap paths —
-> so `rm`, `unlink` and `mv` are all seen (defense in depth beside the tar floor).
+> and the guard script itself narrows to the dangerous `.company/memory` reap paths
+> plus the `.company` store root — so `rm`, `unlink`, `shred`, `rmdir`, `truncate`,
+> `find … -delete` and `mv` are all seen (defense in depth beside the tar floor).
 
 **Global-fire + `.company` opt-in guard.** Plugin hooks fire in **every** repo the
 Chairman opens, not just company repos. So every hook script's FIRST action is an

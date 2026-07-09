@@ -1,7 +1,8 @@
 """Tests for the plugin-native hooks declaration (hooks/hooks.json) and the
 install-hook.sh migration to a plugin-native no-op / legacy-cleaner.
 
-Phase 10 B4: hooks.json is the single declaration point for all 7 hooks; every
+Phase 10 B4: hooks.json is the single declaration point for all hooks (8
+registrations across 7 events — SessionStart fires two); every
 command must run a canonical skill script via ${CLAUDE_PLUGIN_ROOT}. install-hook.sh
 is deprecated: `install` is a no-op, `uninstall` removes only legacy self-company
 entries from a project settings.json (so existing installs stop double-firing).
@@ -104,6 +105,13 @@ class HooksJsonStructureTest(unittest.TestCase):
             self.assertIn("skills/self-company/scripts/", entry["command"],
                           f"{event}: script not under skill scripts dir")
 
+    def test_total_registrations_is_eight_across_seven_events(self):
+        # Fold C1 (TONY-2): the real count is 8 registrations over 7 events, NOT
+        # "7 hooks" — SessionStart carries two (notify-status + schedule guard).
+        total = sum(1 for _ in _commands(self.hooks))
+        self.assertEqual(total, 8, "expected 8 hook registrations")
+        self.assertEqual(len(self.hooks["hooks"]), 7, "expected 7 distinct events")
+
     def test_userpromptsubmit_timeout_is_30(self):
         entries = [e for ev, e in _commands(self.hooks) if ev == "UserPromptSubmit"]
         self.assertTrue(entries, "UserPromptSubmit not declared")
@@ -129,6 +137,46 @@ class HooksJsonStructureTest(unittest.TestCase):
         self.assertEqual(set(matchers["PreCompact"].split("|")), {"auto", "manual"})
         self.assertIn("Bash", matchers["PreToolUse"])
         self.assertEqual(matchers["PostToolUse"], "Write|Edit")
+
+
+class HookCountDocTruthTest(unittest.TestCase):
+    """Fold C1: the docs must state the ACCURATE count (8 registrations / 7 events)
+    and must not carry the stale 'X hooks' undercount that omitted the SessionStart
+    schedule guard. Ties the prose to the real hooks.json count so a future edit to
+    either side is caught."""
+
+    DOCS = {
+        "SKILL.md": os.path.join(REPO_ROOT, "plugin", "skills", "self-company", "SKILL.md"),
+        "operations.md": os.path.join(REPO_ROOT, "plugin", "skills", "self-company",
+                                      "references", "operations.md"),
+        "status.md": os.path.join(REPO_ROOT, "plugin", "skills", "self-company",
+                                   "references", "status.md"),
+    }
+
+    def _text(self, name):
+        with open(self.DOCS[name], encoding="utf-8") as f:
+            return f.read()
+
+    def test_no_doc_claims_seven_hooks(self):
+        import re
+        # The stale undercount phrasing: "7 hooks" / "all 7 hooks" / "seven hooks".
+        stale = re.compile(r"\b(7|seven)\s+hooks\b", re.IGNORECASE)
+        for name in self.DOCS:
+            m = stale.search(self._text(name))
+            self.assertIsNone(m, f"{name} still claims '{m.group(0) if m else ''}'")
+
+    def test_docs_state_eight_registrations(self):
+        import re
+        # Accurate phrasing: "8 … registrations across 7 events" (order-flexible).
+        pat = re.compile(r"8[\s\S]{0,40}?registrations[\s\S]{0,40}?7 events",
+                         re.IGNORECASE)
+        for name in self.DOCS:
+            self.assertRegex(self._text(name), pat,
+                             f"{name} should state '8 … registrations across 7 events'")
+
+    def test_operations_table_lists_schedule_guard(self):
+        # The operations.md hook table must include the previously-missing row.
+        self.assertIn("hook_schedule_guard.sh", self._text("operations.md"))
 
 
 class InstallHookMigrationTest(unittest.TestCase):
