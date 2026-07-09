@@ -122,6 +122,44 @@ class TestMemoryGuard(_CompanyRepo):
             self.root)
         self.assertEqual(self._decision(out), "deny")
 
+    def test_deny_rm_rf_company_store_root(self):
+        # GIB-C4: `rm -rf .company` wipes the whole store (memory included) and
+        # was previously ALLOWED because is_mem only matched `.company/memory/`.
+        for c in ("rm -rf .company", "rm -rf .company/", "rm -rf ./.company",
+                  "rm -rf /home/u/proj/.company"):
+            rc, out, _ = run_guard(
+                {"tool_name": "Bash", "tool_input": {"command": c}}, self.root)
+            self.assertEqual(rc, 0)
+            self.assertEqual(self._decision(out), "deny", c)
+
+    def test_deny_rm_rf_company_memory_dir(self):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": "rm -rf .company/memory"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_deny_find_delete_and_truncate(self):
+        for c in ("find .company/memory -type f -delete",
+                  "truncate -s 0 .company/memory/L0-working/x.md"):
+            rc, out, _ = run_guard(
+                {"tool_name": "Bash", "tool_input": {"command": c}}, self.root)
+            self.assertEqual(self._decision(out), "deny", c)
+
+    def test_allow_readonly_find_over_memory(self):
+        # A plain (non---delete) find over memory is read-only -> must stay allowed.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "find .company/memory -name '*.md'"}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_allow_rm_lookalike_not_store_root(self):
+        # `.companystuff` / `my.company` must NOT be mistaken for the store root.
+        for c in ("rm -rf .companystuff", "rm -rf my.company-backup"):
+            rc, out, _ = run_guard(
+                {"tool_name": "Bash", "tool_input": {"command": c}}, self.root)
+            self.assertEqual(self._decision(out), "allow", c)
+
     def test_allow_rm_elsewhere(self):
         rc, out, _ = run_guard(
             {"tool_name": "Bash", "tool_input": {"command": "rm /tmp/foo"}},

@@ -3,7 +3,9 @@
 # hook_memory_guard.sh — PreToolUse gate (Phase 10, Item 6).
 #
 # Denies any Bash command that would PHYSICALLY delete or move-away a path under
-# .company/memory/ (rm / unlink / shred / rmdir / `mv <memory-path> elsewhere`).
+# .company/memory/ — OR the .company store ROOT (rm -rf .company wipes memory too)
+# — via rm / unlink / shred / rmdir / truncate / `find <mem> -delete` / `mv
+# <memory-path> elsewhere`.
 # Physical deletion of memory is the deterministic decay reap's job (Phase 6);
 # agents must TOMBSTONE (status: archived) instead. Skill-owned, host-independent
 # enforcement of the no-rm rule — defense in depth beside the tar floor.
@@ -34,7 +36,7 @@ read -r -d '' PYCODE <<'PY' || true
 import sys, json, shlex
 
 MEM = ".company/memory/"
-DELETERS = {"rm", "unlink", "shred", "rmdir"}
+DELETERS = {"rm", "unlink", "shred", "rmdir", "truncate"}
 
 
 def allow():
@@ -56,9 +58,15 @@ def deny(reason):
 
 
 def is_mem(tok):
-    # A path token referencing the memory store (relative or absolute).
-    t = tok.strip().strip('"').strip("'")
-    return MEM in t or t.rstrip("/").endswith(".company/memory")
+    # A path token referencing the memory store (relative or absolute): anything
+    # under .company/memory/, the memory dir itself, OR the .company STORE ROOT.
+    # `rm -rf .company` wipes the whole store (memory included), so the root is
+    # guarded too — it is squarely inside this hook's stated intent (GIB-C4).
+    t = tok.strip().strip('"').strip("'").rstrip("/")
+    if MEM in tok or t.endswith(".company/memory"):
+        return True
+    # store root: bare `.company`, `./.company`, or `<abs>/.company`.
+    return t == ".company" or t.endswith("/.company")
 
 
 REASON = ("physical deletion of memory is the deterministic decay reap's job "
@@ -102,6 +110,11 @@ for seg in segments:
     args = toks[i + 1:]
 
     if head in DELETERS:
+        if any(is_mem(a) for a in args):
+            deny(REASON)
+    elif head == "find" and "-delete" in args:
+        # `find <memory> -delete` is a disguised recursive rm. Deny ONLY when
+        # -delete is present so a plain read-only `find` over memory still works.
         if any(is_mem(a) for a in args):
             deny(REASON)
     elif head == "mv":
