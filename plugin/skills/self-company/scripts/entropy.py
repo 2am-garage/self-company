@@ -34,6 +34,12 @@ from difflib import SequenceMatcher
 # schedule_validator.py). They always ship together, so the imports never fail.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Shared RAG venv re-exec helper (rag_venv.py, same dir) — the ONE copy of the
+# .company/.rag-venv re-exec logic (imported like tombstone/charter_ids). Importing
+# it is side-effect-free: it NEVER re-execs at import, which is what lets this
+# stdlib-only module stay import-safe from a base-python process.
+from rag_venv import reexec_if_needed
+
 # Shared policy loader — single source of truth for tunable constants
 # (reads org/policy.md §7). Best-effort import; falls back to built-in defaults.
 try:
@@ -64,26 +70,19 @@ def _memory_dir_from_argv(argv):
 
 
 def _reexec_into_rag_venv():
-    if os.environ.get("SC_NO_RAG") or os.environ.get("SC_RAG_REEXEC"):
+    # SC_NO_RAG (force Jaccard-only) is entropy-specific, so it is guarded HERE at
+    # the callsite rather than in the shared helper — keeping every other caller
+    # byte-identical. The shared helper handles the SC_RAG_REEXEC short-circuit,
+    # the fastembed/numpy probe, and the candidate-interpreter search.
+    if os.environ.get("SC_NO_RAG"):
         return
-    try:
-        import fastembed  # noqa: F401
-        import numpy  # noqa: F401
-        return
-    except Exception:
-        pass
-    here = Path(__file__).resolve().parent
     # C2 (Phase 5): resolve the project venv from --memory-dir, whose parent is
-    # that project's .company — NOT from whatever cwd happens to hold. An
-    # off-cwd invocation with a foreign .company under cwd must never exec the
-    # wrong project's interpreter. With no --memory-dir the default resolves
-    # against cwd, preserving the previous cwd fallback behavior.
-    mem_company = Path(_memory_dir_from_argv(sys.argv)).resolve().parent
-    for cand in (here.parent / ".rag-venv" / "bin" / "python",
-                 mem_company / ".rag-venv" / "bin" / "python"):
-        if cand.exists():
-            os.environ["SC_RAG_REEXEC"] = "1"
-            os.execv(str(cand), [str(cand)] + sys.argv)
+    # that project's .company — NOT from whatever cwd happens to hold. An off-cwd
+    # invocation with a foreign .company under cwd must never exec the wrong
+    # project's interpreter. With no --memory-dir the default (.company/memory)
+    # resolves against cwd, preserving the previous cwd fallback behavior.
+    reexec_if_needed(["fastembed", "numpy"],
+                     mem_dir=_memory_dir_from_argv(sys.argv))
 
 
 # NOTE: _reexec_into_rag_venv() is intentionally NOT called at import time.

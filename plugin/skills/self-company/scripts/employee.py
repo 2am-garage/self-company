@@ -49,6 +49,13 @@ except Exception:                                              # pragma: no cove
     frontmatter = None
 
 try:
+    # Phase 22: the ONE shared `.rag-venv/bin/python` resolver (rag_venv.py).
+    from rag_venv import venv_python as _venv_python
+except Exception:                                              # pragma: no cover
+    def _venv_python(company):
+        return Path(company) / ".rag-venv" / "bin" / "python"
+
+try:
     # The SINGLE tombstone vocabulary (archived/absorbed/defunct). Reused so the
     # shared-memory re-validation (recall_shared) skips retired memories with the
     # exact same rule hook_memory_inject/entropy/decay use — never a private copy.
@@ -668,7 +675,7 @@ class Employee:
             except (TypeError, ValueError):
                 k = 3
             # Require THIS company's venv python explicitly (cron/hook-safe).
-            rag_py = self.company_dir / ".rag-venv" / "bin" / "python"
+            rag_py = _venv_python(self.company_dir)
             if not os.access(str(rag_py), os.X_OK):
                 return []
             index_dir = self.memory_index_dir
@@ -790,7 +797,7 @@ class Employee:
                 k = max(1, int(top_k))
             except (TypeError, ValueError):
                 k = 3
-            rag_py = self.company_dir / ".rag-venv" / "bin" / "python"
+            rag_py = _venv_python(self.company_dir)
             if not os.access(str(rag_py), os.X_OK):
                 return []
             index_dir = self.shared_memory_index_dir

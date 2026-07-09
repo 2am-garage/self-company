@@ -71,6 +71,19 @@ mkdir -p "$LOGDIR"
 ts="$(date +%FT%T)"
 printf '\n## Daily run %s%s\n' "$ts" "$($DRY_RUN && echo ' (dry-run)')" >> "$LOG"
 
+# TOM-PATH (Phase 22): the deterministic core is ALL `python3 …` calls, each ended
+# with `|| true` so a failing OPTIONAL step never aborts the cron. The cost of that
+# safety net: a python3 that cannot even RUN (missing from cron's PATH — the classic
+# pyenv/conda-vs-cron bug — or a broken interpreter) turns the WHOLE core into a
+# silent green no-op. Make that failure LOUD instead: log a banner to the run log
+# AND stderr so it surfaces instead of vanishing. Non-fatal by design (schedule.sh
+# now bakes python3's dir into the cron PATH, so this should never fire on a healthy
+# install) — this is a visible tripwire, not a hard stop.
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'pass' >/dev/null 2>&1; then
+  echo "[daily-run] ERROR: python3 is not runnable on PATH ($PATH) — the deterministic core (reinforce/decay/verify/entropy/capture) CANNOT run and would silently no-op. Fix the cron PATH (re-run 'schedule.sh install') or the python3 install." >&2
+  printf -- '- **python3 UNAVAILABLE** — deterministic core could not run (see stderr); this is NOT a healthy run\n' >> "$LOG"
+fi
+
 # --- Phase 12: per-employee duty gating (fail-OPEN) --------------------------
 # Each optional step asks schedule_config.py whether its owning employee's
 # sub-cadence matches THIS tick. FAIL-OPEN by contract: absent schedule.yaml, no

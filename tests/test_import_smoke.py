@@ -25,6 +25,8 @@ CONVERTED = [
     "decay", "entropy", "verify_memory", "capture-trigger", "reinforce_memory",
     "rag_index", "list_uncategorized", "hook_memory_lint",
     "hook_memory_inject",
+    # Phase 22: the shared rag_venv helper + its hard-import consumers.
+    "rag_venv", "rag_query",
 ]
 
 

@@ -40,27 +40,11 @@ import urllib.error
 # ============================================================================
 # RE-EXEC INTO THE RAG VENV (created by rag_setup.sh) if deps aren't here
 # ============================================================================
+# The ONE shared copy (rag_venv.py, same dir): re-launch under .company/.rag-venv
+# python when lancedb/fastembed aren't importable, so RAG 'just works'.
+from rag_venv import reexec_if_needed
 
-def _reexec_into_rag_venv():
-    """If lancedb/fastembed aren't importable but the project's .rag-venv exists,
-    re-launch this script under that venv's python so RAG 'just works'."""
-    if os.environ.get("SC_RAG_REEXEC"):
-        return
-    try:
-        import lancedb  # noqa: F401
-        import fastembed  # noqa: F401
-        return
-    except Exception:
-        pass
-    here = Path(__file__).resolve().parent
-    for cand in (here.parent / ".rag-venv" / "bin" / "python",
-                 Path.cwd() / ".company" / ".rag-venv" / "bin" / "python"):
-        if cand.exists():
-            os.environ["SC_RAG_REEXEC"] = "1"
-            os.execv(str(cand), [str(cand)] + sys.argv)
-
-
-_reexec_into_rag_venv()
+reexec_if_needed(["lancedb", "fastembed"])
 
 # Shared local embedding backend (fastembed). Lazy fastembed import inside.
 try:
