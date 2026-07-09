@@ -318,9 +318,21 @@ Swapped to `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` — sti
 | ZH hit@1 / MRR | 0.375 / 0.396 | 0.625 / 0.750 |
 | Off-topic top-1 score (EN+ZH, 11 probes) | 0.489–0.648 | 0.091–0.306 |
 
-The retuned floor `SELF_COMPANY_INJECT_RAG_MIN_SCORE = 0.35` (was 0.30) sits in the resulting gap between the off-topic ceiling (~0.31) and the lowest true on-topic top-1 score (~0.42).
-
 A SECOND bug surfaced during this measurement (not the embedding model): `hook_memory_inject.rank()`'s keyword-path recency fallback fired whenever the prompt tokenized to nothing — which is true for BOTH a genuinely empty prompt AND any non-empty pure-CJK prompt (the fast tokenizer is ASCII-only). Fixed to fall back to recency ONLY on a truly blank prompt; a real non-Latin-script prompt with no semantic match now correctly injects nothing (`tests/test_hook_memory_inject.py::TestKeywordFallbackDistinguishesEmptyFromUnparseable` / `TestMultilingualRelevanceGate`).
+
+### Precision hardening + the floor (Phase 24 R3, post red-team)
+
+Two precision leaks were fixed after Gibby's red-team round 2, both about off-topic prompts injecting an *unrelated* memory:
+
+**Keyword path (no-venv / RAG-hiccup degrade).** `semantic_top()` returns `None` (→ keyword path) during ANY RAG unavailability — no venv, empty/mid-rebuild/stale-stamp index, timeout — so the keyword path is not just the no-install case; it must be robust on its own. Its gate was `MIN_OVERLAP>=1` (a single shared 3+-char word), which let off-topic English inject on one incidental word ("change" a flat tire → a git memory). A LONE overlapping token now must pass THREE principled, corpus-derived gates (a shared **pair** of tokens always clears — real signal):
+1. **Corpus rarity (IDF):** `df(token) <= max(2, N · 0.25)` — a token common across the candidate memories is not discriminative, so a lone incidental match on it is noise (removes dominant-word collisions like "chairman"/"company" that scale up).
+2. **Body substance:** the token must appear in the memory's BODY, not merely its auto-generated id/slug (kills "rules" → git-identity-**rules**).
+3. **Length floor** (a NECESSARY, never sufficient, condition — this is NOT the earlier wrong "len≥5 ⇒ specific" heuristic): drops the short common-English words (red/long/stay/day) a 30-memory corpus is too small to see as common via IDF.
+   Plus the closed-class **function-word stoplist** (prepositions/conjunctions incl. before/between). Result: all 25 of Gibby's off-topic English prompts inject nothing on the keyword path; on-topic still injects. **Irreducible limit:** a `df==1` *general-English content word* that collides (an off-topic prompt sharing e.g. "database"/"schedule" with exactly one memory) cannot be told from a real topical match by any corpus-derived lexical rule — only semantics can. That is why the keyword path is a best-effort degrade and the semantic path is primary.
+
+**Semantic floor.** Retuned `SELF_COMPANY_INJECT_RAG_MIN_SCORE` 0.35 → **0.40** — the HIGHEST floor that still keeps EVERY on-topic diagnostic hit (lowest true-positive top-1 = `merge-gate` 0.419). Measured: EN hit@1 0.875, ZH hit@1 0.625 preserved; 24/25 off-topic English inject nothing on the semantic path.
+
+**The one residual → reranker escalation (Item 5).** ONE innocent off-topic prompt — "How should I schedule my morning gym workout?" — scores **0.417** against a scheduler memory (on the word "schedule"), which is **inseparable** from `merge-gate`'s on-topic **0.419** by floor OR margin: their top-1/top-2 gaps are 0.060 vs 0.062, near-identical. No cosine threshold cleanly splits innocent-off-topic from on-topic here without dropping the real `merge-gate` hit. A cross-encoder reranker **does** separate them cleanly (measured with the multilingual `jinaai/jina-reranker-v2-base-multilingual`: gym **−2.97** vs merge **+1.73**, and it keeps the ZH hits). This is exactly the gated **Item 5** work; the measurement is the trigger for ungating it.
 
 ### The migration mechanism — model-stamping
 
