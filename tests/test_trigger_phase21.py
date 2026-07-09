@@ -371,10 +371,13 @@ class TestItem4Routing(unittest.TestCase):
             self.assertIn("held (schema)", out)
 
     def test_require_confirm_gate_holds(self):
+        # Phase 26 Item 2: the honest HOLD — no pending-file black hole, a
+        # clear manual-dispatch instruction instead.
         with tempfile.TemporaryDirectory() as d:
             self._mk(d)
             out, _ = _emit(d, "payout", '{"amount": 100}')
-            self.assertIn("awaiting confirmation", out)
+            self.assertIn("held: require_confirm", out)
+            self.assertIn("held for manual dispatch", out)
 
     def test_fence_payload_wraps_with_markers(self):
         fenced = te.fence_payload('{"a": 1}')

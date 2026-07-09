@@ -189,6 +189,243 @@ class TestMemoryGuard(_CompanyRepo):
         self.assertEqual(out.strip(), "")
 
 
+class TestMemoryGuardCdBypass(_CompanyRepo):
+    """Phase 26 Item 3 — the guard must resolve the Bash tool's cwd (not just
+    pattern-match the command's own literal tokens), so a `cd` into the store
+    can no longer walk a deleter around it. 'Resolve, don't track': the hook
+    reads the `cwd` the harness reports and realpath-resolves every deleter
+    argument against it (following symlinks/`..`), simulating any `cd` WITHIN
+    the same command string."""
+
+    def _decision(self, out):
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    def test_two_step_cd_then_relative_rm_denied_one_liner(self):
+        # cd + rm joined in ONE command string (in-hook cd simulation).
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd .company/memory; rm -rf L0-working/*"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_two_step_cd_then_relative_rm_denied_via_persisted_cwd(self):
+        # Simulates a SEPARATE prior tool call having already cd'd: the
+        # harness reports the NEW cwd on THIS call, with no cd in the command
+        # itself. Pure resolve-via-cwd, no in-command simulation needed.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "cwd": os.path.join(self.root, ".company", "memory"),
+             "tool_input": {"command": "rm -rf L0-working/*"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_cd_company_and_rm_memory_denied(self):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd .company && rm -rf memory"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_relative_traversal_from_inside_company_denied(self):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "cwd": os.path.join(self.root, ".company", "ops"),
+             "tool_input": {"command": "rm -rf ../memory/L0-working/x.md"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_symlink_into_memory_denied(self):
+        link = os.path.join(self.root, "evil_link")
+        os.symlink(self.mem, link)
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": f"rm -rf {link}/x.md"}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_ambiguous_cd_with_relative_deleter_fails_closed(self):
+        # A cd target we can't resolve (variable expansion) followed by a
+        # RELATIVE deleter arg must fail CLOSED — we cannot prove it's safe.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": 'cd "$SOME_VAR" && rm -rf notes'}},
+            self.root)
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_ambiguous_cd_with_absolute_deleter_outside_allowed(self):
+        # An absolute deleter target is unaffected by any earlier cd, so it
+        # can still be proven safe even when the cd itself is unresolvable.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": 'cd "$SOME_VAR" && rm -rf /tmp/definitely-outside'}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_cd_and_rm_entirely_outside_store_allowed(self):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd /tmp && rm -rf some-unrelated-file"}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_cd_into_project_dir_literally_named_memory_allowed(self):
+        # A project's OWN "memory" dir (a sibling of .company, not under it)
+        # must not be confused with the store just because of the name.
+        other_memory = os.path.join(self.root, "memory")
+        os.makedirs(other_memory)
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd memory && rm -rf notes.md"}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_plain_cd_into_memory_without_deleter_allowed(self):
+        # cd alone (no deleter anywhere in the command) is not destructive.
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd .company/memory && ls"}},
+            self.root)
+        self.assertEqual(self._decision(out), "allow")
+
+
+class TestMemoryGuardCdEquivalentsAndWrappers(_CompanyRepo):
+    """GIB re-attack MUST-FIX 2 — cd-equivalents (pushd / env -C) and wrapper
+    structures (subshell, bash -c, eval, xargs, unbalanced quoting) that the
+    old raw-text splitter tore apart or didn't recognize, so a deleter walked
+    into the store undetected. All now DENY (fail-closed for the unresolvable
+    ones); legit commands stay allowed."""
+
+    def _decision(self, out):
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    def _deny(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "deny", cmd)
+
+    def _allow(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "allow", cmd)
+
+    # Gibby's confirmed file-deleting bypasses ------------------------------
+    def test_pushd_then_rm_denied(self):
+        self._deny("pushd .company/memory && rm -rf L0-working/*")
+
+    def test_env_dashC_rm_denied(self):
+        self._deny("env -C .company/memory rm -f L0-working/x.md")
+
+    def test_env_longchdir_rm_denied(self):
+        self._deny("env --chdir=.company/memory rm -f L0-working/x.md")
+
+    def test_subshell_cd_rm_denied(self):
+        self._deny("(cd .company/memory && rm -rf L0-working)")
+
+    def test_bash_dashc_cd_rm_denied(self):
+        self._deny('bash -c "cd .company/memory && rm -rf L0-working"')
+
+    def test_sh_dashc_cd_rm_denied(self):
+        self._deny('sh -c "cd .company/memory && rm -rf L0-working/x.md"')
+
+    # Other wrappers that run an unresolvable deleter -> fail-closed --------
+    def test_eval_rm_denied(self):
+        self._deny('eval "rm -rf .company/memory"')
+
+    def test_find_piped_to_xargs_rm_denied(self):
+        self._deny("find .company/memory -type f | xargs rm -rf")
+
+    def test_unbalanced_quote_with_deleter_denied(self):
+        # Wholly unparseable (no closing quote) but a hard deleter is present.
+        self._deny('rm ".company/memory/x')
+
+    # Legit commands still allowed (near-zero false positives) --------------
+    def test_subshell_cd_does_not_leak_out_allowed(self):
+        # After the subshell closes, a following relative deleter runs in the
+        # ORIGINAL cwd — must not be falsely denied by a leaked subshell cd.
+        os.makedirs(os.path.join(self.root, "proj-sub"))
+        self._allow("(cd .company/memory && ls); rm -rf ./proj-sub")
+
+    def test_bash_dashc_without_deleter_allowed(self):
+        self._allow('bash -c "echo hello && ls .company/memory"')
+
+    def test_unbalanced_quote_without_deleter_allowed(self):
+        self._allow('echo ".company/memory unterminated')
+
+    def test_pushd_outside_store_allowed(self):
+        self._allow("pushd /tmp && rm -rf scratch")
+
+
+class TestMemoryGuardR2FailClosed(_CompanyRepo):
+    """GIB re-attack R2 — decisively fail-closed. Two blunt rules replace the
+    per-spelling whack-a-mole: (a) transparent prefixes (command/builtin/time/
+    exec/nohup/nice/env) are stripped recursively so a `cd` behind them still
+    moves the simulated cwd; (b) a nested shell (bash/sh/… -c, eval, xargs,
+    source) plus ANY deleter token anywhere -> DENY."""
+
+    def _decision(self, out):
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    def _deny(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "deny", cmd)
+
+    def _allow(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "allow", cmd)
+
+    # The 4 spellings that still deleted a real file before R2 ---------------
+    def test_double_nested_bash_c_denied(self):
+        self._deny("bash -c \"bash -c 'rm -rf .company/memory/L0-working'\"")
+
+    def test_double_nested_bash_c_mv_denied(self):
+        # GIB R3: mv-away is a disguised delete; raw_has_deleter must count it so
+        # the nested-shell net catches mv at DEPTH>=2 too (single-level already
+        # denied). Moves the store away otherwise.
+        self._deny("bash -c \"bash -c 'mv .company/memory/L0-working /tmp/stolen'\"")
+
+    def test_command_prefix_cd_then_rm_denied(self):
+        self._deny("command cd .company/memory && rm -rf L0-working/x")
+
+    def test_time_prefix_cd_then_rm_denied(self):
+        self._deny("time cd .company/memory && rm -rf L0-working/x")
+
+    def test_builtin_prefix_cd_then_rm_denied(self):
+        self._deny("builtin cd .company/memory && rm -rf L0-working/x")
+
+    # Recursive prefix stacking + other transparent prefixes ----------------
+    def test_stacked_transparent_prefixes_cd_then_rm_denied(self):
+        self._deny("command builtin cd .company/memory && rm -rf L0-working/x")
+
+    def test_nice_prefix_with_option_cd_then_rm_denied(self):
+        self._deny("nice -n 10 cd .company/memory && rm -rf L0-working/x")
+
+    def test_exec_prefix_deleter_in_store_denied(self):
+        self._deny("cd .company/memory && exec rm -rf L0-working")
+
+    def test_source_with_deleter_denied(self):
+        # `source`/`.` is a nested-shell indicator; deleter present -> deny.
+        self._deny("source ./cleanup.sh && rm -rf .company/memory")
+
+    # Transparent prefixes must NOT introduce false positives ---------------
+    def test_time_ls_allowed(self):
+        self._allow("time ls")
+
+    def test_command_rm_outside_allowed(self):
+        self._allow("command rm /tmp/x")
+
+    def test_nice_tar_allowed(self):
+        self._allow("nice tar -czf /tmp/backup.tgz .")
+
+    def test_env_assignment_echo_allowed(self):
+        self._allow("env FOO=1 echo hi")
+
+    def test_time_prefix_cd_outside_then_rm_allowed(self):
+        self._allow("time cd /tmp && rm -rf scratch")
+
+    def test_command_builtin_cd_outside_allowed(self):
+        self._allow("command builtin cd /tmp && rm -rf junk")
+
+
 class TestMemoryLint(_CompanyRepo):
     def _rel(self, name):
         return os.path.join(".company", "memory", "L0-working", name)
