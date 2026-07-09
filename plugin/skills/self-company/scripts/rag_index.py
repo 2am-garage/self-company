@@ -86,6 +86,13 @@ else:                                                          # pragma: no cove
     EMBEDDING_DIM = 384
 
 
+def _rag_lib():
+    """The embedding-library version to stamp/compare (Phase 24 MUST-FIX 4), or
+    None when the backend isn't importable (deps-free run — stamp code isn't
+    reached anyway)."""
+    return rag_embed.lib_version() if _HAS_EMBED else None
+
+
 # ============================================================================
 # EXCEPTIONS
 # ============================================================================
@@ -484,12 +491,13 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
                 # there is real prior data.
                 if existing_table_rows:
                     stamp = read_stamp(index_dir)
-                    if not stamp_matches(stamp, RAG_MODEL, EMBEDDING_DIM):
+                    _lib = _rag_lib()
+                    if not stamp_matches(stamp, RAG_MODEL, EMBEDDING_DIM, _lib):
                         report["warnings"].append(
                             "model-stamp mismatch (index stamp="
                             f"{stamp!r}, current={{'model': {RAG_MODEL!r}, "
-                            f"'dim': {EMBEDDING_DIM}}}) — forcing full rebuild "
-                            "for cosine-space safety"
+                            f"'dim': {EMBEDDING_DIM}, 'lib': {_lib!r}}}) — forcing "
+                            "full rebuild for cosine-space safety"
                         )
                         rebuild = True
                         report["mode"] = "rebuild (stamp-forced)"
@@ -609,7 +617,7 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         # and the non-forced path only reaches here when the prior stamp already
         # matched). Best-effort; a failure here degrades to "no stamp" on the
         # NEXT run, which is itself handled (treated as mismatch -> rebuild).
-        write_stamp(index_dir, RAG_MODEL, EMBEDDING_DIM)
+        write_stamp(index_dir, RAG_MODEL, EMBEDDING_DIM, _rag_lib())
 
     except Exception as e:
         print(f"[rag_index] LanceDB error: {e}", file=sys.stderr)

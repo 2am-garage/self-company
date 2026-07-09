@@ -37,6 +37,22 @@ EMBEDDING_DIM = EMBED_MODEL_DIMS[RAG_EMBED_MODEL]
 _model = None
 
 
+def lib_version():
+    """The installed fastembed version string, or "unknown" if unavailable.
+
+    Phase 24 MUST-FIX 4: the SAME model name can produce DIFFERENT vectors across
+    fastembed releases (e.g. the multilingual MiniLM switched from CLS to mean
+    pooling), silently violating the "same {model, dim} = same vector space"
+    invariant the index stamp relies on. Folding the library version into the
+    stamp makes a fastembed upgrade trigger the same self-heal rebuild a model
+    swap does. Pure best-effort — never raises."""
+    try:
+        import fastembed
+        return str(getattr(fastembed, "__version__", "unknown"))
+    except Exception:
+        return "unknown"
+
+
 def _get_model():
     global _model
     if _model is None:

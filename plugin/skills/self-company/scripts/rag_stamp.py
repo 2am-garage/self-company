@@ -32,7 +32,7 @@ def stamp_path(index_dir):
 
 
 def read_stamp(index_dir):
-    """Return the persisted {"model": ..., "dim": ...} dict, or None if absent,
+    """Return the persisted {"model", "dim"[, "lib"]} dict, or None if absent,
     unreadable, or malformed. Never raises."""
     try:
         p = stamp_path(index_dir)
@@ -46,20 +46,35 @@ def read_stamp(index_dir):
         return None
 
 
-def write_stamp(index_dir, model, dim):
-    """Persist the current {model, dim} stamp. Best-effort — a failure here must
-    never abort an index build (the stamp is a safety net around the index, not
-    the index itself). Returns True on success, False otherwise."""
+def write_stamp(index_dir, model, dim, lib=None):
+    """Persist the current {model, dim[, lib]} stamp. Best-effort — a failure here
+    must never abort an index build (the stamp is a safety net around the index,
+    not the index itself). `lib` is the embedding-library version (Phase 24
+    MUST-FIX 4): a fastembed upgrade can change the vectors a fixed model
+    produces, so folding it into the stamp makes such an upgrade trigger the same
+    self-heal rebuild a model swap does. Returns True on success, False otherwise."""
     try:
         Path(index_dir).mkdir(parents=True, exist_ok=True)
-        stamp_path(index_dir).write_text(
-            json.dumps({"model": model, "dim": dim}), encoding="utf-8")
+        stamp = {"model": model, "dim": dim}
+        if lib is not None:
+            stamp["lib"] = lib
+        stamp_path(index_dir).write_text(json.dumps(stamp), encoding="utf-8")
         return True
     except Exception:
         return False
 
 
-def stamp_matches(stamp, model, dim):
-    """True iff `stamp` (as returned by read_stamp) matches the given model+dim.
-    None/malformed stamp -> False (treated as mismatch -> index-absent)."""
-    return bool(stamp) and stamp.get("model") == model and stamp.get("dim") == dim
+def stamp_matches(stamp, model, dim, lib=None):
+    """True iff `stamp` (as returned by read_stamp) matches the given model + dim
+    (+ lib when supplied). None/malformed stamp -> False (mismatch -> index
+    treated as absent). When `lib` is given, a stamp WITHOUT a `lib` key (a
+    legacy Phase-24-early index) or with a DIFFERENT `lib` is a mismatch — so a
+    fastembed upgrade self-heals. When `lib` is None (deps-free callers/tests),
+    the lib dimension is not checked."""
+    if not stamp:
+        return False
+    if stamp.get("model") != model or stamp.get("dim") != dim:
+        return False
+    if lib is not None and stamp.get("lib") != lib:
+        return False
+    return True

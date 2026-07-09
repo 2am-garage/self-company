@@ -128,16 +128,20 @@ def _open_index(index_dir):
     except Exception:
         raise FileNotFoundError(f"No 'memory' table in index at {index_dir}")
     stamp = read_stamp(index_path)
-    if not stamp_matches(stamp, rag_embed.RAG_EMBED_MODEL, rag_embed.EMBEDDING_DIM):
-        # Absent stamp (legacy pre-Phase-24 index) or a genuine model swap: either
-        # way the vectors in this table cannot be trusted to share the CURRENT
-        # query embedding's space. Treat as index-absent; the daily self-heal
-        # (rag_index.py) rebuilds it on the next tick.
+    _lib = rag_embed.lib_version()
+    if not stamp_matches(stamp, rag_embed.RAG_EMBED_MODEL,
+                         rag_embed.EMBEDDING_DIM, _lib):
+        # Absent stamp (legacy pre-Phase-24 index), a genuine model swap, OR a
+        # fastembed-version change (Phase 24 MUST-FIX 4 — same model can produce
+        # different vectors across library versions): either way the vectors in
+        # this table cannot be trusted to share the CURRENT query embedding's
+        # space. Treat as index-absent; the daily self-heal (rag_index.py)
+        # rebuilds it on the next tick.
         raise FileNotFoundError(
             f"Index at {index_dir} has a stale or missing model stamp "
             f"(stamp={stamp!r}, current model={rag_embed.RAG_EMBED_MODEL!r} "
-            f"dim={rag_embed.EMBEDDING_DIM}) — treat as absent; rebuild with "
-            "rag_index.py --rebuild (auto-heals on the next daily tick)."
+            f"dim={rag_embed.EMBEDDING_DIM} lib={_lib!r}) — treat as absent; "
+            "rebuild with rag_index.py --rebuild (auto-heals on the next daily tick)."
         )
     return table
 

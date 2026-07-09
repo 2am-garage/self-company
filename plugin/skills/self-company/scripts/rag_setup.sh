@@ -32,7 +32,13 @@ case "$CMD" in
     fi
     echo "[rag_setup] installing lancedb + fastembed (offline RAG stack)…"
     "$PY" -m pip install -q --upgrade pip >/dev/null 2>&1 || true
-    if ! "$PY" -m pip install -q lancedb fastembed; then
+    # Phase 24 MUST-FIX 4: PIN fastembed. The same model name can produce
+    # different vectors across fastembed releases (e.g. the multilingual MiniLM
+    # switched from CLS to mean pooling), which would silently violate the
+    # index's "same {model, dim} = same vector space" invariant. Pinning keeps
+    # every install on the version the index stamp was validated against; a
+    # deliberate future bump changes the stamped `lib` and self-heals the index.
+    if ! "$PY" -m pip install -q lancedb 'fastembed==0.8.0'; then
       echo "[rag_setup] pip install failed (check network)." >&2
       exit 1
     fi
