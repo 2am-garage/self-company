@@ -102,7 +102,15 @@ RAG_QUERY_TOPK = max(TOP_K_CAP, TOP_K) * 2
 # pollute the prompt" hard rule. Below this, a hit is treated as off-topic noise
 # and dropped; if nothing clears the floor we fall back to the keyword path (which
 # has its own MIN_OVERLAP gate) so an off-topic prompt still injects nothing.
-RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.30, float)
+#
+# Phase 24 Item 1: retuned from 0.30 to 0.35, DATA-DRIVEN — the old
+# English-only bge-small model made 0.30 filter nothing at all (every query,
+# on- or off-topic, scored 0.45-0.65). Tony's post-swap sweep on the real
+# 55-memory corpus (11 off-topic EN+ZH probes vs 16 on-topic EN+ZH queries,
+# post model-swap + hybrid/RRF): off-topic top-1 scores topped out at 0.306;
+# the lowest true on-topic top-1 score was 0.419. 0.35 sits in that gap with
+# margin on both sides. See references/rag.md for the full sweep.
+RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.35, float)
 
 # Small stopword set so incidental common words don't manufacture "relevance".
 _STOP = frozenset("""
@@ -233,18 +241,35 @@ def rank(prompt, candidates):
     appear in the memory's searchable text. A memory with zero overlap is below
     the relevance floor and dropped -> nothing irrelevant is ever injected.
 
-    No prompt keywords at all (missing/short transcript) -> fall back to recency
-    ranking so a fresh turn still gets the freshest durable facts.
-    """
-    p_tokens = _tokens(prompt)
+    No prompt AT ALL (missing/blank transcript) -> fall back to recency ranking
+    so a fresh turn still gets the freshest durable facts.
 
-    if not p_tokens:
+    Phase 24 Item 2 fix: a prompt that HAS content but tokenizes to nothing
+    (the fast scorer's `_tokens` regex is `[a-z0-9]+` — ASCII-only) is NOT the
+    same as no prompt. Before this fix the two were conflated: any pure-CJK (or
+    other non-Latin-script) prompt silently took the recency-fallback branch
+    and got the freshest memories injected regardless of topic — precisely the
+    "off-topic prompt pollutes context" failure this hook exists to prevent,
+    and the Chairman's DEFAULT language is Traditional Chinese, so this was not
+    a corner case. The keyword path genuinely cannot assess relevance for such
+    a prompt (it has no non-Latin vocabulary), so it must degrade to NOTHING,
+    not to a false "recency == relevant" positive. Non-Latin-script relevance
+    is the semantic/RAG path's job (tried first in run(), before this
+    fallback); this is only the safety net when RAG is absent/degraded.
+    """
+    if not prompt or not prompt.strip():
         # Recency fallback: newest durable memories, weighted by tier.
         ranked = sorted(
             candidates,
             key=lambda c: (_recency_key(c[1]), TIER_WEIGHT.get(c[0], 0.5)),
             reverse=True)
         return ranked[:min(TOP_K, TOP_K_CAP)]
+
+    p_tokens = _tokens(prompt)
+    if not p_tokens:
+        # Real prompt content, but the ASCII-only tokenizer found nothing to
+        # score against -> relevance cannot be established -> inject nothing.
+        return []
 
     scored = []
     for tier, fm, body, path in candidates:
