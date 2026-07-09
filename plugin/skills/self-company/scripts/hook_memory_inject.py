@@ -74,6 +74,10 @@ from tombstone import is_tombstoned
 # shared module (frontmatter.py).
 from frontmatter import parse as _fm_parse
 
+# Phase 22: the `.rag-venv/bin/python` interpreter path is resolved by the ONE
+# shared helper (rag_venv.py), never open-coded here.
+from rag_venv import venv_python
+
 EVENT = "UserPromptSubmit"
 
 # Scoring knobs (env-overridable for tuning/tests; sane stdlib defaults).
@@ -303,7 +307,7 @@ def semantic_top(company, prompt, candidates):
     # Require THIS project's venv python explicitly (cron/hook-safe, mirrors
     # daily-run). Absent -> no subprocess at all, so the no-venv path stays
     # byte-for-byte the keyword floor and adds only a stat() of overhead.
-    rag_py = Path(company) / ".rag-venv" / "bin" / "python"
+    rag_py = venv_python(company)
     if not os.access(str(rag_py), os.X_OK):
         _debug("RAG venv absent")
         return None

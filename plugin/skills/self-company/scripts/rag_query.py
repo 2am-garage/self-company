@@ -28,25 +28,14 @@ import os
 from pathlib import Path
 
 
-def _reexec_into_rag_venv():
-    """Re-launch under .company/.rag-venv python if RAG deps aren't here."""
-    if os.environ.get("SC_RAG_REEXEC"):
-        return
-    try:
-        import lancedb  # noqa: F401
-        import fastembed  # noqa: F401
-        return
-    except Exception:
-        pass
-    here = Path(__file__).resolve().parent
-    for cand in (here.parent / ".rag-venv" / "bin" / "python",
-                 Path.cwd() / ".company" / ".rag-venv" / "bin" / "python"):
-        if cand.exists():
-            os.environ["SC_RAG_REEXEC"] = "1"
-            os.execv(str(cand), [str(cand)] + sys.argv)
+# The shared sibling modules (rag_venv, rag_embed) live in THIS directory; put it
+# on sys.path FIRST so the imports resolve under every entry point (direct run,
+# venv re-exec, cron, the test harness). Re-exec into .company/.rag-venv when the
+# RAG backend (lancedb/fastembed) isn't importable here — the ONE shared copy.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rag_venv import reexec_if_needed
 
-
-_reexec_into_rag_venv()
+reexec_if_needed(["lancedb", "fastembed"])
 
 try:
     import rag_embed
@@ -62,19 +51,21 @@ except ImportError:
     _HAS_LANCEDB = False
 
 
-class OllamaUnavailable(Exception):
-    """Raised when the embedding backend is unavailable (name kept for compat)."""
+class EmbeddingUnavailable(Exception):
+    """Raised when the local embedding backend (fastembed in .company/.rag-venv)
+    is unavailable — the shared signal the query path degrades on (parity with
+    rag_index's twin). No network / no Ollama is involved."""
     pass
 
 
 def embed(text, model=None, host=None):
     """Embed text via the local fastembed backend (rag_embed). model/host ignored."""
     if not _HAS_EMBED:
-        raise OllamaUnavailable("rag_embed/fastembed not importable")
+        raise EmbeddingUnavailable("rag_embed/fastembed not importable")
     try:
         return rag_embed.embed(text)
     except Exception as e:
-        raise OllamaUnavailable(f"local embedding failed: {e}") from e
+        raise EmbeddingUnavailable(f"local embedding failed: {e}") from e
 
 
 def query_rag(query_text, top_k=5, index_dir=".company/memory/index", model="nomic-embed-text"):
@@ -91,8 +82,8 @@ def query_rag(query_text, top_k=5, index_dir=".company/memory/index", model="nom
         list[dict]: Results with keys: id, tier, path, score
 
     Raises:
-        OllamaUnavailable: if the local embedding backend is unavailable
-            (class name kept for back-compat; no Ollama is involved)
+        EmbeddingUnavailable: if the local embedding backend is unavailable
+            (no Ollama is involved; embeddings run locally via fastembed)
         FileNotFoundError: If index not found
     """
     if not _HAS_LANCEDB:
@@ -185,7 +176,7 @@ Examples:
         print(msg, file=sys.stderr)
         sys.exit(2)
 
-    except OllamaUnavailable as e:
+    except EmbeddingUnavailable as e:
         msg = (
             f"[rag_query] embedding backend unavailable: {e}\n"
             "[rag_query] Run: bash .company/scripts/rag_setup.sh install\n"

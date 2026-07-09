@@ -31,31 +31,18 @@ from datetime import date
 from pathlib import Path
 
 
-# Re-exec into the RAG venv (fastembed/numpy live there), like rag_index.py.
-def _reexec_into_rag_venv():
-    if os.environ.get("SC_RAG_REEXEC"):
-        return
-    try:
-        import fastembed  # noqa: F401
-        import numpy  # noqa: F401
-        return
-    except Exception:
-        pass
-    here = Path(__file__).resolve().parent
-    for cand in (here.parent / ".rag-venv" / "bin" / "python",
-                 Path.cwd() / ".company" / ".rag-venv" / "bin" / "python"):
-        if cand.exists():
-            os.environ["SC_RAG_REEXEC"] = "1"
-            os.execv(str(cand), [str(cand)] + sys.argv)
-
-
-_reexec_into_rag_venv()
-
-# Bucket 2 (Phase 14): the shared sibling modules (tombstone, frontmatter) live in
-# THIS directory. Put it on sys.path FIRST so the hard imports below resolve under
-# every entry point — direct run, cron, the venv re-exec above, or an import by the
-# test harness (mirrors schedule_validator.py). They always ship together here.
+# Bucket 2 (Phase 14): the shared sibling modules (rag_venv, tombstone,
+# frontmatter) live in THIS directory. Put it on sys.path FIRST so the hard
+# imports below resolve under every entry point — direct run, cron, the venv
+# re-exec below, or an import by the test harness (mirrors schedule_validator.py).
+# They always ship together here.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Re-exec into the RAG venv (fastembed/numpy live there), like rag_index.py — the
+# ONE shared copy in rag_venv.py.
+from rag_venv import reexec_if_needed
+
+reexec_if_needed(["fastembed", "numpy"])
 
 # Phase 6 Item 1: tombstone vocabulary (archived / defunct / absorbed) is the ONE
 # shared set in tombstone.py (same dir), so it can't drift. A tombstoned memory
