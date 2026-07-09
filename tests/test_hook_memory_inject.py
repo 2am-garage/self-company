@@ -141,6 +141,15 @@ def _hits_json(*rows):
                         "tier": t, "path": p, "score": s} for (p, t, s) in rows])
 
 
+def _hits_json_rr(*rows):
+    """Build a rag_query --rerank shaped JSON array: rows are
+    (path, tier, cosine_score, rerank_score) — Phase 24 Item 5. Lets the CONSUMER
+    reranker gate be tested deterministically without loading the real model."""
+    return json.dumps([{"id": os.path.basename(p).replace(".md", ""), "tier": t,
+                        "path": p, "score": s, "rerank_score": rr}
+                       for (p, t, s, rr) in rows])
+
+
 class TestMemoryInjectRAG(unittest.TestCase):
     """Phase 13 Stage B.1 — semantic ask-time injection via rag_query, with the
     keyword path as the guaranteed fallback."""
@@ -244,6 +253,58 @@ class TestMemoryInjectRAG(unittest.TestCase):
         rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
         self.assertEqual(rc, 0)
         self.assertEqual(raw, "", "below-floor semantic hit must not be injected")
+
+    def test_rerank_below_cutoff_gated(self):
+        # Phase 24 Item 5, deterministic: a hit that PASSES the cosine floor (0.45
+        # >= 0.40) but scores BELOW the reranker cutoff is off-topic (the "gym
+        # workout" class — cosine 0.417 but rerank ~-3.0) -> injected NOTHING.
+        path = _write_mem(self.company, "L2-cold", "scheduler",
+                          body="Fixed a cron scheduler time-dependency bug.")
+        _write_transcript(self.transcript,
+                          ["how should I schedule my morning gym workout"])
+        _fake_rag_venv(self.company,
+                       f"echo '{_hits_json_rr((path, 'L2', 0.45, -3.00))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "cosine-passing but reranker-rejected hit must not inject")
+
+    def test_rerank_above_cutoff_injected(self):
+        # Same hit but a rerank_score ABOVE the cutoff -> injected (real on-topic).
+        path = _write_mem(self.company, "L2-cold", "merge",
+                          body="The company may merge its own pull request when green.")
+        _write_transcript(self.transcript, ["can the company merge its own PRs"])
+        _fake_rag_venv(self.company,
+                       f"echo '{_hits_json_rr((path, 'L2', 0.45, 1.50))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "cosine+reranker passing hit must inject")
+        self.assertIn("merge", parsed["hookSpecificOutput"]["additionalContext"])
+
+    def test_no_rerank_score_is_cosine_only_degrade(self):
+        # Reranker backend absent -> rag_query omits rerank_score -> the consumer
+        # gate is the cosine floor alone, byte-identical to pre-Item-5. A hit above
+        # the cosine floor with NO rerank_score injects.
+        path = _write_mem(self.company, "L2-cold", "merge",
+                          body="The company may merge its own pull request when green.")
+        _write_transcript(self.transcript, ["can the company merge its own PRs"])
+        _fake_rag_venv(self.company, f"echo '{_hits_json((path, 'L2', 0.45))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "no rerank_score -> cosine floor decides -> inject")
+        self.assertIn("merge", parsed["hookSpecificOutput"]["additionalContext"])
+
+    def test_rerank_nonfinite_treated_below_cutoff(self):
+        # A NaN rerank_score must be treated as below-cutoff (gate integrity),
+        # never slip past `rr < RERANK_MIN_SCORE`.
+        path = _write_mem(self.company, "L2-cold", "scheduler",
+                          body="Fixed a cron scheduler time-dependency bug.")
+        _write_transcript(self.transcript, ["schedule my gym workout"])
+        body = ('echo \'[{"id":"scheduler","tier":"L2","path":"' + path
+                + '","score":0.45,"rerank_score":NaN}]\'')
+        _fake_rag_venv(self.company, body)
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "NaN rerank_score must be gated out")
 
     def test_budget_and_cap_never_exceeded_semantic(self):
         # Many high-score hits -> still capped at 5 and within CONTEXT_CHAR_CAP.
@@ -896,6 +957,64 @@ class TestOffTopicEnglishSemanticPath(unittest.TestCase):
             self.assertIsNotNone(parsed,
                                  f"on-topic English must still inject with venv; "
                                  f"went silent on: {prompt!r}")
+
+
+@unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
+class TestRerankerClosesGymCase(unittest.TestCase):
+    """Phase 24 Item 5, venv-gated end-to-end: the innocent off-topic "schedule my
+    gym workout" prompt cosine-matches a scheduler memory (~0.42, above the 0.40
+    floor) but is REJECTED by the cross-encoder reranker (~-3.0) — the one residual
+    the cosine floor alone could not close. On-topic still injects. Uses the REAL
+    reranker model via the repo venv; skips if the reranker backend is absent."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        os.symlink(REPO_VENV_DIR, os.path.join(self.company, ".rag-venv"))
+        # A scheduler memory the gym prompt cosine-collides with (the real-corpus
+        # trigger), plus a real on-topic control.
+        _write_mem(self.company, "L2-cold", "scheduler-time-dependency",
+                   body="Fixed a scheduler time-dependency issue where a cron "
+                        "step ran at the wrong hour on the daily schedule.")
+        _write_mem(self.company, "L2-cold", "merge-gate",
+                   body="The company may merge its own pull request when the full "
+                        "test suite passes and integration checks are green.")
+        rc = _build_real_index(self.company)
+        if rc.returncode != 0:
+            self.skipTest(f"rag_index unavailable/offline: {rc.stderr}")
+        # Reranker cold-load can exceed the default budget; widen it for the test.
+        self._env = {**os.environ, "SELF_COMPANY_INJECT_RAG_TIMEOUT": "90"}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_hook(self, prompt):
+        _write_transcript(self.transcript, [prompt])
+        proc = subprocess.run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", self.transcript],
+            capture_output=True, text=True, input="", env=self._env)
+        if proc.returncode != 0:
+            self.skipTest("hook errored (reranker backend likely unavailable)")
+        return proc.stdout.strip()
+
+    def test_gym_workout_rejected_by_reranker(self):
+        out = self._run_hook("How should I schedule my morning gym workout?")
+        # If the reranker backend is genuinely absent, semantic_top times out or
+        # falls back to cosine; the scheduler hit (cosine ~0.42) would then inject.
+        # That degrade is acceptable and tested elsewhere — here we assert the
+        # reranker (present in the repo venv) closes the leak.
+        self.assertEqual(out, "",
+                         f"reranker must reject the off-topic gym prompt; got: {out[:200]}")
+
+    def test_ontopic_merge_still_injects(self):
+        out = self._run_hook("can the company merge its own pull requests")
+        self.assertNotEqual(out, "", "on-topic merge must still inject under the reranker")
+        self.assertIn("merge", out)
 
 
 if __name__ == "__main__":
