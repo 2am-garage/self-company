@@ -294,7 +294,7 @@ This was the Phase 24 diagnosis: an English-only embedding model on a non-Englis
 
 ## 12. References
 
-- **Scripts**: `.company/scripts/rag_setup.sh`, `rag_index.py`, `rag_query.py`, `rag_embed.py`, `rag_stamp.py`.
+- **Scripts**: `.company/scripts/rag_setup.sh`, `rag_index.py`, `rag_query.py`, `rag_embed.py`, `rag_stamp.py`, `rag_rerank.py`.
 - **Index location**: `.company/memory/index/` (LanceDB, gitignored).
 - **Policy tunables**: `org/policy.md §8 RAG`.
 - **Design**: `design/self-company-design.md §8`.
@@ -332,7 +332,28 @@ Two precision leaks were fixed after Gibby's red-team round 2, both about off-to
 
 **Semantic floor.** Retuned `SELF_COMPANY_INJECT_RAG_MIN_SCORE` 0.35 → **0.40** — the HIGHEST floor that still keeps EVERY on-topic diagnostic hit (lowest true-positive top-1 = `merge-gate` 0.419). Measured: EN hit@1 0.875, ZH hit@1 0.625 preserved; 24/25 off-topic English inject nothing on the semantic path.
 
-**The one residual → reranker escalation (Item 5).** ONE innocent off-topic prompt — "How should I schedule my morning gym workout?" — scores **0.417** against a scheduler memory (on the word "schedule"), which is **inseparable** from `merge-gate`'s on-topic **0.419** by floor OR margin: their top-1/top-2 gaps are 0.060 vs 0.062, near-identical. No cosine threshold cleanly splits innocent-off-topic from on-topic here without dropping the real `merge-gate` hit. A cross-encoder reranker **does** separate them cleanly (measured with the multilingual `jinaai/jina-reranker-v2-base-multilingual`: gym **−2.97** vs merge **+1.73**, and it keeps the ZH hits). This is exactly the gated **Item 5** work; the measurement is the trigger for ungating it.
+### The reranker — Item 5 (built; closes the last residual)
+
+ONE innocent off-topic prompt — "How should I schedule my morning gym workout?" — scores **0.417** against a scheduler memory (on the word "schedule"), **inseparable** from `merge-gate`'s on-topic **0.419** by any cosine floor OR margin (their neighbour gaps are 0.060 vs 0.062). No cosine threshold splits them without dropping the real hit. The Chairman ungated **Item 5** (the gated cross-encoder reranker) to close it.
+
+**Model:** `jinaai/jina-reranker-v2-base-multilingual` via fastembed `TextCrossEncoder` (ONNX/CPU/offline; ships with the already-pinned `fastembed==0.8.0` — NO new dependency). Multilingual is required: the English-only ms-marco cross-encoder scores Chinese on-topic pairs negative and would suppress ZH recall. The shared seam is `rag_rerank.py` (lazy import, like `rag_embed.py`).
+
+**Mechanism:** `rag_query.py --rerank` OVER-retrieves the top ~20 by hybrid/vector, cross-encodes each candidate body (the `text` column from Item 4) against the query, sorts by reranker score, and adds a `rerank_score` per hit. The consumers (`hook_memory_inject.semantic_top`, `Employee.recall`/`recall_shared`) then inject a hit iff it clears **BOTH** the cosine floor (a cheap pre-filter, `RAG_MIN_SCORE` 0.40) **AND** the reranker cutoff — the reranker is the FINAL relevance gate.
+
+**Why the cosine pre-filter stays:** the reranker alone can't separate every case (the least-off off-topic "board game" reranks to −2.36, above the hardest on-topic "AI models" at −2.51). But `board game`'s **cosine is 0.285 < 0.40** — the floor already rejects it. The ONLY off-topic that reaches the reranker is `gym` (cosine 0.417), and its scheduler hit reranks to ~**−3.0**, well below the lowest cosine-passing on-topic (−2.51). So the two gates compose: cosine removes the bulk, the reranker removes the one cosine can't.
+
+**Data-driven cutoff `SELF_COMPANY_INJECT_RERANK_MIN_SCORE = -2.75`** — the midpoint of the gym(−3.0) ↔ AI-models(−2.51) gap (0.49 wide; gym rejected with 0.25 margin, every on-topic kept with 0.24).
+
+**Measured (real corpus, after Item 5):**
+| Metric | cosine-only (R3) | + reranker (Item 5) |
+|---|---|---|
+| off-topic English inject-nothing | 24/25 | **25/25** (gym closed) |
+| EN hit@1 | 0.875 | 0.875 |
+| ZH hit@1 | 0.625 | **0.875** (reranker reorders ZH better) |
+
+**Latency:** the rerank of ~20 short pairs is ~0.15 s; the cost is the two ONNX model loads per subprocess (~5.4 s warm total). Within the 30 s hook budget; the recall/query timeout was raised 7 s → 15 s for margin, and `rag_setup.sh` warms both models so the first post-install call isn't a ~50 s cold load.
+
+**Graceful degrade (non-negotiable):** reranker backend absent / model-load or inference error / timeout → `rag_query` omits `rerank_score` and returns cosine order; the consumer's cosine floor alone decides — **byte-identical to the pre-Item-5 (24/25) state**. Never a hard dependency, never raises, never blocks.
 
 ### The migration mechanism — model-stamping
 

@@ -266,7 +266,7 @@ Load these on demand — none is needed to ACT until you're doing the specific t
 **Scripts** (stdlib only; canonical in `scripts/`, run in place — never copied into `.company/`)
 - `decay.py` / `entropy.py` — the decay disposal pass and the entropy KPI pass (`--memory-dir .company/memory`, JSON; decay `--apply` mutates).
 - `frontmatter.py` / `tombstone.py` / `charter_ids.py` / `policy_config.py` — shared single-source libraries hard-imported across the scanners/hooks (frontmatter delimiter contract: `line.strip() == '---'`, opening fence on line 0).
-- `rag_index.py` / `rag_query.py` / `rag_embed.py` — the RAG index build / semantic query / local-embed layer (see rag.md).
+- `rag_index.py` / `rag_query.py` / `rag_embed.py` / `rag_rerank.py` — the RAG index build / semantic query (hybrid + cross-encoder rerank) / local-embed / reranker layer (see rag.md).
 - `daily-run.sh` / `schedule.sh` — the maintenance + cron-scheduling runtime; `fleet.py` / `fleet-run.sh` — the **optional** holding-company layer.
 
 - **Company folder** (`./.company/`, git-ignored) — `org/` (policy, triggers, personas/context) · `memory/` (L0/L1/L2) · `ops/` (logs/plans/schedule) · `reports/`.
