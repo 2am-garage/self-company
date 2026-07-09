@@ -107,7 +107,12 @@ def collect(company):
                 continue
             r = {"ts": ts, "drop": 0, "demote": 0, "archive": 0, "upgrade": 0,
                  "verified": 0, "unverifiable": 0, "entropy": None, "memories": None,
-                 "agent": None, "merged": 0, "promoted": 0}
+                 "agent": None, "merged": 0, "promoted": 0,
+                 # Phase 25 Item 1/3: safety-floor abort + surfaced corruption
+                 # warnings — computed every run and previously thrown away
+                 # with the temp JSON; now visible in the ledger too.
+                 "warnings": 0, "core_aborted": False, "abort_reason": None,
+                 "lock_stale": False}
             while i < len(lines) and not RUN_RE.match(lines[i]):
                 ln = lines[i]
                 dm = re.search(r"drop (\d+) \| demote (\d+) \| archive (\d+) \| upgrade-candidates (\d+)", ln)
@@ -124,6 +129,23 @@ def collect(company):
                 if em:
                     r["entropy"] = float(em.group(1))
                     r["memories"] = int(em.group(2))
+                # Phase 25 Item 3: "- warnings: N (first 5: ...)" — emitted for
+                # every stage that carries a `warnings` list (today: decay).
+                # Summed across the run so ANY stage's corruption/rot signal
+                # flips the verdict (never a silent flat/keep).
+                wm = re.match(r"^- warnings: (\d+)", ln)
+                if wm:
+                    r["warnings"] += int(wm.group(1))
+                # Phase 25 Item 1: the deterministic core was ABORTED (safety
+                # floor failed — snapshot failure or free-space preflight
+                # miss). This is the highest-priority, never-flat/keep signal.
+                if ln.startswith("- CORE ABORTED:"):
+                    r["core_aborted"] = True
+                    r["abort_reason"] = ln[len("- CORE ABORTED:"):].strip()
+                # Phase 25 Item 4.3: a stale-lock tripwire fired — also never
+                # a silent flat/keep (a wedged/orphaned run needs attention).
+                if ln.startswith("- LOCK STALE:"):
+                    r["lock_stale"] = True
                 if ln.startswith(("- agent:", "- agent (", "- agent prompt")):
                     # B3 (Phase 5 Item 3, N4): classify the agent OUTCOME
                     # honestly. The old substring test counted an AUTH_FAIL
@@ -168,6 +190,19 @@ def collect(company):
 
 
 def verdict(r, prev_entropy):
+    # Phase 25 Item 1: an ABORTED deterministic core (the pre-apply snapshot
+    # failed, or the free-space preflight came in under threshold — the
+    # safety floor failed) is the single highest-priority signal: it is NEVER
+    # rendered flat/keep, checked before everything else including a running
+    # agent (a CORE_ABORT also skips the agent step, so the two never
+    # co-occur, but the priority is explicit regardless).
+    if r.get("core_aborted"):
+        return "abort"
+    # Phase 25 Item 4.3: a stale-lock tripwire (a wedged/orphaned run holding
+    # .daily.lock past the escalation threshold) is likewise never a silent
+    # skip — it needs a human to look, not a routine contention line.
+    if r.get("lock_stale"):
+        return "stale-lock"
     # C2: an in-flight run (latest block, prompt built, agent still streaming) is
     # neither keep nor fail yet — it is `running`, and self-corrects on the
     # outcome line. Checked FIRST so a live agent is never rendered `fail`.
@@ -186,6 +221,11 @@ def verdict(r, prev_entropy):
     )
     if moved:
         return "keep"
+    # Phase 25 Item 3: memory-rot warnings (corrupt file / missing id / refused
+    # reap / failed-to-apply) computed this run must never render as a
+    # healthy flat no-op — a clean run (warnings: 0) is unaffected.
+    if r.get("warnings"):
+        return "warn"
     if r["agent"] == "skipped":
         return "skip"
     return "flat"
@@ -193,6 +233,12 @@ def verdict(r, prev_entropy):
 
 def describe(r):
     bits = []
+    # Phase 25 Item 1/4.3: the two safety-floor signals lead the description
+    # unconditionally — a human reading one line must see these first.
+    if r.get("core_aborted"):
+        bits.append(f"CORE ABORTED — {r.get('abort_reason') or 'safety floor failed'}")
+    if r.get("lock_stale"):
+        bits.append("LOCK STALE — wedged/orphaned run holding .daily.lock")
     # C2: an in-flight agent leads the description — the deterministic half's
     # progress follows, but the run is not done, so it is neither keep nor fail.
     if r["agent"] == "running":
@@ -219,6 +265,8 @@ def describe(r):
         bits.append(f"+{r['promoted']}→L1")
     if r["upgrade"]:
         bits.append(f"{r['upgrade']} upgrade-cand")
+    if r.get("warnings"):
+        bits.append(f"{r['warnings']} warning(s)")
     if not bits:
         bits.append("no-op maintenance")
     return ", ".join(bits)
