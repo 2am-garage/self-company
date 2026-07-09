@@ -58,6 +58,12 @@ try:                            # POSIX advisory locking; absent on some platfor
 except ImportError:             # pragma: no cover - non-POSIX fallback
     fcntl = None
 
+# Phase 25 Item 2: the shared atomic-write helper (frontmatter.py) replaces
+# this module's own private temp+os.replace copy — same directory as this
+# module, so the hard import mirrors every other sibling import here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from frontmatter import _atomic_write
+
 MAX_FIRES_PER_DAY = 24          # tunable token-breaker (per trigger)
 DEFAULT_BUDGET = 20000
 
@@ -349,11 +355,10 @@ def _ordinal_of_daykey(k):
 
 def _atomic_write_json(path, obj):
     """Item 2: temp-file + os.replace so a state file is never seen half-written
-    by a racing reader (rename is atomic on POSIX)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    by a racing reader (rename is atomic on POSIX). Phase 25 Item 2: delegates
+    to the ONE shared implementation in frontmatter.py (this module's former
+    private copy is gone — grep for the pattern now finds exactly one)."""
+    _atomic_write(path, json.dumps(obj, indent=2) + "\n", encoding="utf-8")
 
 
 def record(company, name, payload):
