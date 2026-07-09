@@ -151,6 +151,14 @@ def verify_dir(memory_dir, transcripts_dir, today, apply):
         # Item 6: charter/axiom source class.
         "charter_verified": [],   # blessed charter seeds stamped verified_by: charter
         "flagged_charter": [],    # NON-blessed memories self-declaring charter (suspicious)
+        # Phase 25 Item 3 (Gibby re-attack SHOULD-FIX 3a): verify's OWN
+        # corruption signal. A truncated/kill-mid-write memory parses to no
+        # frontmatter block (or a block with no `id:`) — exactly what
+        # decay.py already warns "missing id" about. Emitting it here too
+        # means Item 3's visibility no longer depends on decay's schedule
+        # cadence running this same tick: whichever of the two stages runs
+        # surfaces the rot. daily-run.sh sums every "- warnings: N" line.
+        "warnings": [],
     }
     mem_root = Path(memory_dir)
     if not mem_root.exists():
@@ -162,6 +170,11 @@ def verify_dir(memory_dir, transcripts_dir, today, apply):
             continue
         fm, body = parse_frontmatter(text)
         if not fm or not fm.get("id"):
+            # Mirror decay's "missing id" warning (same corpus, same
+            # condition) so a corrupt/truncated memory is never silently
+            # skipped by verify. No NEW false-alarm surface: decay already
+            # flags exactly these files.
+            report["warnings"].append(f"{path}: missing id")
             continue
         if is_tombstoned(fm):  # tombstones: archived / defunct (alias) / absorbed
             continue

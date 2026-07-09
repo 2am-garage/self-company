@@ -102,6 +102,48 @@ class TestVerify(unittest.TestCase):
             self.assertEqual(rep["verified"], ["live"])
 
 
+class TestVerifyCorruptionWarnings(unittest.TestCase):
+    """Phase 25 Item 3 (Gibby re-attack SHOULD-FIX 3a): verify emits its OWN
+    'missing id' warning for a corrupt/truncated memory instead of a bare
+    silent skip — so Item 3's visibility no longer depends on decay's schedule
+    cadence running that tick. A clean corpus stays warning-free (no false
+    alarm)."""
+
+    def test_missing_id_file_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory", "L0-working")
+            os.makedirs(mem)
+            # truncated/kill-mid-write shape: frontmatter block, no id line
+            with open(os.path.join(mem, "corrupt.md"), "w") as f:
+                f.write("---\ntier: L0\nowner: Tony\n---\nbody\n")
+            _mem(os.path.join(mem, "ok.md"), id="ok", sources='["[sessA#0]"]')
+            tdir = _transcripts(d, "sessA", 3)
+            rep = vm.verify_dir(os.path.join(d, "memory"), tdir, "2026-06-30", apply=True)
+            self.assertEqual(len(rep["warnings"]), 1)
+            self.assertIn("missing id", rep["warnings"][0])
+            self.assertIn("ok", rep["verified"])   # the healthy one still verifies
+
+    def test_no_frontmatter_file_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory", "L0-working")
+            os.makedirs(mem)
+            with open(os.path.join(mem, "garbage.md"), "w") as f:
+                f.write("this is not a memory file at all\n")
+            tdir = _transcripts(d, "sessA", 3)
+            rep = vm.verify_dir(os.path.join(d, "memory"), tdir, "2026-06-30", apply=False)
+            self.assertEqual(len(rep["warnings"]), 1)
+
+    def test_clean_corpus_no_warnings(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "memory", "L0-working")
+            os.makedirs(mem)
+            _mem(os.path.join(mem, "a.md"), id="a", sources='["[sessA#0]"]')
+            _mem(os.path.join(mem, "b.md"), id="b", sources='["[sessA#1]"]')
+            tdir = _transcripts(d, "sessA", 3)
+            rep = vm.verify_dir(os.path.join(d, "memory"), tdir, "2026-06-30", apply=False)
+            self.assertEqual(rep["warnings"], [])
+
+
 class TestCharterClass(unittest.TestCase):
     """Item 6 — charter/axiom provenance class + anti-abuse."""
 
