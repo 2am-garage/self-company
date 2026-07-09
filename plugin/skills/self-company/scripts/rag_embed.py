@@ -10,8 +10,29 @@ leaves the machine). Installed into the project's `.company/.rag-venv` by
 Privacy: model + inference are entirely local. No network at query time.
 """
 
-RAG_EMBED_MODEL = "BAAI/bge-small-en-v1.5"   # 384-dim, CPU-friendly, offline
-EMBEDDING_DIM = 384
+# Phase 24 Item 1: model -> embedding dimension, ONE table. EMBEDDING_DIM is
+# DERIVED from RAG_EMBED_MODEL so a future model swap can never miss updating a
+# dim assertion somewhere — the historical bug this table exists to prevent.
+#
+# `bge-small-en-v1.5` was English-only: it compressed every query (any language)
+# into a narrow 0.45-0.65 cosine band regardless of relevance, so the injection
+# floor (RAG_MIN_SCORE) filtered nothing, and Chinese queries scored WORSE than
+# random (the Chairman's default language — not a corner case). The multilingual
+# swap is the fix; the diagnostic + rollback story lives in references/rag.md.
+#
+# Elon's correction to the original draft: the multilingual model is 384-dim,
+# the SAME as bge-small — EMBEDDING_DIM does NOT change for this swap. The
+# heavier `bge-m3` (1024-dim, SOTA multilingual) is deliberately NOT chosen here:
+# it would force a dim migration across every assertion/schema for quality gains
+# that haven't been measured as needed. Revisit only if a future measurement
+# says the ceiling is the model, not the retrieval strategy (hybrid/rerank).
+EMBED_MODEL_DIMS = {
+    "BAAI/bge-small-en-v1.5": 384,                                      # legacy (English-only; superseded)
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": 384,  # current default (multilingual)
+}
+
+RAG_EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+EMBEDDING_DIM = EMBED_MODEL_DIMS[RAG_EMBED_MODEL]
 
 _model = None
 
