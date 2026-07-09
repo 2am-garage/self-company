@@ -286,6 +286,73 @@ class TestMemoryGuardCdBypass(_CompanyRepo):
         self.assertEqual(self._decision(out), "allow")
 
 
+class TestMemoryGuardCdEquivalentsAndWrappers(_CompanyRepo):
+    """GIB re-attack MUST-FIX 2 — cd-equivalents (pushd / env -C) and wrapper
+    structures (subshell, bash -c, eval, xargs, unbalanced quoting) that the
+    old raw-text splitter tore apart or didn't recognize, so a deleter walked
+    into the store undetected. All now DENY (fail-closed for the unresolvable
+    ones); legit commands stay allowed."""
+
+    def _decision(self, out):
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    def _deny(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "deny", cmd)
+
+    def _allow(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "allow", cmd)
+
+    # Gibby's confirmed file-deleting bypasses ------------------------------
+    def test_pushd_then_rm_denied(self):
+        self._deny("pushd .company/memory && rm -rf L0-working/*")
+
+    def test_env_dashC_rm_denied(self):
+        self._deny("env -C .company/memory rm -f L0-working/x.md")
+
+    def test_env_longchdir_rm_denied(self):
+        self._deny("env --chdir=.company/memory rm -f L0-working/x.md")
+
+    def test_subshell_cd_rm_denied(self):
+        self._deny("(cd .company/memory && rm -rf L0-working)")
+
+    def test_bash_dashc_cd_rm_denied(self):
+        self._deny('bash -c "cd .company/memory && rm -rf L0-working"')
+
+    def test_sh_dashc_cd_rm_denied(self):
+        self._deny('sh -c "cd .company/memory && rm -rf L0-working/x.md"')
+
+    # Other wrappers that run an unresolvable deleter -> fail-closed --------
+    def test_eval_rm_denied(self):
+        self._deny('eval "rm -rf .company/memory"')
+
+    def test_find_piped_to_xargs_rm_denied(self):
+        self._deny("find .company/memory -type f | xargs rm -rf")
+
+    def test_unbalanced_quote_with_deleter_denied(self):
+        # Wholly unparseable (no closing quote) but a hard deleter is present.
+        self._deny('rm ".company/memory/x')
+
+    # Legit commands still allowed (near-zero false positives) --------------
+    def test_subshell_cd_does_not_leak_out_allowed(self):
+        # After the subshell closes, a following relative deleter runs in the
+        # ORIGINAL cwd — must not be falsely denied by a leaked subshell cd.
+        os.makedirs(os.path.join(self.root, "proj-sub"))
+        self._allow("(cd .company/memory && ls); rm -rf ./proj-sub")
+
+    def test_bash_dashc_without_deleter_allowed(self):
+        self._allow('bash -c "echo hello && ls .company/memory"')
+
+    def test_unbalanced_quote_without_deleter_allowed(self):
+        self._allow('echo ".company/memory unterminated')
+
+    def test_pushd_outside_store_allowed(self):
+        self._allow("pushd /tmp && rm -rf scratch")
+
+
 class TestMemoryLint(_CompanyRepo):
     def _rel(self, name):
         return os.path.join(".company", "memory", "L0-working", name)

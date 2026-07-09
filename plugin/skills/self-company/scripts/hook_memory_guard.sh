@@ -32,6 +32,19 @@
 # THIS project — the original conservative choice) — either check tripping is
 # enough to deny.
 #
+# GIB re-attack (MUST-FIX 2) — cd-equivalents & wrapper structure. The naive
+# raw-text segment splitter tore `bash -c "…"` and `( … )` apart before
+# tokenizing, and only the literal token `cd` was treated as a directory
+# change, so `pushd` / `env -C` / subshell / `bash -c` walked a deleter into
+# the store undetected. The parser now (1) tokenizes QUOTE- and PAREN-aware
+# (shlex punctuation_chars) so quoted scripts stay intact and control
+# operators/subshells are real boundaries; (2) treats `pushd` and `env -C` /
+# `--chdir` as cd-equivalents and scopes subshell cd with a stack; and (3)
+# fail-closes any deleter it cannot fully resolve — a nested `bash -c` / `eval`
+# / `xargs` whose script invokes a deleter, or a wholly-unparseable
+# (unbalanced-quote) command that still mentions a deleter — is DENIED rather
+# than silently allowed.
+#
 # CONTRACT (PreToolUse): reads stdin JSON {tool_name, tool_input:{command}, cwd}.
 #   DENY : exit 0, stdout {"hookSpecificOutput":{"hookEventName":"PreToolUse",
 #          "permissionDecision":"deny","permissionDecisionReason":"..."}}
@@ -69,7 +82,11 @@ MEM_ROOT = os.path.join(STORE, "memory") if STORE else ""
 MEM_SUBSTR = ".company/memory/"
 
 DELETERS = {"rm", "unlink", "shred", "rmdir", "truncate"}
+CD_CMDS = {"cd", "pushd"}                       # GIB re-attack: pushd is a cd too
+SHELL_INTERPRETERS = {"bash", "sh", "dash", "zsh", "ksh", "ash", "fish"}
+NESTED_WRAPPERS = {"eval", "xargs"}             # run another command we can't resolve
 AMBIG_CHARS = set("$`*?[]")
+PUNCT = set("();<>|&")                          # shell control punctuation
 
 
 def allow():
@@ -124,6 +141,45 @@ AMBIG_REASON = (
     "after it can't be proven safe — fail-closed. Re-run with an absolute "
     "path outside .company, or split the cd and the delete into separate "
     "steps")
+STRUCT_REASON = (
+    "a deleter is wrapped in structure this narrow guard can't fully parse "
+    "(nested shell -c / eval / xargs / subshell / unbalanced quoting), so its "
+    "target can't be proven to lie outside the memory store — fail-closed "
+    "(GIB re-attack). Re-run the deletion directly with an absolute path "
+    "outside .company")
+
+
+def _basename(t):
+    return t.rsplit("/", 1)[-1]
+
+
+def _ambiguous(t):
+    return any(ch in t for ch in AMBIG_CHARS)
+
+
+def tok_is_deleter(a):
+    b = _basename(a)
+    return b in DELETERS or b in ("find", "mv")
+
+
+def script_has_deleter(s):
+    # Best-effort: does an inline script string invoke a deleter? Used to
+    # fail-closed on `bash -c "…rm…"` / `eval "…"` where we won't recursively
+    # simulate the nested cwd. shlex-tokenize when we can, else scan words.
+    if not isinstance(s, str):
+        return False
+    try:
+        toks = shlex.split(s)
+    except ValueError:
+        toks = re.findall(r"[A-Za-z0-9_./-]+", s)
+    return any(tok_is_deleter(t) or _basename(t) in NESTED_WRAPPERS for t in toks)
+
+
+def text_has_hard_deleter(s):
+    # For a wholly-unparseable command (unbalanced quotes): is a hard deleter
+    # even present? If so, fail-closed; if not, there is nothing to guard.
+    words = re.findall(r"[A-Za-z0-9_./-]+", s or "")
+    return any(_basename(w) in DELETERS for w in words)
 
 try:
     data = json.load(sys.stdin)
@@ -148,71 +204,178 @@ if hook_cwd and not os.path.isabs(hook_cwd):
     hook_cwd = os.path.join(PROJECT_DIR or "/", hook_cwd)
 cur_cwd = os.path.realpath(hook_cwd) if hook_cwd else None
 
-# Evaluate each pipeline/chain segment independently, IN ORDER, simulating any
-# `cd` so a same-line `cd X && rm Y` resolves Y against the post-cd directory
-# (not the directory the whole command started in).
-segments = re.split(r"&&|\|\||[;|&\n]", cmd)
+# GIB re-attack (MUST-FIX 2): tokenize QUOTE- and PAREN-aware so a deleter
+# hidden inside `bash -c "…"`, a subshell `( … )`, or `env -C …` can't be torn
+# apart at raw-text level before we ever see it. shlex(posix, punctuation_chars)
+# keeps quoted strings intact as single tokens AND surfaces the control
+# operators; unbalanced quoting is unparseable -> fail-closed if a deleter is
+# even present.
+try:
+    _lx = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    _lx.whitespace_split = True
+    raw_tokens = list(_lx)
+except ValueError:
+    if text_has_hard_deleter(cmd):
+        deny(STRUCT_REASON)            # can't parse + a deleter is present
+    allow()
 
 
-def check_targets(paths):
+def _normalize(tokens):
+    # A run of punctuation chars may lex as one token (e.g. ');'). Split it into
+    # atoms: '(' and ')' individually (subshell scoping), every other operator
+    # (&& || | & ; < >) collapsed to a single ';' separator — all we need is
+    # "flush the current simple command here".
+    out = []
+    for tok in tokens:
+        if tok and all(c in PUNCT for c in tok):
+            pending = False
+            for ch in tok:
+                if ch in "()":
+                    if pending:
+                        out.append(";"); pending = False
+                    out.append(ch)
+                else:
+                    pending = True
+            if pending:
+                out.append(";")
+        else:
+            out.append(tok)
+    return out
+
+
+toks_norm = _normalize(raw_tokens)
+
+# CWD[0] is the simulated cwd; a stack scopes subshell `( … )` cd so it doesn't
+# leak out (avoids false positives after the subshell closes).
+CWD = [cur_cwd]
+cwd_stack = []
+
+
+def check_targets(paths, cwd):
     for a in paths:
         if a.startswith("-"):
             continue                   # a flag (e.g. -rf), never a path arg
         if is_mem_literal(a):
             deny(REASON)
-        if cur_cwd is None:
+        if cwd is None:
             if not os.path.isabs(a):
                 deny(AMBIG_REASON)      # relative + unknown cwd -> fail closed
             resolved = os.path.realpath(a)
         else:
-            resolved = resolve(cur_cwd, a)
+            resolved = resolve(cwd, a)
         if in_store(resolved):
             deny(REASON)
 
 
-for seg in segments:
-    seg = seg.strip()
-    if not seg:
-        continue
-    try:
-        toks = shlex.split(seg)
-    except ValueError:
-        toks = seg.split()
-    if not toks:
-        continue
-    # Skip only LEADING env-assignment tokens (VAR=val) to find the command word;
-    # leave the argument list untouched so no path can be silently dropped.
+def _cd_target(args):
+    positional = [a for a in args if not a.startswith("-")]
+    return positional[0] if positional else "~"
+
+
+def _apply_cd(cwd, target):
+    if cwd is None:
+        return None                    # already ambiguous; stays ambiguous
+    if _ambiguous(target):
+        return None                    # variable/substitution/glob -> unknown
+    return resolve(cwd, os.path.expanduser(target))
+
+
+def _parse_env(rest):
+    # `env [-i] [-u VAR] [VAR=val…] [-C DIR | --chdir DIR|=DIR] CMD ARGS…`
+    # -> (cd_target_or_None, inner_command_tokens). The chdir is NON-persistent
+    # (only the wrapped command sees it).
+    cd_target = None
+    j = 0
+    while j < len(rest):
+        t = rest[j]
+        if t in ("-C", "--chdir"):
+            if j + 1 < len(rest):
+                cd_target = rest[j + 1]; j += 2; continue
+            j += 1; continue
+        if t.startswith("--chdir="):
+            cd_target = t.split("=", 1)[1]; j += 1; continue
+        if t == "-u":
+            j += 2; continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+            j += 1; continue           # VAR=val assignment
+        if t.startswith("-"):
+            j += 1; continue           # -i and other flags
+        break                          # first bare word = the wrapped command
+    return cd_target, rest[j:]
+
+
+def check_command(toks, cwd):
+    """Analyze one simple command. Returns the (persistently) updated cwd; may
+    deny() and never return."""
     i = 0
     while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
-        i += 1
+        i += 1                         # skip leading VAR=val
     if i >= len(toks):
-        continue
-    head = toks[i].rsplit("/", 1)[-1]  # basename (/bin/rm -> rm)
+        return cwd
+    head = _basename(toks[i])
     args = toks[i + 1:]
 
-    if head == "cd":
-        positional = [a for a in args if not a.startswith("-")]
-        target = positional[0] if positional else "~"
-        if cur_cwd is None:
-            continue  # already ambiguous; stays ambiguous
-        if any(ch in target for ch in AMBIG_CHARS):
-            cur_cwd = None            # variable/substitution/glob -> unknown
-            continue
-        cur_cwd = resolve(cur_cwd, os.path.expanduser(target))
-        continue
+    if head in CD_CMDS:
+        return _apply_cd(cwd, _cd_target(args))
+
+    if head == "env":
+        cd_t, inner = _parse_env(args)
+        eff = cwd
+        if cd_t is not None:
+            eff = _apply_cd(cwd, cd_t)
+        check_command(inner, eff)      # non-persistent chdir -> discard result
+        return cwd
+
+    if head in SHELL_INTERPRETERS:
+        # A nested shell (`bash -c "cd … && rm …"`) we won't recursively
+        # simulate — if its script invokes a deleter, fail-closed.
+        if any(script_has_deleter(a) for a in args):
+            deny(STRUCT_REASON)
+        return cwd
+
+    if head in NESTED_WRAPPERS:        # eval / xargs run a command we can't resolve
+        if any(tok_is_deleter(a) for a in args) or \
+                any(script_has_deleter(a) for a in args):
+            deny(STRUCT_REASON)
+        return cwd
 
     if head in DELETERS:
-        check_targets(args)
+        check_targets(args, cwd)
     elif head == "find" and "-delete" in args:
         # `find <memory> -delete` is a disguised recursive rm. Deny ONLY when
         # -delete is present so a plain read-only `find` over memory still works.
-        check_targets([a for a in args if not a.startswith("-")])
+        check_targets([a for a in args if not a.startswith("-")], cwd)
     elif head == "mv":
         # Moving a memory path AWAY = a disguised delete. Deny if a memory path
         # appears as any source (i.e. not solely the final destination arg).
         positional = [a for a in args if not a.startswith("-")]
         sources = positional[:-1] if len(positional) >= 2 else positional
-        check_targets(sources)
+        check_targets(sources, cwd)
+    return cwd
+
+
+simple = []
+
+
+def _flush():
+    if simple:
+        CWD[0] = check_command(list(simple), CWD[0])
+    simple.clear()
+
+
+for tok in toks_norm:
+    if tok == "(":
+        _flush()
+        cwd_stack.append(CWD[0])       # enter subshell — scope its cd
+    elif tok == ")":
+        _flush()
+        if cwd_stack:
+            CWD[0] = cwd_stack.pop()    # restore: subshell cd doesn't leak out
+    elif tok == ";":
+        _flush()
+    else:
+        simple.append(tok)
+_flush()
 
 allow()
 PY
