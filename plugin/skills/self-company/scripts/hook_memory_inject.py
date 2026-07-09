@@ -89,16 +89,45 @@ MIN_OVERLAP = 1                  # relevance floor: >=1 shared keyword or silent
 HIGH_RC = _env_num("SELF_COMPANY_INJECT_HIGH_RC", 2, int)  # L1 gate
 TIER_WEIGHT = {"L2": 1.0, "L1": 0.6}
 
-# Phase 24 MUST-FIX 1(b): a single incidental overlap on a short generic word is
-# how off-topic ENGLISH prompts sneak past the keyword floor (Gibby: "how do I
-# CHANGE a flat tire" injected a git-workflow memory on the word "change"). A
-# LONE overlapping token must be either "specific" (>= SPECIFIC_TOKEN_LEN chars)
-# or a meaningful fraction (>= MIN_OVERLAP_RATIO) of the prompt's distinct
-# tokens; otherwise it does not clear the gate. This hardens the KEYWORD degrade
-# path (no-venv); the primary defense is the expanded stoplist below plus the
-# semantic layer's definitive no-match verdict (INJECT_NOTHING) when RAG is up.
-SPECIFIC_TOKEN_LEN = 5
-MIN_OVERLAP_RATIO = _env_num("SELF_COMPANY_INJECT_MIN_OVERLAP_RATIO", 0.34, float)
+# Phase 24 R3 MUST-FIX 1: a single incidental overlap on a generic word is how
+# off-topic ENGLISH prompts sneak past the keyword floor (Gibby: "how do I CHANGE
+# a flat tire" -> git memory on "change"; "rules of CRICKET" -> git-identity-RULES
+# on the slug word "rules"; "difference BETWEEN a latte…" -> a memory on the
+# preposition "between"). The prior length heuristic (>=5 chars => "specific") was
+# wrong: `before`/`language`/`database`/`design`/`rules`/`between` are all >=5
+# chars yet generic. R3 replaces it with THREE principled, corpus-derived gates on
+# a LONE overlapping token (multi-token overlaps always clear — a shared PAIR of
+# meaningful words is real signal):
+#   1. CORPUS RARITY (IDF): the token must not be common across the candidate
+#      memories — `df(token) <= max(LONE_DF_FLOOR, N * LONE_MAX_DF_RATIO)`. The
+#      max(...) floor keeps the gate correct on tiny corpora (a 2-memory test set
+#      where every df is "high" by ratio must not gate a real content word). This
+#      derives from the live corpus, not a hand-kept list; it removes the
+#      dominant-word collisions (e.g. "chairman", "company") that scale up.
+#   2. BODY SUBSTANCE: the token must appear in the memory's BODY, not merely its
+#      auto-generated id/slug — kills slug collisions ("rules" -> git-identity-RULES).
+#   3. FUNCTION WORDS: the base stoplist below carries the closed-class function
+#      words (prepositions/conjunctions incl. before/between) so a lone preposition
+#      never counts as topical.
+# The KEYWORD path is only the no-venv/RAG-hiccup degrade; the primary defense is
+# the semantic layer's INJECT_NOTHING verdict. A residual class remains
+# irreducible for pure lexical matching: a df==1 GENERAL-English content word that
+# collides (e.g. an off-topic prompt sharing "database"/"project" with one memory)
+# cannot be told from a real topical match without semantics — that is the
+# reranker's job (Item 5), documented in references/rag.md.
+LONE_MAX_DF_RATIO = _env_num("SELF_COMPANY_INJECT_LONE_DF_RATIO", 0.25, float)
+LONE_DF_FLOOR = 2       # a lone token in <= this many memories is always "rare enough"
+# A 4th NECESSARY (never sufficient) condition on a lone match: minimum token
+# length. This is NOT the rejected "len>=5 => specific" heuristic (that used
+# length as SUFFICIENT, wrongly admitting long generic words like
+# "language"/"database"); here length is one of FOUR conjunctive gates. Its only
+# job is to drop the short common-English words that a 30-memory corpus is too
+# small to see as common by IDF (df==1 words like red/long/stay/day) — a real
+# specific term is rarely < 5 chars. Long generic words are still caught by IDF
+# (at scale) + the function-word stoplist; short content tokens (e.g. a lone
+# "fly") are the one class this suppresses on the no-venv path, and the semantic
+# path recovers them whenever the venv is present.
+LONE_MIN_LEN = 5
 
 # Phase 24 MUST-FIX 1(a): a DISTINCT signal for "the semantic layer ran and
 # found nothing at or above the relevance floor" — a DEFINITIVE relevance
@@ -124,34 +153,47 @@ RAG_QUERY_TOPK = max(TOP_K_CAP, TOP_K) * 2
 # and dropped; if nothing clears the floor we fall back to the keyword path (which
 # has its own MIN_OVERLAP gate) so an off-topic prompt still injects nothing.
 #
-# Phase 24 Item 1: retuned from 0.30 to 0.35, DATA-DRIVEN — the old
-# English-only bge-small model made 0.30 filter nothing at all (every query,
-# on- or off-topic, scored 0.45-0.65). Tony's post-swap sweep on the real
-# 55-memory corpus (11 off-topic EN+ZH probes vs 16 on-topic EN+ZH queries,
-# post model-swap + hybrid/RRF): off-topic top-1 scores topped out at 0.306;
-# the lowest true on-topic top-1 score was 0.419. 0.35 sits in that gap with
-# margin on both sides. See references/rag.md for the full sweep.
-RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.35, float)
+# Phase 24 Item 1 / R3: retuned to 0.40, DATA-DRIVEN. The old English-only
+# bge-small model made 0.30 filter nothing (every query scored 0.45-0.65); the
+# multilingual swap opened a real gap. R3 sweep on the real corpus (25 off-topic
+# EN + 16 on-topic EN+ZH): 0.40 is the HIGHEST floor that still keeps EVERY
+# on-topic diagnostic hit — the lowest true-positive top-1 is `merge-gate` at
+# 0.419, so the floor sits just below it (0.019 margin) and every real hit clears.
+# It cannot go higher: the reranker escalation is documented in references/rag.md.
+#
+# KNOWN RESIDUAL (Gibby R2, escalated): ONE innocent off-topic prompt — "How
+# should I schedule my morning gym workout?" — scores 0.417 against a scheduler
+# memory (the word "schedule"), inseparable from `merge-gate`'s 0.419 by floor OR
+# margin (their top1/top2 gaps are 0.060 vs 0.062 — near-identical). No cosine
+# threshold cleanly splits innocent-off-topic from on-topic here; a cross-encoder
+# reranker does (measured: gym -2.97 vs merge +1.73). That is Item 5's job.
+RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.40, float)
 
-# Small stopword set so incidental common words don't manufacture "relevance".
-# Phase 24 MUST-FIX 1(b): expanded with the generic connectors / light verbs that
-# let off-topic English prompts collide on ONE incidental word (change, without,
-# going, need, want, like, work, help, set, way, thing, …). These carry no topic
-# so a lone overlap on them is noise, never relevance. Content words (neovim,
-# terraform, chinese, backup, …) are untouched, so real matches are unaffected.
+# Stopword set: the closed-class FUNCTION WORDS (articles, pronouns, prepositions,
+# conjunctions, auxiliaries, degree adverbs) plus a few ubiquitous light verbs.
+# This is a linguistic class, not per-leak whack-a-mole: a lone overlap on a
+# function word (a preposition like "before"/"between", a determiner, an
+# auxiliary) is grammatical glue, never a topic signal. Content words (neovim,
+# terraform, chinese, database, project, …) are DELIBERATELY absent — telling an
+# off-topic content-word collision from a real one is the corpus-rarity gate's job
+# (common domain words) and ultimately the semantic layer's / reranker's job (df==1
+# general-English content words); a stoplist must never try to enumerate them.
 _STOP = frozenset("""
-a an the this that these those and or but if then else for of to in on at by
-with from into over under is are was were be been being do does did doing have
-has had having i you he she it we they me him her us them my your his its our
-their what which who whom how when where why all any some no not can could would
-should will shall may might must about as so than too very just also again more
-most such only own same both each few other new use using used get got make made
+a an the this that these those and or but nor if then else for of to in on at by
+with from into over under above below is are was were be been being am do does did
+doing have has had having i you he she it we they me him her us them my your his
+its our their what which who whom whose how when where why all any some no not can
+could would should will shall may might must about as so than too very just also
+again more most such only own same both each few other others another new use
+using used get gets got make makes made
 change changed changing without within going need needs needed want wants wanted
 like likes work works working help helps helping set sets setting thing things
 way ways know knows think thinks look looks looking find finds tell tells give
 gives take takes keep keeps come comes put puts run running still back even well
 around along across able really actually maybe perhaps please thanks thank okay
 sure something anything everything someone anyone everyone here there where
+before after between among amongst amid amidst against toward towards upon onto
+beyond beside besides beneath during through throughout until till per via versus
 """.split())
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -263,6 +305,27 @@ def _recency_key(fm):
     return str(fm.get("last_reinforced") or fm.get("created") or "")
 
 
+def _corpus_stats(candidates):
+    """Phase 24 R3: (document_frequency, body_tokens_by_path) over the candidate
+    corpus — the two corpus-derived signals the lone-token gate needs.
+
+    `df[token]` = number of candidate memories whose SEARCHABLE text (id +
+    category + body) contains the token — used for the IDF/rarity gate. Counting
+    over the same haystack the overlap uses keeps the gate consistent with the
+    match. `body_tokens_by_path[path]` = the token set of the BODY alone — used
+    for the body-substance gate (a lone match on a token present only in a
+    memory's auto-generated slug is not real signal). Pure stdlib, O(corpus)."""
+    df = {}
+    body_tokens_by_path = {}
+    for _tier, fm, body, path in candidates:
+        body_toks = _tokens(body)
+        body_tokens_by_path[path] = body_toks
+        hay = _tokens(" ".join((fm.get("id", ""), fm.get("category", ""), body)))
+        for tok in hay:
+            df[tok] = df.get(tok, 0) + 1
+    return df, body_tokens_by_path
+
+
 def rank(prompt, candidates):
     """Return the relevance-gated top-k memories for `prompt`.
 
@@ -303,6 +366,13 @@ def rank(prompt, candidates):
         # score against -> relevance cannot be established -> inject nothing.
         return []
 
+    # Phase 24 R3 MUST-FIX 1: precompute per-token corpus DOCUMENT FREQUENCY (how
+    # many candidate memories contain the token) and each memory's BODY tokens, to
+    # power the lone-token gate below. O(corpus) once, not per-candidate.
+    df, body_tokens_by_path = _corpus_stats(candidates)
+    n = max(1, len(candidates))
+    lone_df_cap = max(LONE_DF_FLOOR, n * LONE_MAX_DF_RATIO)
+
     scored = []
     for tier, fm, body, path in candidates:
         hay = _tokens(" ".join((fm.get("id", ""), fm.get("category", ""), body)))
@@ -310,14 +380,22 @@ def rank(prompt, candidates):
         overlap = len(overlap_tokens)
         if overlap < MIN_OVERLAP:            # relevance gate
             continue
-        # Phase 24 MUST-FIX 1(b): a LONE overlapping token clears the gate only
-        # if it is specific (long enough to be topical) OR a meaningful fraction
-        # of the prompt — so one short incidental word (that survived the
-        # stoplist) can't manufacture relevance on the no-venv keyword path.
+        # Phase 24 R3 MUST-FIX 1: a LONE overlapping token must survive three
+        # principled gates before it counts as relevance (a shared PAIR of tokens
+        # always clears — real signal). See the LONE_MAX_DF_RATIO comment block.
         if overlap == 1:
             lone = next(iter(overlap_tokens))
-            if (len(lone) < SPECIFIC_TOKEN_LEN
-                    and (overlap / len(p_tokens)) < MIN_OVERLAP_RATIO):
+            # 1. corpus rarity (IDF): a token common across memories is not
+            #    discriminative — one incidental match on it is noise.
+            if df.get(lone, 0) > lone_df_cap:
+                continue
+            # 2. body substance: the token must be in the BODY, not merely the
+            #    memory's auto-generated id/slug (kills "rules" -> git-identity-RULES).
+            if lone not in body_tokens_by_path.get(path, frozenset()):
+                continue
+            # 3. length floor (NECESSARY, not sufficient): drop short common-English
+            #    words a small corpus can't see as common via IDF (red/long/stay/day).
+            if len(lone) < LONE_MIN_LEN:
                 continue
         weight = TIER_WEIGHT.get(tier, 0.5)
         rc = _int(fm.get("reinforce_count"), 1)
