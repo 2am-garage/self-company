@@ -106,7 +106,9 @@ _DISPATCH_INJECT_BUDGET = _env_num("SELF_COMPANY_DISPATCH_INJECT_BUDGET", 900, i
 # Shared-read similarity gate (Phase 18c). The SHARED-memory read at dispatch honors
 # the SAME cosine floor the ask-time hook (hook_memory_inject) uses, sourced from the
 # SAME env var, so the dispatch read and the interactive read are gated identically.
-_SHARED_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.30, float)
+# Phase 24 Item 1: retuned 0.30 -> 0.35 alongside hook_memory_inject.py's copy —
+# see that module's comment for the sweep numbers that set this floor.
+_SHARED_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.35, float)
 
 # Injection block headers — kept as module constants so the own-store and shared
 # blocks are rendered by ONE renderer (_render_memory_block) and stay distinct,
