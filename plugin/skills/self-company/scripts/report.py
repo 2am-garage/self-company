@@ -214,6 +214,19 @@ def verdict(r, prev_entropy):
     # verdict green. Only benign skips (daily cap / no CLI) stay `skip`.
     if r["agent"] in ("failed", "timeout", "auth-fail"):
         return "fail"
+    # Phase 25 Item 3 (Gibby re-attack fix): memory-rot warnings (corrupt file /
+    # missing id / refused reap / failed-to-apply) computed this run must never
+    # render as a healthy verdict — and that includes `keep`, not only `flat`.
+    # This check MUST precede the `moved` check: a tick where something
+    # legitimately moved (a stale file dropped) AND decay also flagged a
+    # corrupt file would otherwise render `keep`, hiding the corruption in the
+    # status field (it survived only in the prose column). Item 3's acceptance
+    # is explicit — a warnings-bearing run "must not render as healthy
+    # flat/keep" — so `warn` wins over movement. A clean run (warnings: 0) is
+    # unaffected and still classifies by movement below. (notify-status.py
+    # already treats warnings unconditionally; this brings report.py in line.)
+    if r.get("warnings"):
+        return "warn"
     moved = (
         r["drop"] or r["demote"] or r["archive"] or r["upgrade"]
         or r["verified"] or r["merged"] or r["promoted"]
@@ -221,11 +234,6 @@ def verdict(r, prev_entropy):
     )
     if moved:
         return "keep"
-    # Phase 25 Item 3: memory-rot warnings (corrupt file / missing id / refused
-    # reap / failed-to-apply) computed this run must never render as a
-    # healthy flat no-op — a clean run (warnings: 0) is unaffected.
-    if r.get("warnings"):
-        return "warn"
     if r["agent"] == "skipped":
         return "skip"
     return "flat"

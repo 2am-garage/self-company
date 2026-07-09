@@ -268,5 +268,87 @@ class TestReport(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(reports, "ledger.tsv")))  # tsv by default
 
 
+class TestReportWarningsVerdict(unittest.TestCase):
+    """Phase 25 Item 3 (Gibby re-attack MUST-FIX 1): a warnings-bearing run
+    must render `warn` — NEVER masked behind `keep` when something also moved
+    in the same tick. test_report had zero warnings coverage before this."""
+
+    def _company_with(self, d, date, body):
+        logs = os.path.join(d, ".company", "ops", "logs")
+        os.makedirs(logs, exist_ok=True)
+        with open(os.path.join(logs, f"daily-{date}.md"), "w") as f:
+            f.write(body)
+        return os.path.join(d, ".company")
+
+    def test_warnings_alone_flags_warn_not_flat(self):
+        body = (
+            "## Daily run 2026-06-30T06:07:01\n"
+            "- decay --apply: scanned 10 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+            "- warnings: 1 (first 5: /x/corrupt.md: missing id)\n"
+            "- entropy 0.02 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.02) over 10 memories\n"
+            "- agent (consolidate/verify): ok\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-30", body)
+            table = rp.build(rp.collect(c))
+            self.assertEqual(table[0]["status"], "warn")
+            self.assertIn("1 warning", table[0]["desc"])
+
+    def test_warnings_AND_movement_together_still_warn_not_keep(self):
+        # THE regression Gibby reproduced: a stale file legitimately dropped
+        # (movement -> would be `keep`) in the SAME tick a corrupt file was
+        # flagged. verdict() must return `warn`, never `keep` — otherwise the
+        # corruption is invisible in the status field.
+        body = (
+            "## Daily run 2026-06-30T06:07:01\n"
+            "- decay --apply: scanned 10 | drop 3 | demote 1 | archive 0 | upgrade-candidates 2\n"
+            "- warnings: 1 (first 5: /x/corrupt.md: missing id)\n"
+            "- verify --apply: newly-verified 5 | already 0 | unverifiable 0\n"
+            "- entropy 0.01 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.01) over 10 memories\n"
+            "- agent (consolidate/verify): ok\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-30", body)
+            rows = rp.collect(c)
+            self.assertEqual(rows[0]["warnings"], 1)
+            self.assertTrue(rows[0]["drop"])                # movement present too
+            table = rp.build(rows)
+            self.assertEqual(table[0]["status"], "warn")    # NOT keep
+            # the movement still shows in the prose, alongside the warning
+            self.assertIn("decayed 3", table[0]["desc"])
+            self.assertIn("1 warning", table[0]["desc"])
+
+    def test_summed_across_decay_and_verify_warning_lines(self):
+        # Two "- warnings: N" lines in one block (decay's + verify's own,
+        # SHOULD-FIX 3a) sum — the verdict still just needs > 0.
+        body = (
+            "## Daily run 2026-06-30T06:07:01\n"
+            "- decay --apply: scanned 10 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+            "- warnings: 2 (first 5: a; b)\n"
+            "- verify --apply: newly-verified 0 | already 0 | unverifiable 0\n"
+            "- warnings: 1 (first 5: c)\n"
+            "- entropy 0.02 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.02) over 10 memories\n"
+            "- agent (consolidate/verify): ok\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-30", body)
+            rows = rp.collect(c)
+            self.assertEqual(rows[0]["warnings"], 3)
+            self.assertEqual(rp.verdict(rows[0], None), "warn")
+
+    def test_clean_run_warnings_zero_stays_flat(self):
+        body = (
+            "## Daily run 2026-06-30T06:07:01\n"
+            "- decay --apply: scanned 10 | drop 0 | demote 0 | archive 0 | upgrade-candidates 0\n"
+            "- warnings: 0\n"
+            "- entropy 0.02 (dup 0.0 | contra 0.0 | stale 0.0 | unverified 0.02) over 10 memories\n"
+            "- agent (consolidate/verify): ok\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with(d, "2026-06-30", body)
+            table = rp.build(rp.collect(c))
+            self.assertEqual(table[0]["status"], "flat")
+
+
 if __name__ == "__main__":
     unittest.main()
