@@ -558,6 +558,51 @@ class TestKeywordFallbackDistinguishesEmptyFromUnparseable(unittest.TestCase):
         self.assertEqual(out, [], "a real (non-Latin) prompt must never take the recency fallback")
 
 
+class TestLoneTokenKeywordGate(unittest.TestCase):
+    """Phase 24 R3 MUST-FIX 1 (deps-free): the three-part lone-token gate that
+    stops a single incidental word from injecting on the no-venv keyword path.
+    A shared PAIR of tokens always clears; a lone token must be corpus-rare (IDF),
+    present in the BODY (not just the slug), long enough, and not a function word."""
+
+    @staticmethod
+    def _c(id_, body, category="", rc=2):
+        fm = {"id": id_, "reinforce_count": rc, "category": category,
+              "last_reinforced": "2026-01-01"}
+        return ("L2", fm, body, f"/mem/{id_}.md")
+
+    def test_lone_content_token_still_injects(self):
+        # A rare, body-present, >=5-char content word on its own IS real signal.
+        cands = [self._c("editor-pref", "The Chairman prefers the Neovim editor.")]
+        out = hmi.rank("set up my neovim workspace", cands)
+        self.assertEqual(len(out), 1, "a lone rare content token must still inject")
+
+    def test_lone_slug_only_token_gated(self):
+        # 'rules' appears only in the id/slug, never the body -> body-substance
+        # gate drops it ("rules of cricket" must not hit git-identity-rules).
+        cands = [self._c("git-identity-rules", "Keep the existing git identity; no attribution trailers.")]
+        self.assertEqual(hmi.rank("what are the rules of cricket", cands), [])
+
+    def test_lone_short_common_word_gated(self):
+        # 'red' is in the body ('red-team') but < LONE_MIN_LEN -> gated; a small
+        # corpus can't see it as common via IDF, so the length floor catches it.
+        cands = [self._c("verify", "Always red-team every implementation before shipping.")]
+        self.assertEqual(hmi.rank("how to get a red wine stain out", cands), [])
+
+    def test_lone_corpus_common_token_gated(self):
+        # A token in MANY memories is not discriminative: a lone match on it is
+        # noise. Build a corpus where 'system' appears in > LONE_MAX_DF_RATIO of memories.
+        cands = [self._c(f"m{i}", f"Note {i} about the build system and workflow.")
+                 for i in range(10)]
+        # 'system' is in all 10 -> df ratio 1.0 >> cap -> a lone 'system' match is gated.
+        self.assertEqual(hmi.rank("how does the solar system work", cands), [])
+
+    def test_multi_token_overlap_always_clears(self):
+        # Two shared meaningful tokens is real signal regardless of the gate.
+        cands = [self._c("chinese", "Reply to the Chairman in Traditional Chinese.")]
+        out = hmi.rank("what language should replies to the chairman use chinese", cands)
+        self.assertEqual(len(out), 1)
+
+
 @unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
 class TestMultilingualRelevanceGate(unittest.TestCase):
     """Phase 24 Item 2 — the hook's relevance-gate contract ("nothing above the
@@ -697,7 +742,7 @@ _REALISTIC_CORPUS = [
     ("approval-gate", "Structural changes need Elon sign-off; routine persona tweaks within scope do not require approval."),
     ("rag-connect", "The RAG index should be connected into the pipeline, never deleted; it is a derivative of markdown truth."),
     ("sub-agent-isolation", "Dispatches build work to employee subagents; Bob builds and Gibby attacks in separate isolated agents."),
-    ("four-daily-runs", "Runs the company loop four times daily on a cron schedule to keep memory consolidation fresh."),
+    ("four-daily-runs", "Runs the company loop four times daily via cron to keep memory consolidation fresh."),
     ("token-budget", "Watches token cost across sub-companies; a holding orchestrator manages children instead of many crons."),
     ("permission-minimal", "Prefers minimal permission overhead and least-privilege capability slices for each employee."),
     ("repo-scoped", "The skill is repo-scoped; company memory stays private under a gitignored directory, never pushed."),
@@ -713,14 +758,15 @@ _REALISTIC_CORPUS = [
     ("improvement-solicit", "Solicits improvement proposals before big decisions, expecting grounded metrics rather than gut calls."),
     ("decay-tiers", "Memory decays across L0, L1, and L2 tiers; durable identity-level facts are promoted to the cold tier."),
     ("supervisor-dispatch", "Autonomous dispatch flows through the supervisor, injecting standing directives into headless workers."),
-    ("charter-authority", "Charter-level rules carry standing authority and supersede one-off instructions unless explicitly revoked."),
-    ("scheduled-reports", "Tom produces a scheduled daily report so the Chairman can review company activity at a glance."),
+    ("charter-authority", "Charter-level directives carry standing authority and supersede one-off instructions unless explicitly revoked."),
+    ("scheduled-reports", "Tom produces a daily report so the Chairman can review company activity at a glance."),
 ]
 
-# Off-topic English probes whose ONLY possible token overlap with the corpus is a
-# generic connector (change / without / make / good / …), all of which the
-# hardened stoplist + specificity gate must treat as noise. These are exactly the
-# class of prompt Gibby reproduced injecting on the real corpus.
+# Gibby's 25 off-topic English probes (R2/R3). Genuinely unrelated to the corpus;
+# the only possible token overlaps are generic function words / short common
+# English words (change / rules / between / red / long / stay / day / …) — none of
+# which the R3 keyword gate (corpus-IDF rarity + body-substance + length floor +
+# function-word stoplist) may treat as relevance.
 _OFFTOPIC_EN = [
     "How do I change a flat tire on a mountain bike?",
     "What's a good recipe for mushroom risotto?",
@@ -730,6 +776,23 @@ _OFFTOPIC_EN = [
     "What's the best way to brew espresso at home?",
     "Which planets in the solar system have rings?",
     "How long should I roast a whole chicken?",
+    "How should I schedule my morning gym workout?",
+    "What's the difference between a latte and a cappuccino?",
+    "How do I train my puppy to sit and stay?",
+    "What are the rules of cricket?",
+    "How do I fold a fitted bed sheet neatly?",
+    "What's a good beginner hike near the mountains?",
+    "How do I keep basil plants alive indoors?",
+    "What's the capital city of Australia?",
+    "How do I tie a bow tie for a wedding?",
+    "What temperature should I set my fridge to?",
+    "How do I remove a splinter from my finger?",
+    "What's a fun board game for four players?",
+    "How do I make a paper airplane that flies far?",
+    "What causes the northern lights?",
+    "How much water should I drink each day?",
+    "What's the best way to organize my sock drawer?",
+    "How do I whistle with my fingers?",
 ]
 
 # On-topic English probes that MUST still inject (guard against over-tightening).
