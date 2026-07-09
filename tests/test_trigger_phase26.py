@@ -60,9 +60,14 @@ TRIGGERS = {
     # untrusted, dedupe ON (default) — to prove a rejected payload can't
     # poison dedupe against a later distinct valid one.
     "dedupe_on": "name: dedupe_on\naction: x\ncondition:\ncooldown: 0\n",
-    # require_confirm gate.
+    # require_confirm gate (untrusted, the default).
     "payout": "name: payout\naction: wire the payout\ncondition:\ncooldown: 0\n"
               "dedupe: false\nrequire_confirm: true\n",
+    # require_confirm on a TRUSTED trigger — the spec's own money-moving example
+    # is trusted; the confirm gate must still hold it (GIB re-attack MUST-FIX 1).
+    "payout_trusted": "name: payout_trusted\naction: wire the payout\ncondition:\n"
+                      "cooldown: 0\ndedupe: false\nsource_trust: trusted\n"
+                      "require_confirm: true\n",
     # a plain cap=3 trigger for the concurrency re-proof.
     "cap3": "name: cap3\naction: x\ncondition:\ncooldown: 0\ndedupe: false\n"
             "max_fires_per_day: 3\n",
@@ -147,7 +152,9 @@ class TestItem2HonestHold(unittest.TestCase):
             rc, out, _ = _run(d, "payout", json.dumps({"amount": 100}))
             self.assertEqual(rc, 0)
             self.assertIn("held: require_confirm", out)
-            self.assertIn("manual dispatch required", out)
+            self.assertIn("held for manual dispatch", out)
+            # honest: no fake recovery flag is advertised (MUST-FIX 3)
+            self.assertNotIn("confirm-override", out)
             # no state committed
             self.assertIsNone(_state(d, "payout"))
             # no pending-file artifact anywhere under ops/triggers
@@ -159,6 +166,36 @@ class TestItem2HonestHold(unittest.TestCase):
             # dedupe against — it never got recorded the first time)
             rc, out, _ = _run(d, "payout", json.dumps({"amount": 100}))
             self.assertIn("held: require_confirm", out)
+
+    def test_require_confirm_holds_for_TRUSTED_trigger(self):
+        # GIB re-attack MUST-FIX 1 (CRITICAL): a source_trust: trusted trigger
+        # with require_confirm: true must STILL hold — the confirm gate is not
+        # trust-gated. Previously the check lived inside the untrusted branch,
+        # so a trusted money-mover fired immediately with state committed.
+        with tempfile.TemporaryDirectory() as d:
+            _company(d, TRIGGERS)
+            rc, out, _ = _run(d, "payout_trusted", json.dumps({"amount": 100000}))
+            self.assertEqual(rc, 0)
+            self.assertIn("held: require_confirm", out)
+            self.assertNotIn("fired", out)
+            # consumed nothing: no cap/cooldown/dedupe state committed
+            self.assertIsNone(_state(d, "payout_trusted"))
+
+    def test_require_confirm_trusted_holds_even_with_spawn(self):
+        # Belt-and-suspenders: without --no-spawn (default dispatch path) the
+        # trusted confirm trigger must hold BEFORE reaching the trusted direct-
+        # dispatch route. Use --emit-prompt to prove no dispatch prompt is built.
+        with tempfile.TemporaryDirectory() as d:
+            _company(d, TRIGGERS)
+            env = {**os.environ, "SELF_COMPANY_PROJECT_DIR": d}
+            p = subprocess.run(
+                ["bash", FIRE_SH, "payout_trusted",
+                 json.dumps({"amount": 100000}), "--emit-prompt"],
+                capture_output=True, text=True, env=env)
+            # held before any prompt is emitted — no TRUSTED dispatch prompt
+            self.assertIn("held: require_confirm", p.stdout)
+            self.assertNotIn("TRUSTED internal source", p.stdout)
+            self.assertIsNone(_state(d, "payout_trusted"))
 
 
 if __name__ == "__main__":

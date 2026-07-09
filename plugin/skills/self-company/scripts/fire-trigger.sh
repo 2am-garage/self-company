@@ -105,7 +105,23 @@ if [[ "$FIRE" != "true" ]]; then
   exit 0
 fi
 
-# 2. UNTRUSTED sources: the tool-less STAGE-1 parse runs BEFORE any state is
+# 2. require_confirm gate — applies REGARDLESS of source_trust (GIB re-attack
+#    MUST-FIX 1). This is the highest-risk gate (the money-moving "payout"
+#    example is itself a TRUSTED trigger); trust only gates the parse->act
+#    two-stage path below, NEVER the confirm gate. Item 2 (Elon: option b):
+#    require_confirm is a deterministic HOLD-for-manual, not an approval queue
+#    — no state consumed, no pending-file artifact. A real approval workflow
+#    (queue + list + resolve + notify) is a later, separate feature. There is
+#    deliberately NO recovery flag today (an advertised `--confirm-override`
+#    that silently no-ops would be worse than none) — the honest message says
+#    exactly what is and isn't there.
+if [[ "$CONFIRM" == "true" ]]; then
+  REASON="require_confirm"; ledger_row "held"
+  echo "[fire-trigger] held: require_confirm — held for manual dispatch; approval workflow planned (no auto-dispatch): $NAME"
+  exit 0
+fi
+
+# 2b. UNTRUSTED sources: the tool-less STAGE-1 parse runs BEFORE any state is
 #    touched (Item 4's privilege separation, now correctly ordered ahead of
 #    commit — Item 1). Anything off-schema HOLDS having consumed NOTHING: no
 #    cap slot, no cooldown/dedupe update, no artifact on disk.
@@ -132,16 +148,6 @@ PY
 )"
     REASON="held_schema"; ledger_row "held"
     echo "[fire-trigger] held (schema): $NAME ($HOLD_REASON)"
-    exit 0
-  fi
-  if [[ "$CONFIRM" == "true" ]]; then
-    # Item 2 (Elon: option b — ship the honest HOLD now). require_confirm is
-    # NOT an approval-queue gate today: it is a deterministic HOLD with a
-    # clear manual-dispatch instruction. No pending-file artifact (nothing
-    # reads it), no state consumed. A real approval workflow (queue + list +
-    # resolve + notify) is a later, separate feature.
-    REASON="require_confirm"; ledger_row "held"
-    echo "[fire-trigger] held: require_confirm — manual dispatch required (fire-trigger.sh $NAME '$PAYLOAD' --confirm-override …): $NAME"
     exit 0
   fi
 fi

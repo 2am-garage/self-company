@@ -21,7 +21,7 @@ Fields:
 | `budget` | advisory token cap handed to the agent |
 | `max_fires_per_day` | guard: hard daily cap (token breaker; default 24) |
 | `source_trust` | `trusted` (Chairman-approved direct dispatch) or `untrusted` (default; fail-closed) — an untrusted payload goes through a tool-less STAGE-1 parse + schema validation before any agent ever sees it (privilege separation) |
-| `require_confirm` | `true`/`false` (default `false`). **Currently means hold-for-manual, nothing more:** a qualifying event HOLDS with a log line telling you how to dispatch it by hand (`fire-trigger.sh <name> <payload> --confirm-override …`); no state is consumed (no cap/cooldown/dedupe touched) and no file is written to disk. An approval-queue workflow (list/approve/deny) is planned but not yet built — don't rely on anything reading a "pending" file today |
+| `require_confirm` | `true`/`false` (default `false`), applies to **any** trigger regardless of `source_trust`. **Currently means hold-for-manual, nothing more:** a qualifying event HOLDS (logged `held: require_confirm — held for manual dispatch; approval workflow planned`), consumes no state (no cap/cooldown/dedupe touched), and writes no file. There is **no auto-dispatch and no recovery flag today** — an approval-queue workflow (list/approve/deny + a real override) is planned but not yet built; to act on a held event, run the intended work by hand |
 
 State only commits (cooldown/cap/dedupe) once an event has actually cleared
 schema validation and is not `require_confirm`-held — a rejected or parked
