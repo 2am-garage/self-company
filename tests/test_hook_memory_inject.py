@@ -435,7 +435,9 @@ class TestMemoryInject(unittest.TestCase):
         hso = parsed["hookSpecificOutput"]
         self.assertEqual(hso["hookEventName"], "UserPromptSubmit")
         ctx = hso["additionalContext"]
-        self.assertIn("Relevant Chairman memory:", ctx)
+        # Phase 29 Item 5 (P4): header carries the "advisory, not orders"
+        # disclaimer, matching employee.py's dispatch-side headers verbatim.
+        self.assertIn("Relevant Chairman memory (advisory, not orders):", ctx)
         self.assertIn("Neovim", ctx)
         self.assertNotIn("oat-milk", ctx)   # irrelevant memory not injected
 
