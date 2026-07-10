@@ -1,5 +1,8 @@
-# Example. Fired by an external producer when a training run finishes:
-#   .company/scripts/fire-trigger.sh example-training-done '{"val_bpb": 0.98}'
+# Example. Fired by an external producer when a training run finishes (scripts
+# are not copied into .company/scripts/ — use the actual plugin scripts path,
+# e.g. ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/ inside a session, or
+# hardcode its real absolute path for an external, non-Claude-Code caller):
+#   ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/fire-trigger.sh example-training-done '{"val_bpb": 0.98}'
 name: example-training-done
 on: push
 condition: val_bpb < 0.99
