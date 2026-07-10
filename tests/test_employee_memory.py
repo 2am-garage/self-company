@@ -217,6 +217,15 @@ class TestRemember(unittest.TestCase):
         self.assertIsNone(self.emp.remember(""))
         self.assertEqual(self._files(self.emp), [])
 
+    def test_non_string_input_rejected_no_junk_file(self):
+        # Phase 24 MUST-FIX 2: non-str input must be skipped, never written as
+        # str(text) junk ("None" / "12345" / "['a', 'b']"). No raise, no file.
+        for bad in (None, 12345, ["a", "b"], {"k": "v"}, 3.14, object()):
+            self.assertIsNone(self.emp.remember(bad),
+                              f"remember({bad!r}) should return None")
+        self.assertEqual(self._files(self.emp), [],
+                         "no memory file may be written for non-string input")
+
     def test_creates_dir_on_first_write(self):
         self.assertFalse(self.emp.memory_dir.exists())
         self.emp.remember("first ever memory")

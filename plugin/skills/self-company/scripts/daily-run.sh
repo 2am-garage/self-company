@@ -604,6 +604,13 @@ print("- rag-index: embedded {e} | skipped {s} | deleted-stale {d} | rows {t} "
       "(L1/L2 {c})".format(e=r.get("embedded", 0), s=r.get("skipped_unchanged", 0),
                            d=r.get("deleted_stale", 0), t=r.get("table_rows", 0),
                            c=r.get("l1_l2_count", 0)))
+# Phase 24 Item 1: surface a model-stamp-forced full rebuild explicitly — the
+# daily self-heal (Phase 12b pattern) that makes an embedding-model swap safe
+# for every existing install (plugin update lands -> next tick detects the
+# stamp mismatch -> rebuilds -> correct, no manual step).
+for w in (r.get("warnings") or []):
+    if "stamp mismatch" in w:
+        print(f"- rag-index: {w}")
 PY
     ;;
 esac

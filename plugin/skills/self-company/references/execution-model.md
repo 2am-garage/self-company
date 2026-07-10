@@ -203,7 +203,8 @@ directives. A `shared_memory_read` capability now wires that read INTO dispatch:
   about the employee's OWN store).
 - **`Employee.recall_shared(query)`** shells the SAME `rag_query.py` against the
   SHARED index (`<company>/memory/index`), applies the SAME cosine floor the
-  ask-time hook uses (`SELF_COMPANY_INJECT_RAG_MIN_SCORE`, default 0.30), and
+  ask-time hook uses (`SELF_COMPANY_INJECT_RAG_MIN_SCORE`, default 0.40 as of
+  Phase 24 R3's data-driven retune — highest floor keeping every on-topic hit), and
   **re-validates** every hit against the live shared files — dropping deleted or
   tombstoned (archived/absorbed/defunct) memories exactly like the hook. Degrades
   to `[]` on flag-off / no venv / empty index / timeout / any error.

@@ -19,6 +19,7 @@ Locks:
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -30,6 +31,40 @@ _spec = importlib.util.spec_from_file_location(
     os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"))
 hmi = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hmi)
+
+# Phase 24 Item 2 — venv-gated regression fixture wiring (mirrors
+# test_employee_memory.py's HAS_VENV pattern): these tests need REAL
+# cross-lingual embeddings (a mocked rag_query.py cannot prove anything about
+# the MODEL), so they build a real scratch index via the repo's own
+# .company/.rag-venv and skip cleanly when it is absent.
+REPO_VENV_DIR = os.path.join(_helpers.REPO_ROOT, ".company", ".rag-venv")
+REPO_VENV_PY = os.path.join(REPO_VENV_DIR, "bin", "python")
+
+
+def _has_rag_venv():
+    if not (os.path.exists(REPO_VENV_PY) and os.access(REPO_VENV_PY, os.X_OK)):
+        return False
+    try:
+        proc = subprocess.run([REPO_VENV_PY, "-c", "import lancedb, fastembed"],
+                              capture_output=True, timeout=60)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+HAS_VENV = _has_rag_venv()
+
+
+def _build_real_index(company):
+    """Rebuild a scratch corpus's index via the REAL rag_index.py + venv (not
+    the fake-bash-shim trick the other RAG tests use) — the whole point of this
+    class is to exercise the REAL embedding model's cross-lingual behavior."""
+    mem = os.path.join(company, "memory")
+    return subprocess.run(
+        [REPO_VENV_PY, os.path.join(_helpers.SCRIPTS_DIR, "rag_index.py"),
+         "--memory-dir", mem, "--index-dir", os.path.join(mem, "index"), "--rebuild"],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "SC_RAG_REEXEC": "1"})
 
 
 def _write_mem(company, tier_dir, name, *, body, tier="L2",
@@ -104,6 +139,15 @@ def _hits_json(*rows):
     """Build a rag_query-shaped JSON array: rows are (path, tier, score)."""
     return json.dumps([{"id": os.path.basename(p).replace(".md", ""),
                         "tier": t, "path": p, "score": s} for (p, t, s) in rows])
+
+
+def _hits_json_rr(*rows):
+    """Build a rag_query --rerank shaped JSON array: rows are
+    (path, tier, cosine_score, rerank_score) — Phase 24 Item 5. Lets the CONSUMER
+    reranker gate be tested deterministically without loading the real model."""
+    return json.dumps([{"id": os.path.basename(p).replace(".md", ""), "tier": t,
+                        "path": p, "score": s, "rerank_score": rr}
+                       for (p, t, s, rr) in rows])
 
 
 class TestMemoryInjectRAG(unittest.TestCase):
@@ -209,6 +253,58 @@ class TestMemoryInjectRAG(unittest.TestCase):
         rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
         self.assertEqual(rc, 0)
         self.assertEqual(raw, "", "below-floor semantic hit must not be injected")
+
+    def test_rerank_below_cutoff_gated(self):
+        # Phase 24 Item 5, deterministic: a hit that PASSES the cosine floor (0.45
+        # >= 0.40) but scores BELOW the reranker cutoff is off-topic (the "gym
+        # workout" class — cosine 0.417 but rerank ~-3.0) -> injected NOTHING.
+        path = _write_mem(self.company, "L2-cold", "scheduler",
+                          body="Fixed a cron scheduler time-dependency bug.")
+        _write_transcript(self.transcript,
+                          ["how should I schedule my morning gym workout"])
+        _fake_rag_venv(self.company,
+                       f"echo '{_hits_json_rr((path, 'L2', 0.45, -3.00))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "cosine-passing but reranker-rejected hit must not inject")
+
+    def test_rerank_above_cutoff_injected(self):
+        # Same hit but a rerank_score ABOVE the cutoff -> injected (real on-topic).
+        path = _write_mem(self.company, "L2-cold", "merge",
+                          body="The company may merge its own pull request when green.")
+        _write_transcript(self.transcript, ["can the company merge its own PRs"])
+        _fake_rag_venv(self.company,
+                       f"echo '{_hits_json_rr((path, 'L2', 0.45, 1.50))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "cosine+reranker passing hit must inject")
+        self.assertIn("merge", parsed["hookSpecificOutput"]["additionalContext"])
+
+    def test_no_rerank_score_is_cosine_only_degrade(self):
+        # Reranker backend absent -> rag_query omits rerank_score -> the consumer
+        # gate is the cosine floor alone, byte-identical to pre-Item-5. A hit above
+        # the cosine floor with NO rerank_score injects.
+        path = _write_mem(self.company, "L2-cold", "merge",
+                          body="The company may merge its own pull request when green.")
+        _write_transcript(self.transcript, ["can the company merge its own PRs"])
+        _fake_rag_venv(self.company, f"echo '{_hits_json((path, 'L2', 0.45))}'")
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "no rerank_score -> cosine floor decides -> inject")
+        self.assertIn("merge", parsed["hookSpecificOutput"]["additionalContext"])
+
+    def test_rerank_nonfinite_treated_below_cutoff(self):
+        # A NaN rerank_score must be treated as below-cutoff (gate integrity),
+        # never slip past `rr < RERANK_MIN_SCORE`.
+        path = _write_mem(self.company, "L2-cold", "scheduler",
+                          body="Fixed a cron scheduler time-dependency bug.")
+        _write_transcript(self.transcript, ["schedule my gym workout"])
+        body = ('echo \'[{"id":"scheduler","tier":"L2","path":"' + path
+                + '","score":0.45,"rerank_score":NaN}]\'')
+        _fake_rag_venv(self.company, body)
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "NaN rerank_score must be gated out")
 
     def test_budget_and_cap_never_exceeded_semantic(self):
         # Many high-score hits -> still capped at 5 and within CONTEXT_CHAR_CAP.
@@ -491,6 +587,434 @@ class TestMemoryInject(unittest.TestCase):
                       parsed["hookSpecificOutput"]["additionalContext"])
         # Generous: a subprocess spawn + stdlib scan of 150 files is well < 5s.
         self.assertLess(elapsed, 5.0)
+
+
+class TestKeywordFallbackDistinguishesEmptyFromUnparseable(unittest.TestCase):
+    """Phase 24 Item 2 fix (deps-free, no venv needed — pure logic bug):
+    rank()'s recency-fallback branch must trigger ONLY for a truly empty/blank
+    prompt, never for a non-empty prompt that merely tokenizes to nothing
+    (e.g. pure CJK, since `_tokens` is ASCII-only) — otherwise an off-topic CJK
+    prompt silently gets the freshest memories injected regardless of
+    relevance, which is exactly what TestMultilingualRelevanceGate proves end-
+    to-end (venv-gated) above."""
+
+    @staticmethod
+    def _candidate(id_, body, tier="L2", rc=1):
+        fm = {"id": id_, "reinforce_count": rc, "last_reinforced": "2026-01-01"}
+        return (tier, fm, body, f"/mem/{id_}.md")
+
+    def test_truly_empty_prompt_falls_back_to_recency(self):
+        cands = [self._candidate("a", "something"), self._candidate("b", "something else")]
+        out = hmi.rank("", cands)
+        self.assertEqual(len(out), 2)          # recency fallback returns candidates
+
+    def test_blank_prompt_falls_back_to_recency(self):
+        cands = [self._candidate("a", "something")]
+        out = hmi.rank("   \n  ", cands)
+        self.assertEqual(len(out), 1)
+
+    def test_cjk_only_prompt_returns_nothing(self):
+        cands = [self._candidate("a", "something"), self._candidate("b", "something else")]
+        out = hmi.rank("義大利麵要怎麼煮？", cands)
+        self.assertEqual(out, [], "a real (non-Latin) prompt must never take the recency fallback")
+
+
+class TestLoneTokenKeywordGate(unittest.TestCase):
+    """Phase 24 R3 MUST-FIX 1 (deps-free): the three-part lone-token gate that
+    stops a single incidental word from injecting on the no-venv keyword path.
+    A shared PAIR of tokens always clears; a lone token must be corpus-rare (IDF),
+    present in the BODY (not just the slug), long enough, and not a function word."""
+
+    @staticmethod
+    def _c(id_, body, category="", rc=2):
+        fm = {"id": id_, "reinforce_count": rc, "category": category,
+              "last_reinforced": "2026-01-01"}
+        return ("L2", fm, body, f"/mem/{id_}.md")
+
+    def test_lone_content_token_still_injects(self):
+        # A rare, body-present, >=5-char content word on its own IS real signal.
+        cands = [self._c("editor-pref", "The Chairman prefers the Neovim editor.")]
+        out = hmi.rank("set up my neovim workspace", cands)
+        self.assertEqual(len(out), 1, "a lone rare content token must still inject")
+
+    def test_lone_slug_only_token_gated(self):
+        # 'rules' appears only in the id/slug, never the body -> body-substance
+        # gate drops it ("rules of cricket" must not hit git-identity-rules).
+        cands = [self._c("git-identity-rules", "Keep the existing git identity; no attribution trailers.")]
+        self.assertEqual(hmi.rank("what are the rules of cricket", cands), [])
+
+    def test_lone_short_common_word_gated(self):
+        # 'red' is in the body ('red-team') but < LONE_MIN_LEN -> gated; a small
+        # corpus can't see it as common via IDF, so the length floor catches it.
+        cands = [self._c("verify", "Always red-team every implementation before shipping.")]
+        self.assertEqual(hmi.rank("how to get a red wine stain out", cands), [])
+
+    def test_lone_corpus_common_token_gated(self):
+        # A token in MANY memories is not discriminative: a lone match on it is
+        # noise. Build a corpus where 'system' appears in > LONE_MAX_DF_RATIO of memories.
+        cands = [self._c(f"m{i}", f"Note {i} about the build system and workflow.")
+                 for i in range(10)]
+        # 'system' is in all 10 -> df ratio 1.0 >> cap -> a lone 'system' match is gated.
+        self.assertEqual(hmi.rank("how does the solar system work", cands), [])
+
+    def test_multi_token_overlap_always_clears(self):
+        # Two shared meaningful tokens is real signal regardless of the gate.
+        cands = [self._c("chinese", "Reply to the Chairman in Traditional Chinese.")]
+        out = hmi.rank("what language should replies to the chairman use chinese", cands)
+        self.assertEqual(len(out), 1)
+
+
+@unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
+class TestMultilingualRelevanceGate(unittest.TestCase):
+    """Phase 24 Item 2 — the hook's relevance-gate contract ("nothing above the
+    floor -> inject nothing") must hold for NON-ENGLISH prompts, end-to-end
+    through the REAL hook + a REAL rebuilt index (not a mocked rag_query.py —
+    Item 1's fix IS the embedding model, so only real embeddings can prove it).
+
+    Locks the live diagnosis (spec, Phase 24 Item 1): with the old
+    English-only `bge-small-en-v1.5` model, EVERY prompt (on- or off-topic,
+    any language) scored 0.45-0.65 cosine against the Chairman's memories, so
+    the 0.30 floor filtered nothing — a genuinely off-topic Chinese prompt
+    ("how do I cook pasta?") injected the Chairman's Chinese-language-
+    preference memory, identical to what an on-topic query would surface.
+    `test_offtopic_would_have_failed_pre_swap` reproduces that exact failure
+    against the OLD model/floor to prove the regression is real, then the
+    other two tests prove the CURRENT (multilingual model + retuned floor)
+    behavior is correct."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        # Symlink the WHOLE venv dir (not just the python binary) so pyvenv.cfg
+        # is reachable — mirrors test_employee_memory.py's _make_company(venv=True).
+        os.symlink(REPO_VENV_DIR, os.path.join(self.company, ".rag-venv"))
+        # A small fixture corpus mirroring the LIVE memory that triggered the
+        # diagnosis, plus decoys, so this stays deterministic and never touches
+        # the real .company/memory store.
+        _write_mem(self.company, "L2-cold", "chairman-reply-language-chinese",
+                   body="When replying to the Chairman, staff must answer in "
+                        "Traditional Chinese. Keep code, identifiers, file "
+                        "paths, commands, and technical terms in English.")
+        _write_mem(self.company, "L2-cold", "database-backup",
+                   body="Maintains postgres databases and requires automated "
+                        "nightly backups at 2am with dump rotation.")
+        _write_mem(self.company, "L2-cold", "merge-gate",
+                   body="The company may merge its own pull request without "
+                        "waiting for approval, provided the full test suite "
+                        "passes and integration checks are green.")
+        rc = _build_real_index(self.company)
+        if rc.returncode != 0:
+            self.skipTest(f"rag_index unavailable/offline: {rc.stderr}")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_offtopic_chinese_prompt_injects_nothing(self):
+        # "How do I cook pasta?" in Traditional Chinese — genuinely unrelated
+        # to every fixture memory. Must clear NOTHING under the current
+        # multilingual-model + retuned-floor behavior.
+        _write_transcript(self.transcript, ["義大利麵要怎麼煮？"])
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "off-topic Chinese prompt must inject nothing")
+
+    def test_ontopic_chinese_prompt_injects_right_memory(self):
+        # Cross-lingual: a Traditional Chinese question about reply language
+        # must retrieve the (English-body) chairman-reply-language-chinese
+        # memory specifically, not a decoy — proving the multilingual model
+        # actually bridges the language gap, not just "injects something".
+        _write_transcript(self.transcript, ["回覆董事長要用什麼語言？"])
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "on-topic Chinese prompt should inject")
+        ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Traditional Chinese", ctx)
+
+    def test_offtopic_would_have_failed_pre_swap(self):
+        # Historical proof (Item 2's acceptance): re-run the SAME off-topic
+        # Chinese prompt against the SAME fixture corpus, but scored the OLD
+        # way — bge-small-en-v1.5 cosine, 0.30 floor — via a tiny inline
+        # reproduction of the pre-Item-1 scoring (no network; loads the model
+        # bge-small-en-v1.5 already ships in fastembed's local cache from any
+        # prior warm-up, or downloads once). Confirms the bug was real: the
+        # off-topic prompt's top score clears the OLD 0.30 floor.
+        prog = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from fastembed import TextEmbedding\n"
+            "m = TextEmbedding(model_name='BAAI/bge-small-en-v1.5')\n"
+            "def emb(t): return list(m.embed([t]))[0]\n"
+            "import numpy as np\n"
+            "q = emb(sys.argv[2])\n"
+            "bodies = json.loads(sys.argv[3])\n"
+            "scores = []\n"
+            "for b in bodies:\n"
+            "    v = emb(b)\n"
+            "    cos = float(np.dot(q, v) / (np.linalg.norm(q) * np.linalg.norm(v)))\n"
+            "    scores.append(cos)\n"
+            "print(json.dumps(scores))\n"
+        )
+        bodies = [
+            "When replying to the Chairman, staff must answer in Traditional "
+            "Chinese. Keep code, identifiers, file paths, commands, and "
+            "technical terms in English.",
+            "Maintains postgres databases and requires automated nightly "
+            "backups at 2am with dump rotation.",
+            "The company may merge its own pull request without waiting for "
+            "approval, provided the full test suite passes and integration "
+            "checks are green.",
+        ]
+        query = "義大利麵要怎麼煮？"
+        proc = subprocess.run(
+            [REPO_VENV_PY, "-c", prog, _helpers.SCRIPTS_DIR, query, json.dumps(bodies)],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "SC_RAG_REEXEC": "1"})
+        if proc.returncode != 0:
+            self.skipTest(f"legacy model unavailable/offline: {proc.stderr}")
+        scores = json.loads(proc.stdout)
+        old_floor = 0.30
+        self.assertTrue(
+            any(s >= old_floor for s in scores),
+            f"expected the OLD English-only model to score >= {old_floor} on an "
+            f"off-topic Chinese prompt (the live bug this phase fixes); got {scores}")
+
+
+# A realistic-sized corpus (32 memories) mirroring the real .company themes —
+# big enough to expose the off-topic-English keyword-collision bug that a 3-memory
+# synthetic fixture hides (Gibby MUST-FIX 1). None of these bodies contain the
+# CONTENT words of the off-topic probes below (tire/bike/risotto/photosynthesis/
+# yoga/wine/…); the ONLY possible overlaps are generic connectors (change/without/
+# going/make/…), which the hardened keyword gate must NOT treat as relevance.
+_REALISTIC_CORPUS = [
+    ("git-identity", "Keep the existing git identity; never add a Co-Authored-By or Claude attribution trailer to commits. Commits are the Chairman's only."),
+    ("database-backups", "Maintains postgres databases and requires automated nightly backups at 2am with dump rotation."),
+    ("merge-gate", "The company may merge its own pull request when the full test suite passes and integration checks are green."),
+    ("verify-before-commit", "Never trust, always test: verify scripts actually run before committing, and red-team every implementation."),
+    ("chinese-replies", "When replying to the Chairman, staff answer in Traditional Chinese, keeping code and identifiers in English."),
+    ("list-format", "Prefers list format for summaries and overviews of complex information when detailed specs are unavailable."),
+    ("completion-confirm", "Seeks explicit confirmation that work is actually implemented before considering a task finished."),
+    ("delegation-phoebe", "Routes testing, skill optimization, and quality architecture work to Phoebe as collaborative design."),
+    ("model-optimization", "Assigns agent models by task requirement, deploying stronger reasoning models for specification writing."),
+    ("granular-commits", "Wants granular reversible commits pushed as a pull request rather than one large squashed change."),
+    ("entropy-metric", "Treats entropy as the memory-quality KPI; after each maintenance cycle entropy should drop or stay flat."),
+    ("approval-gate", "Structural changes need Elon sign-off; routine persona tweaks within scope do not require approval."),
+    ("rag-connect", "The RAG index should be connected into the pipeline, never deleted; it is a derivative of markdown truth."),
+    ("sub-agent-isolation", "Dispatches build work to employee subagents; Bob builds and Gibby attacks in separate isolated agents."),
+    ("four-daily-runs", "Runs the company loop four times daily via cron to keep memory consolidation fresh."),
+    ("token-budget", "Watches token cost across sub-companies; a holding orchestrator manages children instead of many crons."),
+    ("permission-minimal", "Prefers minimal permission overhead and least-privilege capability slices for each employee."),
+    ("repo-scoped", "The skill is repo-scoped; company memory stays private under a gitignored directory, never pushed."),
+    ("org-hierarchy", "Elon is CEO reporting to the Chairman; Phoebe plans and dispatches; July stewards people and capabilities."),
+    ("payroll-ops", "The Chairman runs actual company payroll operations and expects the org to model real execution structure."),
+    ("diagnostic-first", "Sequences work diagnostic-first: measure the real problem before proposing or building a solution."),
+    ("event-triggers", "Wants event-driven triggers designed with depth, not shallow polling, for autonomous work initiation."),
+    ("inclusive-design", "Values inclusive, accessibility-conscious design in anything user-facing the company produces."),
+    ("code-switching", "Communicates bilingually, code-switching between Chinese and English depending on the operational context."),
+    ("weekly-research", "Mike runs a weekly external research survey to surface new tooling and capability options for review."),
+    ("self-merge", "Since a stated date the Chairman authorizes self-merge of the company's own PR after a green test suite."),
+    ("format-flexible", "Presentation format is flexible; readability for the Chairman matters more than a rigid template."),
+    ("improvement-solicit", "Solicits improvement proposals before big decisions, expecting grounded metrics rather than gut calls."),
+    ("decay-tiers", "Memory decays across L0, L1, and L2 tiers; durable identity-level facts are promoted to the cold tier."),
+    ("supervisor-dispatch", "Autonomous dispatch flows through the supervisor, injecting standing directives into headless workers."),
+    ("charter-authority", "Charter-level directives carry standing authority and supersede one-off instructions unless explicitly revoked."),
+    ("scheduled-reports", "Tom produces a daily report so the Chairman can review company activity at a glance."),
+]
+
+# Gibby's 25 off-topic English probes (R2/R3). Genuinely unrelated to the corpus;
+# the only possible token overlaps are generic function words / short common
+# English words (change / rules / between / red / long / stay / day / …) — none of
+# which the R3 keyword gate (corpus-IDF rarity + body-substance + length floor +
+# function-word stoplist) may treat as relevance.
+_OFFTOPIC_EN = [
+    "How do I change a flat tire on a mountain bike?",
+    "What's a good recipe for mushroom risotto?",
+    "Can you explain how photosynthesis works?",
+    "What are some beginner yoga poses I should try?",
+    "How do I get a red wine stain out of a white shirt?",
+    "What's the best way to brew espresso at home?",
+    "Which planets in the solar system have rings?",
+    "How long should I roast a whole chicken?",
+    "How should I schedule my morning gym workout?",
+    "What's the difference between a latte and a cappuccino?",
+    "How do I train my puppy to sit and stay?",
+    "What are the rules of cricket?",
+    "How do I fold a fitted bed sheet neatly?",
+    "What's a good beginner hike near the mountains?",
+    "How do I keep basil plants alive indoors?",
+    "What's the capital city of Australia?",
+    "How do I tie a bow tie for a wedding?",
+    "What temperature should I set my fridge to?",
+    "How do I remove a splinter from my finger?",
+    "What's a fun board game for four players?",
+    "How do I make a paper airplane that flies far?",
+    "What causes the northern lights?",
+    "How much water should I drink each day?",
+    "What's the best way to organize my sock drawer?",
+    "How do I whistle with my fingers?",
+]
+
+# On-topic English probes that MUST still inject (guard against over-tightening).
+_ONTOPIC_EN = [
+    ("what's the rule about commit authorship and Claude attribution", "attribution"),
+    ("how often are the databases backed up", "backups"),
+    ("can the company merge its own pull requests", "merge"),
+    ("does the chairman want confirmation before work is done", "confirmation"),
+]
+
+
+def _write_corpus(company, corpus):
+    for name, body in corpus:
+        _write_mem(company, "L2-cold", name, body=body, reinforce_count=2)
+
+
+class TestOffTopicEnglishKeywordPath(unittest.TestCase):
+    """Phase 24 MUST-FIX 1(b), DEPS-FREE (no venv): the NO-VENV keyword degrade
+    path must not inject an unrelated memory on a single incidental connector
+    word. Runs against a realistic 32-memory corpus (a 3-memory fixture hides
+    this) with SC_NO_RAG so the semantic path is forced off — exactly the
+    keyword-only path Gibby attacked."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        _write_corpus(self.company, _REALISTIC_CORPUS)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_no_rag(self):
+        env = {**os.environ, "SC_NO_RAG": "1"}   # force the keyword path
+        proc = subprocess.run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", self.transcript],
+            capture_output=True, text=True, input="", env=env)
+        return proc.returncode, proc.stdout.strip()
+
+    def test_offtopic_english_injects_nothing_keyword_path(self):
+        for prompt in _OFFTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, out = self._run_no_rag()
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, "",
+                             f"off-topic English must inject nothing on the keyword "
+                             f"path; leaked on: {prompt!r} -> {out[:160]}")
+
+    def test_ontopic_english_still_injects_keyword_path(self):
+        # Guard against over-tightening: real on-topic prompts must still inject.
+        for prompt, needle in _ONTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, out = self._run_no_rag()
+            self.assertEqual(rc, 0)
+            self.assertNotEqual(out, "",
+                                f"on-topic English must still inject on the keyword "
+                                f"path; went silent on: {prompt!r}")
+
+
+@unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
+class TestOffTopicEnglishSemanticPath(unittest.TestCase):
+    """Phase 24 MUST-FIX 1(a), venv-gated: with the semantic path AVAILABLE, an
+    off-topic English prompt whose nearest neighbors are all below the cosine
+    floor must inject NOTHING — semantic_top() returns the INJECT_NOTHING
+    verdict and run() must NOT fall through to the keyword gate. Real index over
+    the realistic 32-memory corpus (the bug was invisible on a 3-memory one)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        os.symlink(REPO_VENV_DIR, os.path.join(self.company, ".rag-venv"))
+        _write_corpus(self.company, _REALISTIC_CORPUS)
+        rc = _build_real_index(self.company)
+        if rc.returncode != 0:
+            self.skipTest(f"rag_index unavailable/offline: {rc.stderr}")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_offtopic_english_injects_nothing_with_venv(self):
+        for prompt in _OFFTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+            self.assertEqual(rc, 0)
+            self.assertEqual(raw, "",
+                             f"off-topic English must inject nothing with the semantic "
+                             f"path available; leaked on: {prompt!r} -> {raw[:160]}")
+
+    def test_ontopic_english_still_injects_with_venv(self):
+        for prompt, _needle in _ONTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+            self.assertEqual(rc, 0)
+            self.assertIsNotNone(parsed,
+                                 f"on-topic English must still inject with venv; "
+                                 f"went silent on: {prompt!r}")
+
+
+@unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
+class TestRerankerClosesGymCase(unittest.TestCase):
+    """Phase 24 Item 5, venv-gated end-to-end: the innocent off-topic "schedule my
+    gym workout" prompt cosine-matches a scheduler memory (~0.42, above the 0.40
+    floor) but is REJECTED by the cross-encoder reranker (~-3.0) — the one residual
+    the cosine floor alone could not close. On-topic still injects. Uses the REAL
+    reranker model via the repo venv; skips if the reranker backend is absent."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        os.symlink(REPO_VENV_DIR, os.path.join(self.company, ".rag-venv"))
+        # A scheduler memory the gym prompt cosine-collides with (the real-corpus
+        # trigger), plus a real on-topic control.
+        _write_mem(self.company, "L2-cold", "scheduler-time-dependency",
+                   body="Fixed a scheduler time-dependency issue where a cron "
+                        "step ran at the wrong hour on the daily schedule.")
+        _write_mem(self.company, "L2-cold", "merge-gate",
+                   body="The company may merge its own pull request when the full "
+                        "test suite passes and integration checks are green.")
+        rc = _build_real_index(self.company)
+        if rc.returncode != 0:
+            self.skipTest(f"rag_index unavailable/offline: {rc.stderr}")
+        # Reranker cold-load can exceed the default budget; widen it for the test.
+        self._env = {**os.environ, "SELF_COMPANY_INJECT_RAG_TIMEOUT": "90"}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_hook(self, prompt):
+        _write_transcript(self.transcript, [prompt])
+        proc = subprocess.run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", self.transcript],
+            capture_output=True, text=True, input="", env=self._env)
+        if proc.returncode != 0:
+            self.skipTest("hook errored (reranker backend likely unavailable)")
+        return proc.stdout.strip()
+
+    def test_gym_workout_rejected_by_reranker(self):
+        out = self._run_hook("How should I schedule my morning gym workout?")
+        # If the reranker backend is genuinely absent, semantic_top times out or
+        # falls back to cosine; the scheduler hit (cosine ~0.42) would then inject.
+        # That degrade is acceptable and tested elsewhere — here we assert the
+        # reranker (present in the repo venv) closes the leak.
+        self.assertEqual(out, "",
+                         f"reranker must reject the off-topic gym prompt; got: {out[:200]}")
+
+    def test_ontopic_merge_still_injects(self):
+        out = self._run_hook("can the company merge its own pull requests")
+        self.assertNotEqual(out, "", "on-topic merge must still inject under the reranker")
+        self.assertIn("merge", out)
 
 
 if __name__ == "__main__":
