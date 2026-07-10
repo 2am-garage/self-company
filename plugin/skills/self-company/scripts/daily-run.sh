@@ -173,10 +173,17 @@ if [[ -f "$COMPANY/org/schedule.yaml" && -f "$SCRIPTS/schedule_config.py" ]] \
     # here. Any parse failure (bad JSON, wrong schema, missing dict keys)
     # prints nothing -> _plan_vars stays empty -> the fail-open defaults above
     # are untouched.
-    _plan_vars="$(printf '%s' "$_PLAN_JSON" | python3 - <<'PY' 2>/dev/null
+    #
+    # `_PLAN_JSON` is passed as an ARGV string, not piped via stdin: `python3 -
+    # <<'PY'` already uses stdin to deliver the SCRIPT ITSELF (the heredoc), so
+    # a stdin pipe would never reach `sys.stdin` inside it — the same pattern
+    # every OTHER `python3 - ARGS <<'PY'` call in this file uses (they pass a
+    # PATH in argv and open() it themselves; this one is small enough to pass
+    # the JSON text directly).
+    _plan_vars="$(python3 - "$_PLAN_JSON" <<'PY' 2>/dev/null
 import json, shlex, sys
 try:
-    d = json.load(sys.stdin)
+    d = json.loads(sys.argv[1])
 except Exception:
     sys.exit(1)
 if not isinstance(d, dict) or d.get("schema") != 1:
@@ -874,16 +881,26 @@ fi
 # do NOT spend disk writing a new plan file either — the abort itself is what
 # needs surfacing, not a fresh todo. (The ledger below still runs: it is how
 # the abort becomes visible in report.py's ledger.)
-# Phase 27 MUST-FIX 3: capture the survey JSON to a temp file so we can BOTH
-# render the human line AND, if any core re-invocation timed out, set a JSONL
-# `survey` step outcome (never silently absorb a hung decay/verify/entropy).
+# Phase 27 MUST-FIX 3 / Phase 28 Item 1: capture the survey JSON to a temp
+# file so we can BOTH render the human line AND set a JSONL `survey` step
+# outcome (never silently absorb a hung/timed-out core step). Phase 28 Item 1
+# (Tony C1): feed the survey THIS tick's own $EOUT/$DOUT/$VOUT — the core's
+# temp files, still on disk (the EXIT trap at the top of this script hasn't
+# fired yet) — instead of letting it re-invoke entropy/decay/verify as fresh
+# subprocesses minutes later. `--no-recompute` makes that a hard contract:
+# entropy/decay/verify are invoked ZERO times by the survey. A step that was
+# gated off / timed out this tick left its $EOUT/$DOUT/$VOUT empty, which
+# elon_survey's fed-mode loader treats as `None` — degrades exactly like a
+# timed-out standalone recompute did, without ever spawning anything.
 SURVEY_STATE="skipped"   # skipped | ran | timeout — drives the JSONL survey step
 if (( CORE_ABORT )) && [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   echo "- elon survey: skipped — CORE ABORTED (no new plan file written to a low-disk filesystem)" >> "$LOG"
 elif [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   if _should_run survey; then
     SVOUT="$(mktemp)"
-    _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" >"$SVOUT" 2>>"$SERR" || true
+    _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" \
+        --entropy-json "$EOUT" --decay-json "$DOUT" --verify-json "$VOUT" \
+        --no-recompute >"$SVOUT" 2>>"$SERR" || true
     python3 - "$SVOUT" "$DATE" >> "$LOG" <<'PY' || echo "- elon survey: no output" >> "$LOG"
 import sys, json
 try:

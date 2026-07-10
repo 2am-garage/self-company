@@ -1278,6 +1278,83 @@ class TestItem4CoreStepTimeout(unittest.TestCase):
             subprocess.run(["rm", "-rf", d2])
 
 
+def _instrument_call_counter(d, script_name, counter_path):
+    """Insert a one-line side effect right after script_name's shebang that
+    appends one char to counter_path every time the script is executed as
+    __main__ — proves invocation COUNT without touching the script's real
+    behaviour (the rest of the file, and every line number after the insert,
+    is untouched; decay.py/verify_memory.py have no venv re-exec, so this
+    counts true process invocations 1:1)."""
+    path = os.path.join(d, "scripts", script_name)
+    with open(path) as f:
+        lines = f.readlines()
+    insert_at = 1 if lines and lines[0].startswith("#!") else 0
+    lines.insert(insert_at,
+                 "with open(%r, 'a') as _cc_f: _cc_f.write('x')\n" % counter_path)
+    with open(path, "w") as f:
+        f.writelines(lines)
+
+
+class TestItem1SurveyFedNoDoubleRun(unittest.TestCase):
+    """Phase 28 Item 1 (Tony C1): daily-run.sh feeds elon_survey the core's own
+    $EOUT/$DOUT/$VOUT (--no-recompute) instead of letting the survey re-invoke
+    decay/verify as fresh subprocesses minutes later. Net: each runs exactly
+    ONCE per tick, not twice."""
+
+    def test_decay_and_verify_invoked_exactly_once_per_tick(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            counters = {}
+            for name in ("decay.py", "verify_memory.py"):
+                cp = os.path.join(d, name + ".count")
+                open(cp, "w").close()
+                _instrument_call_counter(d, name, cp)
+                counters[name] = cp
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name, cp in counters.items():
+                with open(cp) as f:
+                    n = len(f.read())
+                self.assertEqual(n, 1, "%s invoked %d time(s), want exactly 1" % (name, n))
+            # The survey still reports real numbers from THIS tick's core output
+            # (not "no output" / an empty fed set) — the fed JSON actually fed it.
+            text = _read_log(company)
+            self.assertIn("- elon survey:", text)
+            self.assertNotIn("- elon survey: no output", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_gated_survey_step_still_never_recomputes(self):
+        # elon.survey gated off for this tick -> the survey block doesn't even
+        # run, so decay/verify (the CORE's own calls) still run exactly once
+        # each — never a fed-mode recompute sneaking in through the gate.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            org = os.path.join(company, "org")
+            os.makedirs(org, exist_ok=True)
+            with open(os.path.join(org, "schedule.yaml"), "w") as f:
+                f.write("elon: { cadence: on-trigger }\n")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            counters = {}
+            for name in ("decay.py", "verify_memory.py"):
+                cp = os.path.join(d, name + ".count")
+                open(cp, "w").close()
+                _instrument_call_counter(d, name, cp)
+                counters[name] = cp
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name, cp in counters.items():
+                with open(cp) as f:
+                    n = len(f.read())
+                self.assertEqual(n, 1, "%s invoked %d time(s), want exactly 1" % (name, n))
+            self.assertIn("gated off elon.survey", _read_log(company))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
 class TestItem5Prune(unittest.TestCase):
     """Phase 27 Item 5: age-prune wired into daily-run.sh's end-of-run."""
 
