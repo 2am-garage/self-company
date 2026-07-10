@@ -328,32 +328,44 @@ Two precision leaks were fixed after Gibby's red-team round 2, both about off-to
 1. **Corpus rarity (IDF):** `df(token) <= max(2, N · 0.25)` — a token common across the candidate memories is not discriminative, so a lone incidental match on it is noise (removes dominant-word collisions like "chairman"/"company" that scale up).
 2. **Body substance:** the token must appear in the memory's BODY, not merely its auto-generated id/slug (kills "rules" → git-identity-**rules**).
 3. **Length floor** (a NECESSARY, never sufficient, condition — this is NOT the earlier wrong "len≥5 ⇒ specific" heuristic): drops the short common-English words (red/long/stay/day) a 30-memory corpus is too small to see as common via IDF.
-   Plus the closed-class **function-word stoplist** (prepositions/conjunctions incl. before/between). Result: all 25 of Gibby's off-topic English prompts inject nothing on the keyword path; on-topic still injects. **Irreducible limit:** a `df==1` *general-English content word* that collides (an off-topic prompt sharing e.g. "database"/"schedule" with exactly one memory) cannot be told from a real topical match by any corpus-derived lexical rule — only semantics can. That is why the keyword path is a best-effort degrade and the semantic path is primary.
+   Plus the closed-class **function-word stoplist** (prepositions/conjunctions incl. before/between). Result: the IDF gate catches **common-word** collisions — the whole class that dominated the leaks (chairman/company/before/language/design/…), and it verifiably clears Gibby's 25 diagnostic off-topic prompts on the keyword path while on-topic still injects.
+
+   **Irreducible limit (be honest — this is inherent, not a bug):** a *rare* (`df==1`) general-English content word that collides with exactly one memory (an off-topic prompt sharing e.g. "database"/"schedule"/"memory" with one memory) is **indistinguishable** from a real topical match by any corpus-derived lexical rule — on a small corpus its document-frequency is identical to a genuine content word's. So the earlier "all 25 inject nothing on the keyword path" claim holds for the diagnostic set and for common-word collisions, but NOT as a general guarantee: a rare-content-word collision the diagnostic set didn't happen to contain can still slip through. Pure lexical matching cannot close this without semantics. That is why the keyword path is a **graceful floor**, not the precision layer — the semantic path (reranker) is where precision actually lives.
 
 **Semantic floor.** Retuned `SELF_COMPANY_INJECT_RAG_MIN_SCORE` 0.35 → **0.40** — the HIGHEST floor that still keeps EVERY on-topic diagnostic hit (lowest true-positive top-1 = `merge-gate` 0.419). Measured: EN hit@1 0.875, ZH hit@1 0.625 preserved; 24/25 off-topic English inject nothing on the semantic path.
 
-### The reranker — Item 5 (built; closes the last residual)
+### The reranker — Item 5 (built; a real precision layer, not a perfect gate)
 
-ONE innocent off-topic prompt — "How should I schedule my morning gym workout?" — scores **0.417** against a scheduler memory (on the word "schedule"), **inseparable** from `merge-gate`'s on-topic **0.419** by any cosine floor OR margin (their neighbour gaps are 0.060 vs 0.062). No cosine threshold splits them without dropping the real hit. The Chairman ungated **Item 5** (the gated cross-encoder reranker) to close it.
+The cosine floor alone could not reject the innocent off-topic prompt "How should I schedule my morning gym workout?" — it scores **0.417** against a scheduler memory (on the word "schedule"), **inseparable** from `merge-gate`'s on-topic **0.419** by any cosine threshold. The Chairman ungated **Item 5** (the gated cross-encoder reranker) — it reads the (query, document) PAIR jointly and scores the gym/scheduler pair **−2.998**, far below any real on-topic hit, so it closes THAT case cleanly. It is a large precision win, but — as measured below — **not a perfect separator**; see "Known limits" at the end of this section.
 
 **Model:** `jinaai/jina-reranker-v2-base-multilingual` via fastembed `TextCrossEncoder` (ONNX/CPU/offline; ships with the already-pinned `fastembed==0.8.0` — NO new dependency). Multilingual is required: the English-only ms-marco cross-encoder scores Chinese on-topic pairs negative and would suppress ZH recall. The shared seam is `rag_rerank.py` (lazy import, like `rag_embed.py`).
 
 **Mechanism:** `rag_query.py --rerank` OVER-retrieves the top ~20 by hybrid/vector, cross-encodes each candidate body (the `text` column from Item 4) against the query, sorts by reranker score, and adds a `rerank_score` per hit. The consumers (`hook_memory_inject.semantic_top`, `Employee.recall`/`recall_shared`) then inject a hit iff it clears **BOTH** the cosine floor (a cheap pre-filter, `RAG_MIN_SCORE` 0.40) **AND** the reranker cutoff — the reranker is the FINAL relevance gate.
 
-**Why the cosine pre-filter stays:** the reranker alone can't separate every case (the least-off off-topic "board game" reranks to −2.36, above the hardest on-topic "AI models" at −2.51). But `board game`'s **cosine is 0.285 < 0.40** — the floor already rejects it. The ONLY off-topic that reaches the reranker is `gym` (cosine 0.417), and its scheduler hit reranks to ~**−3.0**, well below the lowest cosine-passing on-topic (−2.51). So the two gates compose: cosine removes the bulk, the reranker removes the one cosine can't.
+**Why the cosine pre-filter stays:** the reranker alone can't separate every case (the least-off off-topic "board game" reranks to −2.36, above the hardest on-topic "AI models" at −2.51). But `board game`'s **cosine is 0.285 < 0.40** — the floor already rejects it. So the two gates **compose**: the cheap cosine floor removes the bulk of off-topic, and the reranker rejects clear off-topic that slips past cosine (like gym, cosine 0.417 / rerank −2.998). It is not a perfect separator — a boundary off-topic that both passes cosine AND reranks near the on-topic cluster can still inject (see "Known limits" below) — but each gate strictly reduces the false-positive rate the other leaves.
 
-**Data-driven cutoff `SELF_COMPANY_INJECT_RERANK_MIN_SCORE = -2.75`** — the midpoint of the gym(−3.0) ↔ AI-models(−2.51) gap (0.49 wide; gym rejected with 0.25 margin, every on-topic kept with 0.24).
+**Cutoff `SELF_COMPANY_INJECT_RERANK_MIN_SCORE = -2.75`** — the measured **best-separation** point, NOT a clean gap. On the diagnostic set the nearest off-topic (gym −2.998) and the lowest cosine-passing on-topic (AI-models −2.51) sit far apart, but that spacing is not representative: pushed harder, the two distributions **interleave near the boundary** — e.g. the off-topic "memory palace technique" reranks **−2.719** (its hit: the Chairman's persistent-memory memory) while a real on-topic hit sits at **−2.688**, a ~0.03 separation. So −2.75 is chosen to sit just below the cluster of real on-topic hits; it cannot be raised to catch every boundary off-topic without dropping real recall.
 
 **Measured (real corpus, after Item 5):**
-| Metric | cosine-only (R3) | + reranker (Item 5) |
-|---|---|---|
-| off-topic English inject-nothing | 24/25 | **25/25** (gym closed) |
-| EN hit@1 | 0.875 | 0.875 |
-| ZH hit@1 | 0.625 | **0.875** (reranker reorders ZH better) |
+| Metric | before Phase 24 | cosine-only (R3) | + reranker (Item 5) |
+|---|---|---|---|
+| EN hit@1 | 0.750 | 0.875 | **0.875** |
+| ZH hit@1 | 0.375 | 0.625 | **0.875** (reranker reorders ZH better) |
+| off-topic injection (diagnostic set) | frequent (~46%) | rare (24/25 clean) | **rare** (clear off-topic like gym closed) |
 
 **Latency:** the rerank of ~20 short pairs is ~0.15 s; the cost is the two ONNX model loads per subprocess (~5.4 s warm total). Within the 30 s hook budget; the recall/query timeout was raised 7 s → 15 s for margin, and `rag_setup.sh` warms both models so the first post-install call isn't a ~50 s cold load.
 
-**Graceful degrade (non-negotiable):** reranker backend absent / model-load or inference error / timeout → `rag_query` omits `rerank_score` and returns cosine order; the consumer's cosine floor alone decides — **byte-identical to the pre-Item-5 (24/25) state**. Never a hard dependency, never raises, never blocks.
+**Graceful degrade (non-negotiable):** reranker backend absent / model-load or inference error / timeout / **concurrent-RAG-load pressure** → `rag_query` omits `rerank_score` and returns cosine order; the consumer's cosine floor alone decides — **byte-identical to the pre-Item-5 state**. The reranker is a **precision layer, never load-bearing**: when it degrades, precision reverts to the cosine+IDF level (still the large multilingual-model win), never a crash and never a blocked prompt. Never a hard dependency, never raises.
+
+### Known limits / residual (measured, accepted — read before "improving" the threshold)
+
+The Phase 24 stack is a large, real win, but it has a **precision ceiling** on this small corpus, not a bug. No more cutoff-chasing: Gibby confirmed the off-topic/on-topic rerank distributions **interleave** near the boundary, so no single threshold cleanly separates "an off-topic prompt that shares a genuine concept word with one memory" from a real on-topic hit.
+
+- **Semantic path (venv present — the deploy path).** Dramatic improvement over the English-only baseline: ZH hit@1 0.375→0.875, EN 0.750→0.875, off-topic injection frequent→rare. The reranker cleanly rejects clear off-topic (gym −2.998). **Residual:** an off-topic prompt sharing ONE real concept word with a single memory can still occasionally inject — e.g. "memory palace technique" → the Chairman's persistent-memory memory (cosine 0.491, rerank −2.719, just above the −2.75 cutoff), whose rerank score interleaves with genuine on-topic hits (−2.688). Accepted as best-effort; −2.75 is the measured best-separation point, not a clean gap, and raising it would drop real recall.
+- **Keyword degrade path (no-venv / RAG hiccup).** The IDF gate catches common-word collisions; a rare (`df==1`) incidental content word colliding with one memory is irreducible for pure lexical matching (inherent — its corpus document-frequency is identical to a real content word's). This path is a graceful floor, not the precision layer.
+- **Reranker is precision-only, never load-bearing.** Under concurrent RAG load / resource pressure it can degrade to cosine-only (clean, documented, no crash); in that state precision reverts to the cosine+IDF level. Injection is always advisory context, never an instruction, so a residual false-positive is low-harm — the same best-effort posture as the memory-guard's documented limits.
+
+As the corpus grows and diversifies, the semantic separation should widen; re-measure before touching the cutoff.
 
 ### The migration mechanism — model-stamping
 

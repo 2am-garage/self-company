@@ -178,12 +178,16 @@ RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.40, float)
 # over-retrieved candidates and returns a `rerank_score` per hit (a joint
 # query-document relevance logit the bi-encoder cosine can't see). A hit then
 # injects iff it clears BOTH the cosine PRE-FILTER (RAG_MIN_SCORE) AND this reranker
-# cutoff — which is what finally rejects the "gym workout" case (its scheduler hit
-# passes cosine 0.417 but reranks to ~-3.0) while keeping every on-topic diagnostic
-# hit (lowest cosine-passing on-topic reranks to -2.51). DATA-DRIVEN cutoff -2.75 =
-# the midpoint of that 0.49 gap. When rag_query returns NO `rerank_score` (reranker
-# backend absent / model-load or inference error / timeout), this gate is skipped
-# and the cosine floor alone decides — byte-identical to the pre-Item-5 behavior.
+# cutoff — which is what rejects CLEAR off-topic like the "gym workout" case (its
+# scheduler hit passes cosine 0.417 but reranks to ~-3.0). DATA-DRIVEN cutoff -2.75
+# is the measured best-separation point (just below the on-topic cluster), NOT a
+# clean gap: the off-topic/on-topic rerank scores INTERLEAVE near the boundary (an
+# off-topic sharing one real concept word can rerank within ~0.03 of a genuine
+# on-topic hit), so this is a best-effort precision cutoff, not a perfect separator
+# — see references/rag.md "Known limits". When rag_query returns NO `rerank_score`
+# (reranker backend absent / model-load or inference error / timeout / concurrent-
+# load pressure), this gate is skipped and the cosine floor alone decides —
+# byte-identical to the pre-Item-5 behavior (precision-only, never load-bearing).
 RERANK_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RERANK_MIN_SCORE", -2.75, float)
 
 # Stopword set: the closed-class FUNCTION WORDS (articles, pronouns, prepositions,
