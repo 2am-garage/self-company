@@ -40,18 +40,20 @@ done
 [[ "${SELF_COMPANY_CRON:-}" == "1" ]] && IS_CRON=1
 
 COMPANY="$PROJECT_DIR/.company"
+# Phase 28 Item 4b (D6): scripts-dir precedence is the ONE shared lib
+# (agent_spawn.sh, same dir) — see its header for why every caller keeps this
+# exact bootstrap instead of the lib resolving its own dir. daily-run.sh
+# adopts ONLY bin-resolution/auth/scripts-dir from this lib (below); its own
+# setsid+watchdog+lock-fd headless-agent spawn topology is P25-hardened and
+# does NOT move here (Elon's explicit instruction).
+_SC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=agent_spawn.sh
+source "$_SC_LIB_DIR/agent_spawn.sh"
 # Resolve the scripts dir (code/data separation): run the CANONICAL scripts, not a
 # .company/scripts copy. Precedence: plugin root -> own dir -> legacy .company/scripts.
 # The legacy fallback (B1 safety net) only kicks in if a needed sibling isn't beside
 # us but an old .company/scripts copy still has it — so existing installs never break.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
-  SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
-else
-  SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-if [[ ! -f "$SCRIPTS/decay.py" && -f "$COMPANY/scripts/decay.py" ]]; then
-  SCRIPTS="$COMPANY/scripts"
-fi
+SCRIPTS="$(sc_resolve_scripts_dir "$_SC_LIB_DIR" "$COMPANY" "decay.py")"
 POLICY="$COMPANY/org/policy.md"
 MEM="$COMPANY/memory"
 LOGDIR="$COMPANY/ops/logs"
@@ -1046,35 +1048,17 @@ _write_fail_marker() {                      # $1=count  $2=reason(auth|agent)
     printf 'reason=%s\n' "$2"
   } > "$FAIL_MARKER"
 }
-# Resolve the claude CLI up front (C2): _auth_logged_in() below references
-# $CLAUDE_BIN, so it must be assigned before the function is *called*. Defining it
-# here (not inside the RUN_AGENT block) keeps the function robust under
-# `set -u` regardless of call order. May be empty if the CLI isn't installed;
-# the RUN_AGENT block guards on `-n "$CLAUDE_BIN"` before using it.
-CLAUDE_BIN="$(command -v claude || true)"
-[[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
-
-# Auth pre-flight probe. `claude auth status --json` is a LOCAL credential check
-# (no model call, ~0.2s, zero tokens) that prints {"loggedIn": true|false,...}.
-# We treat ONLY a positive not-logged-in signal as auth-fail; an inconclusive
-# probe (old CLI lacking the subcommand, unexpected output) returns "unknown" and
-# falls through to attempting the agent, so we never suppress a working agent on a
-# false negative. SELF_COMPANY_FORCE_AUTH_FAIL=1 forces the not-logged-in branch
-# for tests; SELF_COMPANY_SKIP_AUTH_PROBE=1 disables the probe entirely.
-_auth_logged_in() {                         # echo: yes | no | unknown
-  [[ "${SELF_COMPANY_FORCE_AUTH_FAIL:-}" == "1" ]] && { echo no; return; }
-  [[ "${SELF_COMPANY_SKIP_AUTH_PROBE:-}" == "1" ]] && { echo unknown; return; }
-  local out
-  out="$(timeout "${SELF_COMPANY_AUTH_PROBE_TIMEOUT:-20}" \
-         "$CLAUDE_BIN" auth status --json 2>/dev/null)" || true
-  if printf '%s' "$out" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-    echo yes
-  elif printf '%s' "$out" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*false'; then
-    echo no
-  else
-    echo unknown
-  fi
-}
+# Resolve the claude CLI up front (C2): sc_auth_logged_in() (agent_spawn.sh,
+# sourced above) references $CLAUDE_BIN, so it must be assigned before it is
+# *called*. Defining it here (not inside the RUN_AGENT block) keeps the
+# function robust under `set -u` regardless of call order. May be empty if
+# the CLI isn't installed; the RUN_AGENT block guards on `-n "$CLAUDE_BIN"`
+# before using it.
+# Phase 28 Item 4b (D1/D2): CLAUDE_BIN resolution + the auth pre-flight probe
+# are the ONE shared lib (agent_spawn.sh) — see its header for the env
+# contracts (SELF_COMPANY_FORCE_AUTH_FAIL / SKIP_AUTH_PROBE /
+# AUTH_PROBE_TIMEOUT) preserved exactly.
+CLAUDE_BIN="$(sc_resolve_claude_bin)"
 
 # Phase 25 Item 1: the agent step ALSO mutates memory (via Edit/tombstone), so
 # it is part of "the mutating core" for safety-floor purposes even though it
@@ -1125,7 +1109,7 @@ except Exception:
   COUNTER="$LOGDIR/.agent_runs_$DATE"
   RUNS="$(cat "$COUNTER" 2>/dev/null || echo 0)"
   [[ "$RUNS" =~ ^[0-9]+$ ]] || RUNS=0
-  # CLAUDE_BIN resolved above (C2), before _auth_logged_in()'s definition.
+  # CLAUDE_BIN resolved above (C2), before sc_auth_logged_in()'s definition.
   if (( RUNS >= CAP )); then
     echo "- agent: skipped — daily agent-run cap reached ($RUNS/$CAP, token breaker)" >> "$LOG"
     AGENT_OUTCOME="skipped:cap"; AGENT_RUNS_TODAY="$RUNS"; AGENT_CAP="$CAP"
@@ -1134,7 +1118,7 @@ except Exception:
     # agent. Not-logged-in => skip the agent, record a distinct AUTH_FAIL signal,
     # and let the already-run deterministic maintenance stand — don't burn the cron
     # cycle pretending to work. The run-cap counter is untouched (no tokens spent).
-    AUTH="$(_auth_logged_in)"
+    AUTH="$(sc_auth_logged_in)"
     if [[ "$AUTH" == "no" ]]; then
       fc="$(_read_fail_count)"; fc=$((fc + 1))
       _write_fail_marker "$fc" auth

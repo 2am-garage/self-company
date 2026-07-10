@@ -41,6 +41,12 @@ set -uo pipefail
 PROJECT_DIR="${SELF_COMPANY_PROJECT_DIR:-$PWD}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE="$SCRIPT_DIR/trigger_engine.py"
+# Phase 28 Item 4b (D1): the claude-spawn scaffolding (CLAUDE_BIN resolution,
+# the kill-after timeout probe, the CAPTURE_ACTIVE + `claude -p` wrapper) is
+# the ONE shared lib (agent_spawn.sh, same dir) — see its header for why every
+# caller keeps this exact bootstrap instead of the lib resolving its own dir.
+# shellcheck source=agent_spawn.sh
+source "$SCRIPT_DIR/agent_spawn.sh"
 
 # A .company may sit at $PWD/.company (used) or be the script's parent (dev).
 if [[ -d "$PROJECT_DIR/.company" ]]; then COMPANY="$PROJECT_DIR/.company"
@@ -187,8 +193,7 @@ if ! $SPAWN; then
 fi
 
 if ! $EMIT; then
-  CLAUDE_BIN="$(command -v claude || true)"
-  [[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
+  CLAUDE_BIN="$(sc_resolve_claude_bin)"
   if [[ -z "$CLAUDE_BIN" ]]; then
     ledger_row "fired"
     echo "[fire-trigger] fired but claude CLI not found — logged only: $NAME"
@@ -278,10 +283,8 @@ ledger_row "fired"
 # is GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
 printf '\n===== trigger %s fired %s =====\n' "$NAME" "$TS" >> "$AGENT_LOG"
 KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
-_tmo=(timeout)
-timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
-SELF_COMPANY_CAPTURE_ACTIVE=1 nohup "${_tmo[@]}" "${SELF_COMPANY_TRIGGER_TIMEOUT:-600}" \
-  "$CLAUDE_BIN" -p "$PROMPT" --model "${SELF_COMPANY_TRIGGER_MODEL:-claude-sonnet-4-6}" \
-  >>"$AGENT_LOG" 2>&1 &
+sc_spawn_capture "$KILL_AFTER" "${SELF_COMPANY_TRIGGER_TIMEOUT:-600}" "$CLAUDE_BIN" \
+  "$PROMPT" "${SELF_COMPANY_TRIGGER_MODEL:-claude-sonnet-4-6}"
+nohup "${SC_SPAWN_CMD[@]}" >>"$AGENT_LOG" 2>&1 &
 echo "[fire-trigger] fired: $NAME -> dispatched (detached, see ops/logs/trigger-$DATE.log)"
 exit 0

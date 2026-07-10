@@ -53,14 +53,17 @@ for a in "$@"; do
 done
 [[ -z "$NOW" ]] && NOW="$(date +%F)"
 
-# Resolve the CANONICAL scripts dir (same precedence as daily-run.sh).
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
-  SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
-else
-  SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
+# Phase 28 Item 4b (D1/D6): the claude-spawn scaffolding (CLAUDE_BIN
+# resolution, the auth pre-flight probe) + the scripts-dir precedence are the
+# ONE shared lib (agent_spawn.sh, same dir) — see its header for why every
+# caller keeps this exact bootstrap instead of the lib resolving its own dir.
+_SC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=agent_spawn.sh
+source "$_SC_LIB_DIR/agent_spawn.sh"
 
 PARENT_COMPANY="$PARENT_DIR/.company"
+# Resolve the CANONICAL scripts dir (same precedence as daily-run.sh).
+SCRIPTS="$(sc_resolve_scripts_dir "$_SC_LIB_DIR" "$PARENT_COMPANY")"
 OPS="$PARENT_COMPANY/ops"
 REPORTS="$OPS/reports"
 FLEET_LOG="$OPS/logs/fleet-$NOW.md"
@@ -95,27 +98,10 @@ ts="$(date +%FT%T)"
   printf '\n## Fleet run %s%s (tick %s)\n' "$ts" "$($DRY_RUN && echo ' (dry-run)')" "$NOW"
 } >> "$FLEET_LOG"
 
-# --- auth pre-flight (copied from daily-run.sh; single fleet check) ----------
-CLAUDE_BIN="$(command -v claude || true)"
-[[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
-
-_auth_logged_in() {                          # echo: yes | no | unknown
-  [[ "${SELF_COMPANY_FORCE_AUTH_FAIL:-}" == "1" ]] && { echo no; return; }
-  [[ "${SELF_COMPANY_SKIP_AUTH_PROBE:-}" == "1" ]] && { echo unknown; return; }
-  [[ -z "$CLAUDE_BIN" ]] && { echo unknown; return; }
-  local out
-  out="$(timeout "${SELF_COMPANY_AUTH_PROBE_TIMEOUT:-20}" \
-         "$CLAUDE_BIN" auth status --json 2>/dev/null)" || true
-  if printf '%s' "$out" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-    echo yes
-  elif printf '%s' "$out" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*false'; then
-    echo no
-  else
-    echo unknown
-  fi
-}
-
-AUTH="$(_auth_logged_in)"
+# --- auth pre-flight (Phase 28 Item 4b D2: shared sc_auth_logged_in — single
+# fleet check) --------------------------------------------------------------
+CLAUDE_BIN="$(sc_resolve_claude_bin)"
+AUTH="$(sc_auth_logged_in)"
 AUTH_DOWN=false
 if [[ "$AUTH" == "no" ]]; then
   AUTH_DOWN=true
