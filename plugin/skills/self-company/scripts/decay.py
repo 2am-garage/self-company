@@ -60,6 +60,14 @@ from frontmatter import (split as _fm_split, parse as _fm_parse,
                          SOURCE_ITEM_RE, tokenize_sources,
                          _atomic_write)
 
+# Phase 28 Item 4a (D4): the file WALK is now the shared corpus.py primitive —
+# one enumeration instead of six independently re-implemented rglob loops.
+# decay keeps its own parse_frontmatter (13-key defaults, tier/status/category
+# validation, defunct->archived normalization) and its own tombstone-INCLUSIVE
+# gating (decay must SEE tombstoned files to reap them, unlike every other
+# consumer) entirely unchanged; only the walk moves.
+import corpus
+
 
 # ============================================================================
 # BUILT-IN DEFAULTS (== manifest §1, tunable via --config / policy.md)
@@ -620,8 +628,8 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
         report["warnings"].append(f"Memory dir not found: {memory_dir}")
         return report
 
-    # Recursively find all .md files
-    md_files = sorted(memory_dir.rglob("*.md"))
+    # Recursively find all .md files (Phase 28 Item 4a: shared corpus walk).
+    md_files = corpus.iter_memory_paths(memory_dir)
 
     # D5: cap one tier-move per file (by id) per --apply run. Records every id
     # that has been (or would be) promoted this pass so a memory can advance at

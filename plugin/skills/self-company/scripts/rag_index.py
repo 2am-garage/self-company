@@ -37,6 +37,12 @@ from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 from frontmatter import split as _fm_split
 import urllib.error
 
+# Phase 28 Item 4a (D4): the file WALK is now the shared corpus.py primitive —
+# one enumeration instead of six independently re-implemented rglob loops. rag
+# keeps its own tier-then-tombstone-then-id gating ORDER (and warning text)
+# unchanged; only the walk moves.
+import corpus
+
 # ============================================================================
 # RE-EXEC INTO THE RAG VENV (created by rag_setup.sh) if deps aren't here
 # ============================================================================
@@ -431,8 +437,8 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         report["warnings"].append(f"Memory dir not found: {memory_dir}")
         return report
 
-    # Scan for L1/L2 active files
-    md_files = sorted(memory_dir.rglob("*.md"))
+    # Scan for L1/L2 active files (Phase 28 Item 4a: shared corpus walk).
+    md_files = corpus.iter_memory_paths(memory_dir)
     candidates = []
     live_ids = set()
 

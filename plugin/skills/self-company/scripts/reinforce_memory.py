@@ -60,6 +60,14 @@ from frontmatter import (split as _fm_split, parse as _fm_parse,
                          SOURCE_ITEM_RE, tokenize_sources,
                          _atomic_write)
 
+# Phase 28 Item 4a (D4): the walk + id/tombstone gate + body-extraction that
+# used to be reinforce's own private loop is now the ONE shared corpus.py
+# primitive (same directory, same best-effort-import discipline). Aligning the
+# body extraction across every consumer is also Item 2's cache-hit-rate
+# prerequisite (a content_hash cache only hits if two stages hash the SAME
+# body string for the SAME file).
+import corpus
+
 try:
     import rag_embed
     import numpy as np
@@ -89,21 +97,19 @@ def parse_frontmatter(text):
 
 
 def load_memories(memory_dir):
-    out = []
-    for p in sorted(Path(memory_dir).rglob("*.md")):
-        try:
-            text = p.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        fm, close = parse_frontmatter(text)
-        if not fm or not fm.get("id") or is_tombstoned(fm):
-            continue
-        body = "\n".join(text.split("\n")[close + 1:]).strip()
-        out.append({
-            "id": fm["id"], "tier": fm.get("tier", "L0"), "path": str(p),
-            "created": fm.get("created", ""), "body": body, "text": text,
-        })
-    return out
+    # Phase 28 Item 4a: the walk + id/tombstone gate + body-slice now come from
+    # corpus.load_memories (shared with decay/entropy/rag_index) — this is a
+    # pure field-reshape on top, byte-identical to the old private loop: same
+    # gate (id present, not tombstoned), same body (closing-fence slice,
+    # stripped once).
+    return [
+        {
+            "id": mem["id"], "tier": mem["tier"], "path": mem["path"],
+            "created": mem["fm"].get("created", ""), "body": mem["body"],
+            "text": mem["text"],
+        }
+        for mem in corpus.load_memories(memory_dir)
+    ]
 
 
 def plan_reinforcements(mems, pairs, threshold):

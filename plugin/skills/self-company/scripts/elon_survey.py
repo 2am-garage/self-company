@@ -20,6 +20,11 @@ from datetime import date
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPTS))
+# Phase 28 Item 4a (D4): tier_counts folds into the shared corpus.py primitive
+# as a byproduct — its rglob-per-tier-dir loop was byte-identical to
+# corpus.count_by_tier.
+import corpus  # noqa: E402
 
 # Phase 27 MUST-FIX 3: elon_survey re-invokes the deterministic core scripts
 # (entropy/decay/verify) as read-only subprocesses. That re-invocation was
@@ -58,13 +63,8 @@ def _run_json(script, *args, timed_out=None):
 
 
 def tier_counts(memory_dir):
-    counts = {"L0": 0, "L1": 0, "L2": 0}
-    base = Path(memory_dir)
-    for tier, sub in (("L0", "L0-working"), ("L1", "L1-warm"), ("L2", "L2-cold")):
-        d = base / sub
-        if d.exists():
-            counts[tier] = sum(1 for _ in d.rglob("*.md"))
-    return counts
+    # Phase 28 Item 4a: folds into corpus.count_by_tier (byte-identical loop).
+    return corpus.count_by_tier(memory_dir)
 
 
 def build_todos(entropy, decay, verify):
