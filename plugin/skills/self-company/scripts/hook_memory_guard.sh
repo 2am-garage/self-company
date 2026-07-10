@@ -1,15 +1,36 @@
 #!/usr/bin/env bash
 ###############################################################################
 # hook_memory_guard.sh — PreToolUse gate (Phase 10, Item 6; hardened Phase 22,
-# Phase 26 Item 3).
+# Phase 26 Item 3, Phase 27 Item C2).
 #
 # Denies any Bash command that would PHYSICALLY delete or move-away a path under
 # .company/memory/ — OR the .company store ROOT (rm -rf .company wipes memory too)
 # — via rm / unlink / shred / rmdir / truncate / `find <mem> -delete` / `mv
-# <memory-path> elsewhere`.
+# <memory-path> elsewhere` / a truncating shell redirect (`>`, `>|`, `&>`, `>&`)
+# / bare `tee` (no `-a`).
 # Physical deletion of memory is the deterministic decay reap's job (Phase 6);
 # agents must TOMBSTONE (status: archived) instead. Skill-owned, host-independent
 # enforcement of the no-rm rule — defense in depth beside the tar floor.
+#
+# Phase 27 C2 (GIB R3 backlog) — `>` truncation is a deletion primitive the
+# guard didn't see. `echo x > .company/memory/foo.md` (or `: >`, `>|`, `tee`
+# without `-a`) truncates a memory file to nothing and used to sail straight
+# through: _normalize() collapsed EVERY punctuation run — `>`/`>>`/`>|`/`&>`/
+# `>&` included — into one generic ';' separator before any deleter check ever
+# ran, throwing away the truncate-vs-append-vs-separator distinction. Fix:
+# every redirect operator is now preserved as its own distinct token; a bare
+# `>`/`>|`/`&>`/`>&` (never the `>>`/`&>>` append forms — MUST-FIX 2 added the
+# `&>`/`>&` both-streams truncating forms the first pass missed) or a `tee`
+# invocation without `-a`/
+# `--append` whose target resolves into the store — same fail-closed
+# resolution as every deleter above (cd-tracked CWD stack, is_mem_literal
+# textual backstop, in_store realpath check) — is DENIED. The nested-shell
+# decisive-deny rule is extended the same way, but stays TARGET-AWARE for
+# redirects/tee (unlike rm/mv's blanket nested-shell rule): `>`/`tee` are
+# common, legitimate primitives for files that have nothing to do with the
+# store, so only a store-shaped target trips it. No new binaries enumerated
+# (`dd of=`, `python -c open(...,'w')`, etc. stay out of scope per Elon — the
+# nested-shell fail-closed rule already covers the interpreter route).
 #
 # Phase 26 Item 3 — close the `cd` bypass. The Phase-22 guard matched only the
 # command's own literal TOKENS ("does this string look like .company/memory"),
@@ -120,6 +141,20 @@ TRANSPARENT_PREFIX = {"command", "builtin", "time", "exec", "nohup", "nice", "en
 NESTED_INDICATORS = SHELL_INTERPRETERS | {"eval", "xargs", "source"}
 AMBIG_CHARS = set("$`*?[]")
 PUNCT = set("();<>|&")                          # shell control punctuation
+# Phase 27 C2 (GIB R3 backlog) + MUST-FIX 2 — `>`/`>|`/`&>`/`>&` truncate their
+# target to zero bytes ON OPEN, before anything is written: that IS deletion of
+# the prior contents, not merely "not rm". `&>`/`>&` are the both-stdout+stderr
+# truncating forms (`echo x &> f` / `echo x >& f` both truncate `f`), which the
+# original C2 pass missed — Gibby live-fired `echo X &> .company/memory/…` and
+# it truncated the file undetected. The APPEND forms `>>`/`&>>` are excluded on
+# purpose (append is not deletion). All are shell OPERATORS (recognized by
+# token identity), never program names, so they never go through the
+# head/DELETERS dispatch — they're checked directly wherever they appear in a
+# simple command. (`2>&1`-style fd dups tokenize with a NUMERIC target, which
+# is never a store path, so they stay allowed by the target-aware check.)
+REDIR_TRUNC = {">", ">|", "&>", ">&"}
+REDIR_APPEND = {">>", "&>>"}                    # append — allowed, but preserved as tokens
+REDIR_OPS = REDIR_TRUNC | REDIR_APPEND          # all preserved through _normalize
 
 
 def allow():
@@ -168,6 +203,11 @@ def in_store(path):
 
 REASON = ("physical deletion of memory is the deterministic decay reap's job "
           "(Phase 6) — tombstone instead (status: archived)")
+REDIR_REASON = (
+    "a shell redirect/`tee` truncates its target to zero bytes on open, "
+    "before anything new is written — that IS physical deletion of the "
+    "prior contents, the same as rm (Phase 6: tombstone instead, status: "
+    "archived). Use `>>`/`tee -a` to append, or write outside .company/memory")
 AMBIG_REASON = (
     "a `cd` earlier in this command lands somewhere this guard can't resolve "
     "(a variable/substitution/glob target), so a RELATIVE deletion target "
@@ -195,6 +235,43 @@ def tok_is_deleter(a):
     return b in DELETERS or b in ("find", "mv")
 
 
+# Phase 27 C2 — nesting-and-quote-agnostic raw-text scan for a truncating
+# redirect or bare `tee`. Mirrors _all_words's approach for raw_has_deleter
+# (regex over the ENTIRE raw text, quotes and all — we do not recursively
+# simulate a nested shell's cwd, so this looks for the deleter-EQUIVALENT
+# signal at any nesting depth). UNLIKE rm/mv's blanket "nested shell + deleter
+# ANYWHERE = deny" rule, this stays TARGET-AWARE: `>`/`tee` are common,
+# legitimate shell primitives for files that have nothing to do with the
+# store (a nested `bash -c "make > /tmp/log"` must stay allowed), so only a
+# store-shaped target counts as a hit. `>>` is excluded (never a hit); `tee
+# -a`/`--append` anywhere in the same tee invocation's tail is treated as
+# non-truncating for that invocation.
+# MUST-FIX 2: every redirect operator (append + truncating), longest-first so
+# `&>>`/`>>` win over `&>`/`>`, each captured with the token that follows it.
+# We classify in code (append forms skipped) rather than one clever lookaround —
+# the alternation ordering is what makes `&>>` not read as `&>` + `>`.
+_REDIR_OP_RE = re.compile(r"(&>>|>>|&>|>&|>\||>)\s*([^\s;&|()<>]*)")
+_TEE_INVOCATION_RE = re.compile(r"\btee\b([^;&|()]*)")
+
+
+def text_has_store_redirect(s):
+    if not isinstance(s, str) or not s:
+        return False
+    for m in _REDIR_OP_RE.finditer(s):
+        op, target = m.group(1), m.group(2)
+        if op in (">>", "&>>"):
+            continue                    # append is not deletion
+        if target and is_mem_literal(target):
+            return True
+    for m in _TEE_INVOCATION_RE.finditer(s):
+        tail = m.group(1).split()
+        if any(a in ("-a", "--append") for a in tail):
+            continue
+        if any(is_mem_literal(a) for a in tail if not a.startswith("-")):
+            return True
+    return False
+
+
 def script_has_deleter(s):
     # Best-effort: does an inline script string invoke a deleter? Used to
     # fail-closed on `bash -c "…rm…"` / `eval "…"` where we won't recursively
@@ -205,14 +282,15 @@ def script_has_deleter(s):
         toks = shlex.split(s)
     except ValueError:
         toks = re.findall(r"[A-Za-z0-9_./-]+", s)
-    return any(tok_is_deleter(t) or _basename(t) in NESTED_WRAPPERS for t in toks)
+    return (any(tok_is_deleter(t) or _basename(t) in NESTED_WRAPPERS for t in toks)
+            or text_has_store_redirect(s))
 
 
 def text_has_hard_deleter(s):
     # For a wholly-unparseable command (unbalanced quotes): is a hard deleter
     # even present? If so, fail-closed; if not, there is nothing to guard.
     words = re.findall(r"[A-Za-z0-9_./-]+", s or "")
-    return any(_basename(w) in DELETERS for w in words)
+    return any(_basename(w) in DELETERS for w in words) or text_has_store_redirect(s)
 
 
 def _all_words(s):
@@ -232,6 +310,11 @@ def raw_has_deleter(s):
     if words & DELETERS or "mv" in words:
         return True
     if "find" in words and "-delete" in (s or ""):
+        return True
+    # Phase 27 C2: a truncating redirect (`>`/`>|`) or bare `tee` whose
+    # target textually looks like the store is a deleter-equivalent too —
+    # see text_has_store_redirect for why this stays target-aware.
+    if text_has_store_redirect(s):
         return True
     return False
 
@@ -265,6 +348,11 @@ if not isinstance(cmd, str) or not cmd.strip():
 # spelling in one rule. False positives are cheap here (a legit deleter can
 # always use an absolute path outside .company, and no legit workflow buries a
 # store-deleting rm inside a nested shell in a self-company repo).
+# Phase 27 C2: raw_has_deleter ALSO counts a truncating redirect (`>`/`>|`) or
+# bare `tee` whose target textually looks like the store — UNLIKE rm/mv this
+# stays target-aware (see text_has_store_redirect), because `>`/`tee` are
+# common, legitimate primitives for files that have nothing to do with the
+# store; only a store-shaped target trips this.
 if has_nested_shell(cmd) and raw_has_deleter(cmd):
     deny(STRUCT_REASON)
 
@@ -296,11 +384,25 @@ except ValueError:
 
 def _normalize(tokens):
     # A run of punctuation chars may lex as one token (e.g. ');'). Split it into
-    # atoms: '(' and ')' individually (subshell scoping), every other operator
-    # (&& || | & ; < >) collapsed to a single ';' separator — all we need is
-    # "flush the current simple command here".
+    # atoms: '(' and ')' individually (subshell scoping); a truncating/append
+    # redirect (`>`, `>|`, `>>`) preserved AS ITS OWN DISTINCT token (Phase 27
+    # C2 — collapsing `>`/`>>`/`>|` into the same generic ';' as every other
+    # separator would throw away the truncate-vs-append-vs-separator
+    # distinction before any deleter check ever runs, which is exactly how a
+    # `>`/`tee` truncation of a memory file sailed through undetected); every
+    # OTHER operator (&& || | & ; <) collapsed to a single ';' separator — all
+    # we need there is "flush the current simple command here". shlex's
+    # punctuation_chars tokenizer already hands `>`/`>>`/`>|` back as whole,
+    # un-merged tokens in every realistic (whitespace-adjacent-to-a-target)
+    # case, so the whole-token check below is enough; the rare degenerate
+    # merge (e.g. a target-less `>);` with no filename at all) falls through
+    # to the old collapse path unchanged — there's no resolvable target to
+    # check in that case anyway.
     out = []
     for tok in tokens:
+        if tok in REDIR_OPS:
+            out.append(tok)
+            continue
         if tok and all(c in PUNCT for c in tok):
             pending = False
             for ch in tok:
@@ -325,12 +427,12 @@ CWD = [cur_cwd]
 cwd_stack = []
 
 
-def check_targets(paths, cwd):
+def check_targets(paths, cwd, reason=REASON):
     for a in paths:
         if a.startswith("-"):
             continue                   # a flag (e.g. -rf), never a path arg
         if is_mem_literal(a):
-            deny(REASON)
+            deny(reason)
         if cwd is None:
             if not os.path.isabs(a):
                 deny(AMBIG_REASON)      # relative + unknown cwd -> fail closed
@@ -338,7 +440,7 @@ def check_targets(paths, cwd):
         else:
             resolved = resolve(cwd, a)
         if in_store(resolved):
-            deny(REASON)
+            deny(reason)
 
 
 def _cd_target(args):
@@ -395,6 +497,19 @@ def _strip_prefix_opts(head, rest):
 def check_command(toks, cwd):
     """Analyze one simple command. Returns the (persistently) updated cwd; may
     deny() and never return."""
+    # Phase 27 C2 + MUST-FIX 2 — a truncating redirect (`>`/`>|`/`&>`/`>&`,
+    # never the `>>`/`&>>` append forms) attaches to THIS simple command
+    # regardless of where in it the operator appears (bash allows
+    # leading/interspersed redirects, e.g. `> file cmd args`) and regardless
+    # of which program is invoked: the shell opens/truncates the target before
+    # the program ever runs. Same fail-closed resolution
+    # (cd-tracked cwd, is_mem_literal backstop, in_store realpath check) as
+    # every deleter target below.
+    redir_targets = [toks[j + 1] for j, t in enumerate(toks)
+                      if t in REDIR_TRUNC and j + 1 < len(toks)]
+    if redir_targets:
+        check_targets(redir_targets, cwd, reason=REDIR_REASON)
+
     i = 0
     while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
         i += 1                         # skip leading VAR=val
@@ -446,6 +561,17 @@ def check_command(toks, cwd):
         positional = [a for a in args if not a.startswith("-")]
         sources = positional[:-1] if len(positional) >= 2 else positional
         check_targets(sources, cwd)
+    elif head == "tee":
+        # Phase 27 C2 — `tee TARGET` truncates TARGET on open, same as `>`;
+        # `tee -a`/`--append` TARGET appends (not deletion). No other binary
+        # is special-cased here (Elon: enumerating binaries is the
+        # special-casing this guard avoids; `dd of=`, `python -c open(...,
+        # 'w')`, etc. are out of scope — the nested-shell fail-closed rule
+        # already covers the interpreter route).
+        appended = any(a in ("-a", "--append") for a in args)
+        if not appended:
+            check_targets([a for a in args if not a.startswith("-")], cwd,
+                          reason=REDIR_REASON)
     return cwd
 
 

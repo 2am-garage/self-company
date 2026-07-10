@@ -12,6 +12,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 import _helpers
 
@@ -255,6 +256,151 @@ class TestNotify(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 ns.main(["--company", os.path.join(d, ".company"), "--emit-hook"])
             self.assertEqual(buf.getvalue().strip(), "")        # silent: never ran
+
+
+class TestStalenessAlarm(unittest.TestCase):
+    """Phase 27 Item 2: "dark for days" must not look like "quiet"."""
+
+    def _company_dir(self, d):
+        base = os.path.join(d, ".company")
+        os.makedirs(os.path.join(base, "ops", "logs"))
+        return base
+
+    def _write_run(self, company, date, ts, extra_events=None):
+        import json
+        logs = os.path.join(company, "ops", "logs")
+        with open(os.path.join(logs, f"daily-{date}.md"), "w") as f:
+            f.write(f"\n## Daily run {ts}\n- entropy 0.05 over 5 memories\n")
+        events = [
+            {"event": "start", "ts": ts, "mode": "cron", "dry_run": False, "pid": 1, "schema": 1},
+            {"event": "end", "ts": ts, "start_ts": ts, "schema": 1, "lock": "acquired",
+             "lock_skip_streak": 0, "core_aborted": False, "abort_reason": None,
+             "steps": {}, "agent": None, "dry_run": False},
+        ]
+        if extra_events:
+            events[-1].update(extra_events)
+        with open(os.path.join(logs, f"daily-{date}.jsonl"), "w") as f:
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+
+    def _crontab_file(self, d, project_dir, hour_expr="*/6"):
+        cf = os.path.join(d, "crontab.txt")
+        with open(cf, "w") as f:
+            f.write(f"0 {hour_expr} * * * true "
+                    f"# self-company-daily project=abc123 path={project_dir}\n")
+        return cf
+
+    def test_a_recent_run_within_cadence_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_dir(d)
+            self._write_run(c, "2026-07-10", "2026-07-10T04:00:00")
+            cf = self._crontab_file(d, d)
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                esc = ns.staleness_escalation_line(c, now=ns._parse_ts("2026-07-10T07:00:00"))
+            self.assertEqual(esc, "")
+
+    def test_b_stale_run_beyond_2x_cadence_escalates(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_dir(d)
+            self._write_run(c, "2026-07-09", "2026-07-09T18:00:00")
+            cf = self._crontab_file(d, d)
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                esc = ns.staleness_escalation_line(c, now=ns._parse_ts("2026-07-10T07:00:00"))
+            self.assertIn("STALE", esc)
+            self.assertIn("13h", esc)
+            self.assertIn("every 6h", esc)
+
+    def test_c_no_cron_entry_stays_silent_even_9_days_stale(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_dir(d)
+            self._write_run(c, "2026-07-01", "2026-07-01T06:00:00")
+            cf = os.path.join(d, "crontab.txt")
+            with open(cf, "w") as f:
+                f.write("# nothing self-company here\n")
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                esc = ns.staleness_escalation_line(c, now=ns._parse_ts("2026-07-10T07:00:00"))
+            self.assertEqual(esc, "")
+
+    def test_d_installed_but_never_ran_escalates(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_dir(d)
+            open(os.path.join(c, "ops", "logs", "daily-2026-07-10.md"), "w").close()
+            cf = self._crontab_file(d, d)
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                esc = ns.staleness_escalation_line(c, now=ns._parse_ts("2026-07-10T07:00:00"))
+            self.assertIn("STALE", esc)
+            self.assertIn("never ran", esc)
+
+    def test_e_dry_run_only_history_does_not_count_as_real(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_dir(d)
+            logs = os.path.join(c, "ops", "logs")
+            with open(os.path.join(logs, "daily-2026-07-10.md"), "w") as f:
+                f.write("\n## Daily run 2026-07-10T06:00:00 (dry-run)\n")
+            with open(os.path.join(logs, "daily-2026-07-10.jsonl"), "w") as f:
+                f.write(json.dumps({"event": "start", "ts": "2026-07-10T06:00:00",
+                                     "mode": "manual", "dry_run": True, "pid": 1, "schema": 1}) + "\n")
+            cf = self._crontab_file(d, d)
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                esc = ns.staleness_escalation_line(c, now=ns._parse_ts("2026-07-10T07:00:00"))
+            self.assertIn("never ran", esc)   # the dry-run doesn't count as a real run
+
+    def test_f_symlinked_project_dir_still_matches_cron_line(self):
+        # MUST-FIX 4: schedule.sh records path= via bash logical pwd
+        # (symlink-preserving); a genuinely-dark company reached through a
+        # symlinked project dir must still fire the alarm, not go silent.
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "real")
+            os.makedirs(os.path.join(real, ".company", "ops", "logs"))
+            link = os.path.join(d, "link")
+            os.symlink(real, link)
+            c_link = os.path.join(link, ".company")
+            self._write_run(c_link, "2026-07-09", "2026-07-09T18:00:00")  # 13h stale
+            # crontab records the LOGICAL (symlinked) path
+            cf = self._crontab_file(d, link)
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                esc_link = ns.staleness_escalation_line(
+                    c_link, now=ns._parse_ts("2026-07-10T07:00:00"))
+                # the same alarm must also fire when the caller hands the
+                # PHYSICAL company path (the two forms must both match).
+                esc_phys = ns.staleness_escalation_line(
+                    os.path.join(real, ".company"), now=ns._parse_ts("2026-07-10T07:00:00"))
+            self.assertIn("STALE", esc_link)
+            self.assertIn("STALE", esc_phys)
+
+    def test_emit_hook_installed_never_ran_still_escalates_when_all_runs_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_dir(d)
+            open(os.path.join(c, "ops", "logs", "daily-2026-07-10.md"), "w").close()
+            cf = self._crontab_file(d, d)
+            buf = io.StringIO()
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                with contextlib.redirect_stdout(buf):
+                    ns.main(["--company", c, "--emit-hook"])
+            out = buf.getvalue().strip()
+            self.assertTrue(out)
+            ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("never ran", ctx)
+
+
+class TestLockSkipEscalation(unittest.TestCase):
+    """Phase 27 Item 3: a lock-skip streak escalates HIGH; one contended tick
+    stays quiet."""
+
+    def _runs_with_streak(self, streak):
+        return [{"lock_skip_streak": streak}]
+
+    def test_single_contention_stays_quiet(self):
+        self.assertEqual(ns.lock_skip_escalation_line(self._runs_with_streak(1)), "")
+
+    def test_streak_at_threshold_escalates(self):
+        esc = ns.lock_skip_escalation_line(self._runs_with_streak(3))
+        self.assertIn("3 consecutive", esc)
+        self.assertIn("wedged", esc)
+
+    def test_no_runs_no_escalation(self):
+        self.assertEqual(ns.lock_skip_escalation_line([]), "")
 
 
 if __name__ == "__main__":

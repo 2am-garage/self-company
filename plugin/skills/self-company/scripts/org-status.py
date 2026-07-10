@@ -20,12 +20,19 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
+# Phase 27 Item 1: read run boundaries through the shared reader instead of a
+# a private run-header block-walk; the per-employee prose signals below still scan
+# each run's raw block TEXT (daily_log.py hands that back as `md_block` —
+# the .md render is unchanged, this just stops re-deriving block boundaries).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import daily_log  # noqa: E402
 
 # id, display, role, and the log-line signals that mean "this employee acted".
 EMPLOYEES = [
@@ -54,35 +61,18 @@ def _now():
 def scan_daily(company):
     """Return {emp_id: (ts, short_desc)} latest activity from daily-run logs."""
     out = {}
-    logs = sorted((Path(company) / "ops" / "logs").glob("daily-*.md"))
-    for f in logs[-3:]:                       # recent files only
-        try:
-            lines = f.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        i = 0
-        while i < len(lines):
-            m = RUN_RE.match(lines[i])
-            if not m:
-                i += 1
-                continue
-            ts, tail = _parse_ts(m.group(1)), m.group(2)
-            i += 1
-            if ts is None or "dry-run" in tail:
-                continue
-            # Tom owns the run itself.
-            out["tom"] = (ts, "ran daily-run.sh")
-            block = []
-            while i < len(lines) and not RUN_RE.match(lines[i]):
-                block.append(lines[i]); i += 1
-            text = "\n".join(block)
-            for emp_id, _, _, signals in EMPLOYEES:
-                for sig in signals:
-                    hit = re.search(sig, text, re.M)
-                    if hit:
-                        desc = _desc_for(emp_id, text)
-                        out[emp_id] = (ts, desc)
-                        break
+    runs = daily_log.read_runs(company, window_days=None)
+    for r in runs[-3:]:                       # recent runs only
+        ts, text = r["ts"], r["md_block"]
+        # Tom owns the run itself.
+        out["tom"] = (ts, "ran daily-run.sh")
+        for emp_id, _, _, signals in EMPLOYEES:
+            for sig in signals:
+                hit = re.search(sig, text, re.M)
+                if hit:
+                    desc = _desc_for(emp_id, text)
+                    out[emp_id] = (ts, desc)
+                    break
     return out
 
 

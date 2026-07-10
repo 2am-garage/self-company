@@ -154,7 +154,13 @@ not a per-repo special case.
   `_cron_write`. Set `SELF_COMPANY_CRONTAB_FILE` to read+write a file instead of
   the real `crontab` binary (`SELF_COMPANY_CRONTAB_CMD` overrides the binary) — a
   general injectable backend used by `tests/test_schedule.py` so the suite never
-  touches the user's real crontab.
+  touches the user's real crontab. `notify-status.py`'s Phase-27 staleness alarm
+  (see "Observability spine") reads the crontab through this SAME seam to find
+  the installed daily cadence for a project.
+- **Log retention (Phase 27, Item 5).** `daily-run.sh` age-prunes `ops/logs/` at
+  the end of every tick (`agent-*.log`, `daily-*.md`/`.jsonl` older than
+  `SELF_COMPANY_LOG_RETAIN_DAYS`, default 90; stale `.agent_runs_*` cap counters)
+  — see "Observability spine" above for the full mechanism.
 
 ### Per-company schedule & duties (`org/schedule.yaml`) — config, not hardcode
 
@@ -346,6 +352,13 @@ Stop/CAPTURE hook — see "Plugin-native hooks" below):
   never pushed twice.
 - If nothing substantive changed, it silently acks and emits nothing — zero noise
   on quiet days. This is the gate the Chairman asked for: notify only on real change.
+- Since **Phase 27**, `--emit-hook` also prepends up to three independent
+  HIGH-priority escalations when they fire (fail-streak, then core-abort, then
+  lock-skip streak, then staleness — see "Observability spine" above): a
+  staleness alarm when the last run is more than 2× the installed cron cadence
+  old (silent if no cron entry is installed for this project), and a lock-skip
+  streak alarm when `.daily.lock` looks wedged. These are ADDITIVE to the
+  always-on ledger report, never a replacement for it.
 
 When you receive that `additionalContext`, also state the one-line summary in your
 reply — PushNotification suppresses while the Chairman is actively typing (~60s),
@@ -379,14 +392,15 @@ so the wiring survives plugin version bumps with zero stale-path snapshots.
 | `SessionStart` | `startup\|resume\|clear\|compact` | `hook_schedule_guard.sh` | 120s | Cron self-heal: re-installs this project's crontab tick if its signature drifted or the line is missing (idempotent; see "SessionStart sync + self-heal" above). |
 | `UserPromptSubmit` | — | `hook_memory_inject.py` | **30s** | Ask-time memory injection: ranks L2/high-rc L1 by a **fast stdlib** scorer and injects top-k as `additionalContext`. Relevance-gated (injects nothing if nothing scores), token-capped, never blocks. **No fastembed cold-start on this path** (30s cap). |
 | `PreCompact` | `auto\|manual` | `hook_precompact_capture.sh` | 120s | Capture-rescue over the pre-compaction transcript before facts are summarized away; reuses the Stop cooldown to de-dup; never blocks compaction. |
-| `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`shred`/`rmdir`/`truncate`/`find … -delete`/`mv`-away of any path under `.company/memory/` **or the `.company` store root** (`rm -rf .company` wipes memory too — physical deletion is the decay reap's job, Phase 6). Broadens in-script; emits `permissionDecision` with reason. |
+| `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`shred`/`rmdir`/`truncate`/`find … -delete`/`mv`-away — and, since **Phase 27**, a truncating `>`/`>|`/`&>`/`>&` redirect or a bare `tee` (no `-a`) — of any path under `.company/memory/` **or the `.company` store root** (`rm -rf .company` wipes memory too — physical deletion is the decay reap's job, Phase 6). `>>`/`tee -a` (append, not deletion) stay allowed everywhere. Broadens in-script; emits `permissionDecision` with reason. |
 | `PostToolUse` | `Write\|Edit` | `hook_memory_lint.py` | 10s | Validates frontmatter of any `.company/memory/**.md` write (id/tier/status/sources, tombstone vocab); `block`s malformed writes with a reason. Non-memory files untouched. |
 | `SessionEnd` | — | `hook_sessionend_verify.sh` | 120s | Runs the deterministic verify pass so this session's fresh captures are source-stamped before the next SessionStart report. Side-effect only; never fails the session. |
 
 > Matcher key is `matcher` (real Claude Code schema). `PreToolUse` matches all `Bash`
 > and the guard script itself narrows to the dangerous `.company/memory` reap paths
 > plus the `.company` store root — so `rm`, `unlink`, `shred`, `rmdir`, `truncate`,
-> `find … -delete` and `mv` are all seen (defense in depth beside the tar floor).
+> `find … -delete`, `mv`, and (Phase 27) a truncating `>`/`>|`/`&>`/`>&`/bare `tee` are all
+> seen (defense in depth beside the tar floor).
 
 **Global-fire + `.company` opt-in guard.** Plugin hooks fire in **every** repo the
 Chairman opens, not just company repos. So every hook script's FIRST action is an
@@ -411,6 +425,66 @@ Post-install the Chairman verifies wiring with `/hooks`; the hooks are simply *t
 
 ---
 
+## Observability spine (Phase 27) — the JSONL is the data interface
+
+Every `daily-run.sh` run writes TWO artifacts side by side in `ops/logs/`:
+`daily-<date>.md` (human render — unchanged, still what you read by hand) and a
+sibling `daily-<date>.jsonl` (machine record — the ONE data interface every
+consumer reads through). The `.md` never goes away; the JSONL only ADDS a
+channel.
+
+- **Two events per run, always.** A `{"event":"start",…}` line is appended the
+  moment the `## Daily run` header is written (so even a lock-skipped tick — no
+  core ever runs — gets a start); a `{"event":"end",…}` line closes it out,
+  carrying lock status, core-abort state, per-step outcome + warnings,
+  entropy/dims/memories, and the agent block. Each append is a single
+  `os.write()` to an `O_APPEND` fd — POSIX guarantees no interleaving across
+  concurrent processes for writes under `PIPE_BUF`, so an overlapping manual
+  run can never torn-write into a cron tick's event (or vice versa).
+- **`scripts/daily_log.py`** is the ONE reader. `read_runs(company, window_days=30)`
+  pairs `start`/`end` events into `Run` dicts and classifies a `start` with no
+  `end`: within `SELF_COMPANY_INFLIGHT_WINDOW` (default 300s) ⇒ `in-flight`;
+  older ⇒ `crashed` — purely from timestamps, zero mtime probing (this is what
+  retired the old agent-log-mtime in-flight heuristic and its Phase-19 C2 race).
+  `report.py`, `notify-status.py`, `org-status.py`, and `fleet.py` all read
+  through this one function now — no consumer declares its own run-header
+  regex or block-walker. A single deprecated prose fallback covers pre-Phase-27
+  `.md`-only history (cutover 2026-07-10); it self-expires once the 30-day
+  window rolls past that date.
+- **Staleness alarm (Item 2).** `notify-status.py --emit-hook` compares the
+  latest real run's age against `SELF_COMPANY_STALE_RUN_FACTOR`× (default 2)
+  the INSTALLED cron cadence for the project (parsed from the same crontab seam
+  `schedule.sh` uses). No cron entry installed ⇒ no alarm, ever — an
+  intentionally-uninstalled or single-shot company is healthy-by-definition.
+  This is the one failure mode with zero other coverage: a wiped crontab, a
+  dead cron `PATH`, or a laptop-off week produces NO runs, so nothing else in
+  the run history can flag it.
+- **Lock-skip streak (Item 3).** `daily-run.sh` maintains `ops/.lock-skip.streak`
+  — incremented on a flock-skipped cron tick, reset to 0 on any lock-ACQUIRED
+  run. `report.py` renders a routine skip as `locked` (never `flat`); once the
+  streak reaches `SELF_COMPANY_LOCK_SKIP_STREAK_ESCALATE` (default 3),
+  `notify-status.py --emit-hook` escalates HIGH — a wedged `.daily.lock` stops
+  looking like a quiet, healthy history.
+- **Core-step timeouts (Item 4).** The 5 bare core-step invocations (reinforce,
+  decay, verify, entropy's venv attempt, rag-index) are wrapped in
+  `timeout -k GRACE BUDGET` — default 900s budget (generous: a first-install
+  fastembed model download on slow wifi can legitimately need most of it), 30s
+  SIGKILL grace, both env-overridable via `SELF_COMPANY_CORE_STEP_TIMEOUT` /
+  `SELF_COMPANY_CORE_STEP_KILL_GRACE`. A timed-out step never conflates with a
+  generic error or goes silently absent — it gets a distinct `.md` line and a
+  `timeout` JSONL step outcome; downstream steps still run; the ledger verdict
+  is forced to at least `warn`.
+- **Log rotation (Item 5).** `daily_log.py prune()` age-prunes `agent-*.log` /
+  `daily-*.md` / `daily-*.jsonl` by FILENAME date (never mtime — a restored
+  backup can't resurrect ancient logs' lifetimes) past
+  `SELF_COMPANY_LOG_RETAIN_DAYS` (default 90), and drops every `.agent_runs_*`
+  cap counter except today's. Runs best-effort at the end of every
+  `daily-run.sh` tick; a failure (e.g. a read-only dir) logs a warning and
+  never fails the run. Refuses outright (deletes nothing) if retain-days would
+  cut below the default reader's 30-day window.
+
+---
+
 ## Scheduled-Work Ledger (autoresearch-style report)
 
 The push is a one-liner; the **report** is `ops/reports/ledger.md`, regenerated at
@@ -425,9 +499,18 @@ lower = healthier — the `val_bpb` analog), a verdict, and a one-line descripti
 ```
 
 Verdict: `keep` (something substantive moved), `flat` (clean but no change),
-`skip` (agent step capped/absent), `fail` (agent errored). Run on demand with
-`report.py --company .company` (`--write` to save, `--tsv` for the raw flat file).
-This is the artifact the Chairman wakes up to.
+`skip` (agent step capped/absent), `fail` (agent errored). Since **Phase 27**
+the vocabulary also carries the failure/degrade modes the JSONL spine (below)
+makes visible: `warn` (a memory-rot warning OR a core-step timeout — never
+masked behind `keep`/`flat`), `abort` (the safety-floor CORE ABORT), `locked`
+(a benign flock-skipped tick — recorded, distinct from `flat`), `stale-lock`
+(a wedged/orphaned holder past the tripwire), `running` (a still-streaming
+agent), and `crashed` (a `start` event with no matching `end` — the process
+died mid-core, classified purely from timestamps). Run on demand with
+`report.py --company .company` (`--write` to save, `--tsv` for the raw flat
+file; `--window-days N`/`--all` control how much history is read, default 30
+days — see "Observability spine" below). This is the artifact the Chairman
+wakes up to.
 
 ### Surfacing the report mid-session (P1)
 

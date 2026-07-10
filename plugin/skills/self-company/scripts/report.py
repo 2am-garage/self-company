@@ -8,7 +8,8 @@ down, a keep/discard/crash verdict, and a one-line description of what was tried
 You scan it in seconds.
 
 This builds the same thing for the self-company's unattended daily runs. One row
-per `daily-run.sh` execution, parsed deterministically from ops/logs/daily-*.md:
+per `daily-run.sh` execution, read through daily_log.py (Phase 27 Item 1's shared
+JSONL reader — the .md log stays the human render; the JSONL is the data source):
 
   run                entropy(down)   mem   status   what happened
   06-29 18:07        0.0356 v0.0516   45   keep     verify +14, merged dups, 1 upgrade-cand
@@ -17,179 +18,73 @@ Mapping (autoresearch -> self-company):
   commit      -> run timestamp
   val_bpb     -> entropy        (lower is better; same direction as val_bpb)
   memory_gb   -> memory count
-  status      -> keep / flat / skip / fail
+  status      -> keep / flat / skip / fail / warn / abort / locked / stale-lock
+                 / running / crashed
   description -> decay/verify/agent actions this run
 
 Status verdict:
-  keep  — something substantive moved (entropy dropped, decayed, verified, or
-          upgrade candidates surfaced) — the "keep" of a good experiment
-  flat  — ran clean but nothing changed (no-op maintenance) — like "discard"
-  skip  — agent step was BENIGNLY skipped (daily cap hit / no claude CLI)
-  fail  — the agent died (rc!=0), TIMED OUT, or was AUTH_FAIL-skipped — an
-          unhealthy agent day is never masked as keep/skip, even when the
-          deterministic half moved things (Phase 5 Item 3 / N4: the 18:07
-          "keep | verify +68" row on a dead-agent day was the bug)
+  keep       — something substantive moved (entropy dropped, decayed, verified,
+               or upgrade candidates surfaced) — the "keep" of a good experiment
+  flat       — ran clean but nothing changed (no-op maintenance) — like "discard"
+  skip       — agent step was BENIGNLY skipped (daily cap hit / no claude CLI)
+  fail       — the agent died (rc!=0), TIMED OUT, or was AUTH_FAIL-skipped — an
+               unhealthy agent day is never masked as keep/skip, even when the
+               deterministic half moved things (Phase 5 Item 3 / N4: the 18:07
+               "keep | verify +68" row on a dead-agent day was the bug)
+  warn       — a memory-rot warning (Phase 25 Item 3) OR a core-step timeout
+               (Phase 27 Item 4) was recorded this run — never masked behind
+               keep/flat even when something else legitimately moved
+  abort      — the deterministic core's safety floor failed (Phase 25 Item 1) —
+               reinforce/decay/verify did NOT run this tick
+  locked     — a benign one-off flock contention: this cron tick found
+               .daily.lock already held and skipped (Phase 27 Item 3) — a
+               RECORDED tick that did NOT run, distinct from "ran, nothing
+               changed"
+  stale-lock — a wedged/orphaned holder past the staleness tripwire
+               (Phase 25 Item 4.3) — never a silent skip
+  running    — the run's agent step is still streaming (in-flight)
+  crashed    — a `start` event with no matching `end` past the in-flight
+               window (Phase 27 Item 1) — the process died mid-core (kill -9,
+               reboot), classified purely from timestamps, never via
+               agent-log-mtime probing
 
 Usage:
   report.py [--company DIR]                 # print markdown ledger to stdout
   report.py [--company DIR] --write         # also write ops/reports/ledger.md
   report.py [--company DIR] --tsv           # emit raw TSV instead of markdown
   report.py [--company DIR] --limit N       # only the last N runs
+  report.py [--company DIR] --window-days N # only runs within N days (default 30)
+  report.py [--company DIR] --all           # full history, ignoring the window
 
 Pure stdlib, read-only (except --write).
 """
 
 import argparse
 import os
-import re
-import time
-from datetime import datetime
+import sys
 from pathlib import Path
 
-RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
-
-# C2: a run whose agent-<date>.log was written within this many seconds is treated
-# as IN-FLIGHT (the agent is still streaming). Env-overridable.
-INFLIGHT_WINDOW = int(os.environ.get("SELF_COMPANY_INFLIGHT_WINDOW", "300"))
-
-
-def _agent_log_fresh(company, ts, now=None):
-    """True if ops/logs/agent-<run-date>.log was modified within INFLIGHT_WINDOW —
-    i.e. an agent is (still) actively streaming to it. Missing/stale => False."""
-    p = Path(company) / "ops" / "logs" / f"agent-{ts.strftime('%Y-%m-%d')}.log"
-    try:
-        mtime = p.stat().st_mtime
-    except OSError:
-        return False
-    now = time.time() if now is None else now
-    return (now - mtime) <= INFLIGHT_WINDOW
+# Phase 27 Item 1: the ONE shared reader. report.py no longer owns a private
+# run-header regex, a block-walker, or the agent-log-mtime in-flight heuristic — daily_log.py
+# does, once, for every consumer (report/notify-status/org-status/fleet).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import daily_log  # noqa: E402
 
 
-def _mark_inflight(company, rows):
-    """C2 (REPORT/TOM-5): the MOST-RECENT run only. A block with an `agent prompt`
-    line but NO outcome line is a SILENT DEATH by default (classified `failed`).
-    But if it is the latest run AND the agent is still in-flight (its
-    agent-<date>.log is freshly written), it is not dead — render `running`, not a
-    false `fail — agent died`. It self-corrects to the real outcome once the agent
-    writes its outcome line (a genuine death: stale log + no outcome stays fail)."""
-    if not rows:
-        return
-    last = rows[-1]
-    if last.get("_silent_death") and _agent_log_fresh(company, last["ts"]):
-        last["agent"] = "running"
-
-
-def _parse_ts(s):
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        return None
-
-
-def collect(company):
-    """Parse every real (non-dry-run) daily-run block into a structured row."""
-    logs = sorted((Path(company) / "ops" / "logs").glob("daily-*.md"))
-    rows = []
-    for f in logs:
-        try:
-            lines = f.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        i = 0
-        while i < len(lines):
-            m = RUN_RE.match(lines[i])
-            if not m:
-                i += 1
-                continue
-            ts, tail = _parse_ts(m.group(1)), m.group(2)
-            i += 1
-            if ts is None or "dry-run" in tail:
-                continue
-            r = {"ts": ts, "drop": 0, "demote": 0, "archive": 0, "upgrade": 0,
-                 "verified": 0, "unverifiable": 0, "entropy": None, "memories": None,
-                 "agent": None, "merged": 0, "promoted": 0,
-                 # Phase 25 Item 1/3: safety-floor abort + surfaced corruption
-                 # warnings — computed every run and previously thrown away
-                 # with the temp JSON; now visible in the ledger too.
-                 "warnings": 0, "core_aborted": False, "abort_reason": None,
-                 "lock_stale": False}
-            while i < len(lines) and not RUN_RE.match(lines[i]):
-                ln = lines[i]
-                dm = re.search(r"drop (\d+) \| demote (\d+) \| archive (\d+) \| upgrade-candidates (\d+)", ln)
-                if dm:
-                    r["drop"], r["demote"], r["archive"], r["upgrade"] = map(int, dm.groups())
-                vm = re.search(r"newly-verified (\d+)", ln)
-                if vm:
-                    r["verified"] = int(vm.group(1))
-                um = re.search(r"unverifiable \[?(\d+)?", ln)  # count in the summary line
-                vm2 = re.search(r"unverifiable (\d+)", ln)
-                if vm2:
-                    r["unverifiable"] = int(vm2.group(1))
-                em = re.search(r"entropy ([0-9.]+).*over (\d+) memories", ln)
-                if em:
-                    r["entropy"] = float(em.group(1))
-                    r["memories"] = int(em.group(2))
-                # Phase 25 Item 3: "- warnings: N (first 5: ...)" — emitted for
-                # every stage that carries a `warnings` list (today: decay).
-                # Summed across the run so ANY stage's corruption/rot signal
-                # flips the verdict (never a silent flat/keep).
-                wm = re.match(r"^- warnings: (\d+)", ln)
-                if wm:
-                    r["warnings"] += int(wm.group(1))
-                # Phase 25 Item 1: the deterministic core was ABORTED (safety
-                # floor failed — snapshot failure or free-space preflight
-                # miss). This is the highest-priority, never-flat/keep signal.
-                if ln.startswith("- CORE ABORTED:"):
-                    r["core_aborted"] = True
-                    r["abort_reason"] = ln[len("- CORE ABORTED:"):].strip()
-                # Phase 25 Item 4.3: a stale-lock tripwire fired — also never
-                # a silent flat/keep (a wedged/orphaned run needs attention).
-                if ln.startswith("- LOCK STALE:"):
-                    r["lock_stale"] = True
-                if ln.startswith(("- agent:", "- agent (", "- agent prompt")):
-                    # B3 (Phase 5 Item 3, N4): classify the agent OUTCOME
-                    # honestly. The old substring test counted an AUTH_FAIL
-                    # skip as benign "skipped" and knew nothing of timeouts —
-                    # a green ledger row on a red day. "- agent prompt: ..."
-                    # is a breadcrumb, not an outcome (but remember we saw it:
-                    # a prompt with NO outcome line means the run died before
-                    # it could record one -> failed, see below).
-                    # Only daily-run.sh's own writer shapes count ("- agent:",
-                    # "- agent (", "- agent prompt"): a CAPTURE line for a
-                    # memory whose slug starts with "agent" ("- agent-model-…
-                    # (L0) — pending_verify") is DATA, not an outcome — it must
-                    # never flip a healthy day red (or mask a red day).
-                    if ln.startswith("- agent prompt"):
-                        r["_agent_attempted"] = True
-                    elif "AUTH_FAIL" in ln or "auth pre-flight" in ln:
-                        r["agent"] = "auth-fail"
-                    elif "TIMEOUT" in ln:
-                        r["agent"] = "timeout"
-                    elif " ok" in ln:
-                        r["agent"] = "ok"
-                    elif "skip" in ln:
-                        r["agent"] = "skipped"   # benign: cap reached / no CLI
-                    else:
-                        r["agent"] = "failed"
-                # agent consolidation prose: count merges / promotions if present
-                if "absorbed" in ln.lower() or re.search(r"→ status: archived", ln):
-                    r["merged"] += 1
-                if re.search(r"promoted|L0\s*->\s*L1|L0→L1", ln):
-                    r["promoted"] += 1
-                i += 1
-            # B3: an agent prompt was built but NO outcome line follows — the
-            # run died before it could record one (no-output crash). Honest
-            # classification: failed.
-            if r.pop("_agent_attempted", False) and r["agent"] is None:
-                r["agent"] = "failed"
-                r["_silent_death"] = True   # C2: eligible for in-flight reclassification
-            rows.append(r)
-    rows.sort(key=lambda x: x["ts"])
-    _mark_inflight(company, rows)           # C2: latest silent-death + fresh log -> running
-    return rows
+def collect(company, window_days=daily_log.DEFAULT_WINDOW_DAYS):
+    """Every real (non-dry-run) daily-run, oldest first, as a Run dict (see
+    daily_log.py). Item 5: reports read a month by default, not a lifetime —
+    pass window_days=None (the ledger's --all flag) for the full history."""
+    return daily_log.read_runs(company, window_days=window_days)
 
 
 def verdict(r, prev_entropy):
+    # Phase 27 Item 1: a run whose `start` event has no matching `end` — the
+    # process died mid-core (kill -9, box reboot) — classifies `crashed`
+    # purely from timestamps (daily_log.py), never `flat`/`keep`, and never
+    # via mtime-probing an agent log (that race is retired by construction).
+    if r.get("run_state") == "crashed":
+        return "crashed"
     # Phase 25 Item 1: an ABORTED deterministic core (the pre-apply snapshot
     # failed, or the free-space preflight came in under threshold — the
     # safety floor failed) is the single highest-priority signal: it is NEVER
@@ -203,6 +98,12 @@ def verdict(r, prev_entropy):
     # skip — it needs a human to look, not a routine contention line.
     if r.get("lock_stale"):
         return "stale-lock"
+    # Item 3: a benign one-off flock contention (this cron tick found the lock
+    # already held and skipped, no pile-up) is a RECORDED tick that did NOT
+    # run — rendered distinctly as `locked`, never `flat` ("ran clean but
+    # nothing changed") or `skip` (the agent's own benign-skip vocabulary).
+    if r.get("lock") == "skipped":
+        return "locked"
     # C2: an in-flight run (latest block, prompt built, agent still streaming) is
     # neither keep nor fail yet — it is `running`, and self-corrects on the
     # outcome line. Checked FIRST so a live agent is never rendered `fail`.
@@ -227,6 +128,12 @@ def verdict(r, prev_entropy):
     # already treats warnings unconditionally; this brings report.py in line.)
     if r.get("warnings"):
         return "warn"
+    # Item 4: a core-step timeout (reinforce/decay/verify/entropy/rag-index
+    # killed at budget) must never render flat/keep — the tick made no
+    # promise it kept, even if some OTHER step legitimately moved something.
+    if any(isinstance(s, dict) and s.get("outcome") == "timeout"
+           for s in (r.get("steps") or {}).values()):
+        return "warn"
     moved = (
         r["drop"] or r["demote"] or r["archive"] or r["upgrade"]
         or r["verified"] or r["merged"] or r["promoted"]
@@ -241,12 +148,18 @@ def verdict(r, prev_entropy):
 
 def describe(r):
     bits = []
+    if r.get("run_state") == "crashed":
+        bits.append("CRASHED — start recorded, no end (process died mid-run)")
+        return ", ".join(bits)
     # Phase 25 Item 1/4.3: the two safety-floor signals lead the description
     # unconditionally — a human reading one line must see these first.
     if r.get("core_aborted"):
         bits.append(f"CORE ABORTED — {r.get('abort_reason') or 'safety floor failed'}")
     if r.get("lock_stale"):
         bits.append("LOCK STALE — wedged/orphaned run holding .daily.lock")
+    if r.get("lock") == "skipped":
+        bits.append("locked — cron tick skipped (concurrent run held .daily.lock)")
+        return ", ".join(bits)
     # C2: an in-flight agent leads the description — the deterministic half's
     # progress follows, but the run is not done, so it is neither keep nor fail.
     if r["agent"] == "running":
@@ -275,6 +188,10 @@ def describe(r):
         bits.append(f"{r['upgrade']} upgrade-cand")
     if r.get("warnings"):
         bits.append(f"{r['warnings']} warning(s)")
+    timed_out = [name for name, s in (r.get("steps") or {}).items()
+                 if isinstance(s, dict) and s.get("outcome") == "timeout"]
+    if timed_out:
+        bits.append(f"TIMEOUT: {', '.join(sorted(timed_out))}")
     if not bits:
         bits.append("no-op maintenance")
     return ", ".join(bits)
@@ -322,9 +239,14 @@ def main(argv=None):
     ap.add_argument("--write", action="store_true", help="write ops/reports/ledger.md")
     ap.add_argument("--tsv", action="store_true", help="emit raw TSV instead of markdown")
     ap.add_argument("--limit", type=int, default=0, help="only the last N runs")
+    ap.add_argument("--window-days", dest="window_days", type=int,
+                    default=daily_log.DEFAULT_WINDOW_DAYS,
+                    help="only runs within the last N days (Item 5; default 30)")
+    ap.add_argument("--all", action="store_true",
+                    help="full history, ignoring --window-days (Item 5)")
     args = ap.parse_args(argv)
 
-    rows = collect(args.company)
+    rows = collect(args.company, window_days=None if args.all else args.window_days)
     table = build(rows)
     if args.limit > 0:
         table = table[-args.limit:]

@@ -426,6 +426,127 @@ class TestMemoryGuardR2FailClosed(_CompanyRepo):
         self._allow("command builtin cd /tmp && rm -rf junk")
 
 
+class TestMemoryGuardRedirectTruncation(_CompanyRepo):
+    """Phase 27 C2 (GIB R3 backlog) — `>` truncation is a deletion primitive
+    the pre-Phase-27 guard didn't see: _normalize() collapsed `>`/`>>`/`>|`
+    into the same generic ';' separator as every other operator BEFORE any
+    deleter check ran, so `echo x > .company/memory/foo.md` (or `: >`, `>|`,
+    bare `tee`) truncated a memory file to nothing and sailed straight
+    through. A bare `>`/`>|` or `tee` without `-a` into the store now DENIES,
+    using the same fail-closed resolution (cd-tracking, is_mem_literal
+    backstop, in_store realpath check, nested-shell subsumption) as every
+    other deleter. `>>` (append) and `tee -a` are NOT deletion and must stay
+    allowed, in and out of the store."""
+
+    def _decision(self, out):
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    def _deny(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "deny", cmd)
+
+    def _allow(self, cmd):
+        rc, out, _ = run_guard(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}}, self.root)
+        self.assertEqual(self._decision(out), "allow", cmd)
+
+    # The literal examples from the spec: bare `>`/`>|`/`tee` truncate ------
+    def test_echo_redirect_into_memory_denied(self):
+        self._deny("echo x > .company/memory/L2-longterm/foo.md")
+
+    def test_bare_colon_truncate_into_memory_denied(self):
+        self._deny(": > .company/memory/foo")
+
+    def test_clobber_redirect_into_memory_denied(self):
+        self._deny("printf x >| .company/memory/foo")
+
+    def test_bare_tee_into_memory_denied(self):
+        self._deny("tee .company/memory/foo")
+
+    # Append is NOT deletion — must stay allowed, in and out of the store ---
+    def test_append_redirect_into_memory_allowed(self):
+        self._allow("echo x >> .company/memory/foo.md")
+
+    def test_tee_append_into_memory_allowed(self):
+        self._allow("tee -a .company/memory/foo.md")
+
+    def test_tee_longopt_append_into_memory_allowed(self):
+        self._allow("tee --append .company/memory/foo.md")
+
+    # Redirect/tee outside the store is ordinary shell usage — must stay
+    # allowed (no new false positives) --------------------------------------
+    def test_truncate_redirect_outside_store_allowed(self):
+        self._allow("echo x > /tmp/foo")
+
+    def test_clobber_redirect_outside_store_allowed(self):
+        self._allow("printf x >| /tmp/foo")
+
+    def test_bare_tee_outside_store_allowed(self):
+        self._allow("tee /tmp/foo")
+
+    # cd-tracking applies to a relative redirect target exactly like a
+    # deleter argument ------------------------------------------------------
+    def test_cd_then_relative_redirect_into_memory_denied(self):
+        self._deny("cd .company/memory && echo x > foo.md")
+
+    def test_cd_then_relative_redirect_outside_memory_allowed(self):
+        self._allow("cd /tmp && echo x > foo.md")
+
+    # Nested-shell-wrapped redirect/tee pointed at the store: the decisive
+    # nested-shell rule must catch it, but stay target-aware (unlike rm/mv's
+    # blanket rule) so ordinary `>`/`tee` usage inside a nested shell for
+    # files unrelated to the store is NOT a false trip ----------------------
+    def test_nested_bash_c_redirect_into_memory_denied(self):
+        self._deny('bash -c "echo x > .company/memory/foo.md"')
+
+    def test_nested_eval_tee_into_memory_denied(self):
+        self._deny('eval "tee .company/memory/foo.md"')
+
+    def test_nested_bash_c_append_into_memory_allowed(self):
+        self._allow('bash -c "echo x >> .company/memory/foo.md"')
+
+    def test_nested_bash_c_tee_append_into_memory_allowed(self):
+        self._allow('bash -c "tee -a .company/memory/foo.md"')
+
+    def test_nested_bash_c_redirect_outside_store_allowed(self):
+        self._allow('bash -c "echo hi > /tmp/log"')
+
+    # MUST-FIX 2: the `&>` / `>&` both-streams truncating forms the first C2
+    # pass missed — Gibby live-fired `echo X &> …/foo.md` and it truncated the
+    # file undetected. They truncate exactly like `>`, so DENY into the store;
+    # the `&>>` append form and out-of-store / fd-dup uses stay ALLOWED.
+    def test_amp_redirect_into_memory_denied(self):
+        self._deny("echo X &> .company/memory/L0-working/foo.md")
+
+    def test_redirect_amp_into_memory_denied(self):
+        self._deny("echo X >& .company/memory/L0-working/foo.md")
+
+    def test_bare_colon_amp_truncate_into_memory_denied(self):
+        self._deny(": &> .company/memory/foo")
+
+    def test_amp_append_into_memory_allowed(self):
+        self._allow("echo X &>> .company/memory/L0-working/foo.md")
+
+    def test_amp_redirect_outside_store_allowed(self):
+        self._allow("echo X &> /tmp/other.md")
+
+    def test_redirect_amp_outside_store_allowed(self):
+        self._allow("echo X >& /tmp/other.md")
+
+    def test_fd_dup_not_treated_as_store_truncation(self):
+        self._allow("ls .company/memory 2>&1")
+
+    def test_cd_then_relative_amp_redirect_into_memory_denied(self):
+        self._deny("cd .company/memory/L0-working && echo X &> foo.md")
+
+    def test_nested_bash_c_amp_redirect_into_memory_denied(self):
+        self._deny('bash -c "echo X &> .company/memory/L0-working/foo.md"')
+
+    def test_nested_bash_c_amp_append_into_memory_allowed(self):
+        self._allow('bash -c "echo X &>> .company/memory/L0-working/foo.md"')
+
+
 class TestMemoryLint(_CompanyRepo):
     def _rel(self, name):
         return os.path.join(".company", "memory", "L0-working", name)
