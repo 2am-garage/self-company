@@ -286,8 +286,9 @@ repo-scoped-skill      sub-agent-isolation      verify-before-commit
 four-daily-runs        minimal-permission-overhead
 ```
 
-This set is declared in `verify_memory.CHARTER_SEED_IDS` and mirrored in
-`entropy.CHARTER_SEED_IDS`. A **normal captured memory that self-declares
+This set is declared in **ONE** place — `scripts/charter_ids.py`
+(`CHARTER_SEED_IDS`) — and imported by both `verify_memory.py` and `entropy.py`;
+neither script declares its own copy. A **normal captured memory that self-declares
 `charter:`** (frontmatter or source) but is **not** in the blessed set is NOT
 silently trusted:
 
