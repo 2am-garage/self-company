@@ -64,39 +64,148 @@ LEDGER="$REPORTS/company-runs.md"
 TS="$(date +%FT%T)"
 
 # --- 1. PLAN (Phoebe) ------------------------------------------------------
-plan_json=""
+LOGDIR="$COMPANY/ops/logs"; mkdir -p "$LOGDIR"
+PLAN_LOG="$LOGDIR/company-run-plan-$(date +%F).log"
+plan_json=""; plan_partial=false
 if ! $DEMO; then
   CLAUDE_BIN="$(sc_resolve_claude_bin)"
   if [[ -n "$CLAUDE_BIN" ]]; then
-    roster="$(python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --list 2>/dev/null)"
+    roster_raw="$(python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --list 2>/dev/null)"
+    roster="$(printf '%s' "$roster_raw" | python3 -c "
+import json, sys
+try:
+    print(', '.join(json.load(sys.stdin).get('roster', [])))
+except Exception:
+    print('')
+" 2>/dev/null || true)"
+    # Phase 29 Item 4 (Bob P1): STATE the real wall-clock budget (the timeout
+    # wrapper below receives the SAME 180) and the output contract explicitly
+    # (Idea 7's four elements), instead of an implicit "JSON only" aside.
+    PLAN_BUDGET_SECONDS=180
+    ROLE_LINE="$(python3 "$SCRIPTS_RT/prompt_builder.py" role \
+      --name "Phoebe" --role "the self-company execution gateway")"
+    BUDGET_LINE="$(python3 "$SCRIPTS_RT/prompt_builder.py" budget --seconds "$PLAN_BUDGET_SECONDS")"
+    CONTRACT_LINE="$(python3 "$SCRIPTS_RT/prompt_builder.py" contract \
+      --where "your response" \
+      --format 'ONLY a single JSON object mapping employee id -> a one-line subtask (e.g. {"bob":"...", "gibby":"verify Bob'"'"'s change"}) — no prose, no markdown fence')"
+    BOUNDARY_LINE="$(python3 "$SCRIPTS_RT/prompt_builder.py" boundary \
+      --text "use ONLY employee ids from the list above — an id not in that list will be dropped before dispatch")"
     read -r -d '' PPROMPT <<EOF || true
-You are Phoebe, the self-company execution gateway. Break this task into a MINIMAL
-per-employee assignment. Employees available: $roster. Task: "$TASK".
-Output ONLY a single JSON object mapping employee id -> a one-line subtask, e.g.
-{"bob":"...", "gibby":"verify Bob's change"}. No prose, JSON only.
+$ROLE_LINE
+$BUDGET_LINE
+Break this task into a MINIMAL per-employee assignment.
+Employees available: $roster.
+Task: "$TASK"
+$CONTRACT_LINE
+$BOUNDARY_LINE
 EOF
     # Item 1 (TOM-2): hard-kill grace on Phoebe's planning spawn too — a claude
     # that ignores SIGTERM is SIGKILLed <grace>s past budget, no orphan. `-k` is
     # GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
     KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
-    sc_spawn_capture "$KILL_AFTER" 180 "$CLAUDE_BIN" "$PPROMPT" \
-      "${SELF_COMPANY_PLAN_MODEL:-claude-sonnet-4-6}"
-    raw="$("${SC_SPAWN_CMD[@]}" 2>/dev/null || true)"
-    plan_json="$(printf '%s' "$raw" | python3 -c "import sys,re,json
-t=sys.stdin.read()
-m=re.findall(r'\{[^{}]*\}', t, re.S)
-for cand in reversed(m):
+    # Phase 29 Item 2: default model resolves through schedule_config's ONE
+    # source-of-truth constant (DEFAULT_AGENT_MODEL) instead of a second
+    # hardcoded literal here — env override still wins.
+    _default_model="$(python3 "$SCRIPTS_RT/schedule_config.py" --company "$COMPANY" \
+      --agent model 2>/dev/null || true)"
+    [[ -n "$_default_model" ]] || _default_model="claude-sonnet-5"
+    # Phase 29 fold-in H3: --output-format json gives ONE parseable envelope
+    # (the model's reply lives in .result) instead of scraping raw stdout —
+    # see the roster-validation parser below.
+    sc_spawn_capture "$KILL_AFTER" "$PLAN_BUDGET_SECONDS" "$CLAUDE_BIN" "$PPROMPT" \
+      "${SELF_COMPANY_PLAN_MODEL:-$_default_model}" --output-format json
+    raw="$("${SC_SPAWN_CMD[@]}" 2>>"$PLAN_LOG" || true)"
+    # H3: parse the JSON envelope -> .result -> the plan object inside it,
+    # DROPPING any key that isn't a real roster employee id (a hallucinated
+    # {"alice": "..."} must never silently dispatch nobody and ledger rc 0 —
+    # every path below is logged, never swallowed by `2>/dev/null || true`).
+    parsed="$(printf '%s' "$raw" | python3 -c "
+import json, re, sys
+
+roster = [e.strip() for e in sys.argv[1].split(',') if e.strip()]
+raw = sys.stdin.read()
+out = {'plan': {}, 'dropped': [], 'parse_error': None}
+
+
+def emit():
+    print(json.dumps(out))
+
+
+try:
+    envelope = json.loads(raw)
+except Exception as e:
+    out['parse_error'] = f'envelope not JSON: {e}'
+    emit()
+    sys.exit(0)
+if not isinstance(envelope, dict):
+    out['parse_error'] = 'envelope not a JSON object'
+    emit()
+    sys.exit(0)
+if envelope.get('is_error'):
+    out['parse_error'] = f\"claude reported an error (subtype={envelope.get('subtype')})\"
+    emit()
+    sys.exit(0)
+result_text = envelope.get('result')
+if not isinstance(result_text, str) or not result_text.strip():
+    out['parse_error'] = 'no .result text in envelope'
+    emit()
+    sys.exit(0)
+candidates = re.findall(r'\{[^{}]*\}', result_text, re.S)
+plan = None
+for cand in reversed(candidates):
     try:
-        d=json.loads(cand)
-        if isinstance(d,dict) and d: print(json.dumps(d)); break
-    except Exception: pass" 2>/dev/null || true)"
+        d = json.loads(cand)
+        if isinstance(d, dict) and d:
+            plan = d
+            break
+    except Exception:
+        continue
+if plan is None:
+    out['parse_error'] = 'no parseable JSON object found in .result'
+    emit()
+    sys.exit(0)
+valid, dropped = {}, []
+for k, v in plan.items():
+    if k in roster:
+        valid[k] = v
+    else:
+        dropped.append(k)
+out['plan'] = valid
+out['dropped'] = dropped
+emit()
+" "$roster" 2>>"$PLAN_LOG" || echo '{"plan": {}, "dropped": [], "parse_error": "parser crashed"}')"
+
+    parse_error="$(printf '%s' "$parsed" | python3 -c "import json,sys; print(json.load(sys.stdin).get('parse_error') or '')" 2>/dev/null || true)"
+    dropped="$(printf '%s' "$parsed" | python3 -c "import json,sys; print(', '.join(json.load(sys.stdin).get('dropped') or []))" 2>/dev/null || true)"
+    plan_json="$(printf '%s' "$parsed" | python3 -c "
+import json, sys
+d = json.load(sys.stdin).get('plan') or {}
+print(json.dumps(d) if d else '')
+" 2>/dev/null || true)"
+
+    if [[ -n "$parse_error" ]]; then
+      echo "$(date +%FT%T) plan parse failed: $parse_error (raw: ${raw:0:200})" >> "$PLAN_LOG"
+    fi
+    if [[ -n "$dropped" ]]; then
+      echo "$(date +%FT%T) plan dropped unknown employee id(s): $dropped" >> "$PLAN_LOG"
+      plan_partial=true
+    fi
   fi
 fi
 
-# Heuristic fallback / demo plan: Bob does it, Gibby verifies.
+# Heuristic fallback / demo plan: Bob does it, Gibby verifies. Also the
+# recovery path when Phoebe's plan parsed to NOTHING usable (garbage output,
+# an error envelope, or every key hallucinated) — H3: this must never
+# silently ledger an empty/no-op plan as a clean success.
 if [[ -z "$plan_json" ]]; then
   plan_json="$(python3 -c "import json,sys; print(json.dumps({'bob': sys.argv[1], 'gibby': 'verify the change'}))" "$TASK")"
-  planned_by="heuristic"
+  if ! $DEMO && [[ -n "${parse_error:-}${dropped:-}" ]]; then
+    planned_by="heuristic-after-invalid-plan"
+  else
+    planned_by="heuristic"
+  fi
+elif $plan_partial; then
+  planned_by="Phoebe (plan:partial)"
 else
   planned_by="Phoebe"
 fi
