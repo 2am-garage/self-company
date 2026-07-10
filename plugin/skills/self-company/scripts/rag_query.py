@@ -346,7 +346,7 @@ Examples:
         if not _HAS_LANCEDB or not _HAS_EMBED:
             msg = (
                 "[rag_query] RAG backend not installed. Run:\n"
-                "  bash .company/scripts/rag_setup.sh install\n"
+                "  bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install\n"
                 "(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)\n"
                 "Fallback: grep -ri '<keywords>' .company/memory"
             )
@@ -381,7 +381,7 @@ Examples:
     except EmbeddingUnavailable as e:
         msg = (
             f"[rag_query] embedding backend unavailable: {e}\n"
-            "[rag_query] Run: bash .company/scripts/rag_setup.sh install\n"
+            "[rag_query] Run: bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install\n"
             "(see references/rag.md)\n"
             "Fallback: grep -ri '<keywords>' .company/memory"
         )

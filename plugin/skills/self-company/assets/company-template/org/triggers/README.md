@@ -4,9 +4,12 @@ User-defined, declarative. One `*.yaml` file per trigger (flat `key: value` — 
 safe YAML subset; works with or without PyYAML). The engine (`trigger_engine.py`)
 is never edited — you only add/remove files here.
 
-Fire one from your own program (push model — no polling):
+Fire one from your own program (push model — no polling). Scripts are not
+copied into `.company/scripts/` (code/data separation) — from inside a Claude
+Code session use `${CLAUDE_PLUGIN_ROOT}`; an external, non-Claude-Code caller
+should hardcode the actual absolute path to the same file once:
 
-    .company/scripts/fire-trigger.sh <name> '<payload-json>'
+    ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/fire-trigger.sh <name> '<payload-json>'
 
 Fields:
 

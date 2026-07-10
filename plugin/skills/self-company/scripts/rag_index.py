@@ -522,7 +522,7 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         _ = embed("test")
     except EmbeddingUnavailable:
         print("[rag_index] RAG backend not installed. Run:\n"
-              "  bash .company/scripts/rag_setup.sh install\n"
+              "  bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install\n"
               "(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)",
               file=sys.stderr)
         sys.exit(2)
@@ -754,7 +754,7 @@ def main():
     if not _HAS_LANCEDB:
         print(
             "[rag_index] RAG backend not installed. Run:\n"
-            "  bash .company/scripts/rag_setup.sh install\n"
+            "  bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install\n"
             "(installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)",
             file=sys.stderr
         )

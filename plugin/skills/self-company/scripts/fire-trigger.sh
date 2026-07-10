@@ -3,9 +3,14 @@
 # fire-trigger.sh — Trigger #3 entry point (event-driven, PUSH model).
 #
 # The company is dormant until an external producer fires it. Call this at the
-# end of YOUR program (training run, trading bot, CI job, ...):
+# end of YOUR program (training run, trading bot, CI job, ...). Scripts are NOT
+# copied into .company/scripts/ (code/data separation, Phase 1b) — from inside
+# a Claude Code session use ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/
+# fire-trigger.sh; an external program with no Claude Code session should
+# hardcode the actual absolute path to that same file once (find it via
+# ${CLAUDE_PLUGIN_ROOT} in a session, or wherever the plugin is installed):
 #
-#     .company/scripts/fire-trigger.sh training-done '{"val_bpb": 0.98}'
+#     ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/fire-trigger.sh training-done '{"val_bpb": 0.98}'
 #
 # Flow (Phase 26 Item 1 — commit state only AFTER validation/confirmation):
 #   1. `--decide` — READ-ONLY. Checks the condition + the 3 base guards

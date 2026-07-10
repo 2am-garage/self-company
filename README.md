@@ -27,7 +27,7 @@ bash plugin/skills/self-company/scripts/init_company.sh
 bash plugin/skills/self-company/scripts/schedule.sh install        # the scheduled work below
 ```
 
-> Hooks need **no** setup: since v0.1.2 all 7 hooks are **plugin-native** (declared in
+> Hooks need **no** setup: since v0.1.2 all 8 registrations across 7 events are **plugin-native** (declared in
 > `hooks/hooks.json`, run via `${CLAUDE_PLUGIN_ROOT}`) and load automatically with the
 > plugin. If you used the pre-v0.1.2 installer, run
 > `install-hook.sh uninstall` once to drop the legacy `.claude/settings.json` entries
@@ -66,7 +66,7 @@ agent knobs, and each employee's `cadence`/`duties`/`budget`/`enabled` in
 any config that would break the red/blue competition is rejected and falls back to
 defaults. A `SessionStart` guard syncs a tick change into the crontab.
 
-Event-driven (not cron): **7 plugin-native hooks** work automatically. `Stop`/`PreCompact`
+Event-driven (not cron): **8 plugin-native hook registrations across 7 events** work automatically. `Stop`/`PreCompact`
 capture memories in real time, `SessionStart` surfaces the scheduled-work report on
 entry, **`UserPromptSubmit` injects your relevant memories into the prompt at ask-time**
 (so the company actually *uses* what it learned), `SessionEnd` verifies fresh captures,

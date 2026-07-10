@@ -1,7 +1,7 @@
 # Self-Company — System Design v0.1
 
 > A multi-agent company-type skill that automatically learns the Chairman (user) habits, preferences, and background, and continuously fights entropy.
-> After installation, creates `./company/` in the current repo, local to a single project, not shared across projects.
+> After installation, creates `./.company/` in the current repo, local to a single project, not shared across projects.
 
 ---
 
@@ -26,7 +26,7 @@
 | **Bob** | Build Engineer | worker | Per Phoebe's plan, **produce code / files** | Haiku |
 | **Gibby** | QA Engineer | worker | **Red Team** — assume output is broken, rotate attack surfaces to hit Bob; 3 unbroken rounds to pass | Haiku |
 | **Tony** | Improvement Engineer | worker | Think: measure entropy, evaluate company health, memory maintenance logic (decay/dedup/contradiction), RAG strategy, **write upgrade proposals to Elon** | Sonnet |
-| **Tom** | IT / Ops Engineer | worker | Execute: `./company/` skeleton, scheduling/hooks, **token breaker**, backups, file integrity, **execute Elon-approved upgrades** | Haiku |
+| **Tom** | IT / Ops Engineer | worker | Execute: `./.company/` skeleton, scheduling/hooks, **token breaker**, backups, file integrity, **execute Elon-approved upgrades** | Haiku |
 | **Mike** | R&D Researcher | worker | Survey the external world (literature, comparable harnesses, ecosystem); return **cited, applicability-ranked briefs** — evidence packs for specs. Tony measures inside, Mike surveys outside | Sonnet |
 
 > RAG strategy owned by Tony; token monitoring and breaker owned by Tom (user-specified).
@@ -202,7 +202,7 @@ handoff_format: |               # handoff is concise brief only, not entire cont
 ## 2. Folder Structure
 
 ```
-./company/
+./.company/
 ├── org/                      # company settings (not memory content)
 │   ├── employees/            # each person's "desk" folder
 │   │   ├── elon/
@@ -402,7 +402,7 @@ RAG infrastructure is built and wired; only the local venv ships uninstalled:
 ## 9. Install Behavior
 
 - Skill downloads to **current repo's local** (not shared across projects).
-- On install, creates `./company/` skeleton + default `org/` settings in the repo.
+- On install, creates `./.company/` skeleton + default `org/` settings in the repo.
 - Doesn't touch existing `uwe-history/` (this design unrelated to it).
 
 ---

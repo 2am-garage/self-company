@@ -30,7 +30,7 @@ All content in English. Technical terms stay in English (cron, hook, token, back
 ## Scope
 
 **What I Do**
-- Maintain `./company/` folder skeleton integrity: ensure all subdirectories, `.gitkeep`, and required structure exist.
+- Maintain `./.company/` folder skeleton integrity: ensure all subdirectories, `.gitkeep`, and required structure exist.
 - Implement schedule and hook mechanisms (cron job / Stop hook): enable real-time / daily / weekly triggers to work.
 - **Token breaker** — Real-time monitoring of token usage; when budget ceiling is hit, stop high-cost operations (downgrade to CAPTURE + VERIFY only).
 - Back up `memory/` / `ops/logs/` and other critical data: regular backups to a safe location, prevent accidental loss.

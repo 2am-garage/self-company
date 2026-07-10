@@ -307,7 +307,8 @@ def main(argv=None):
 
     if not _HAS_DEPS:
         print(json.dumps({"error": "RAG backend not installed — run "
-                          "bash .company/scripts/rag_setup.sh install", "reinforcements": []}))
+                          "bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install",
+                          "reinforcements": []}))
         return 0
     if not Path(args.memory_dir).exists():
         print(json.dumps({"error": "no memory dir", "reinforcements": []}))

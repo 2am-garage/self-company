@@ -264,7 +264,7 @@ Load these on demand — none is needed to ACT until you're doing the specific t
 - [rag.md](references/rag.md) — RAG index (LanceDB + fastembed, local/offline); wired into the pipeline (index refresh + ask-time injection), venv-gated — `rag_setup.sh install` to activate the semantic path.
 - [status.md](references/status.md) — completion checklists + deferred items.
 
-**Scripts** (stdlib only; canonical in `scripts/`, run in place — never copied into `.company/`)
+**Scripts** (canonical in `scripts/`, run in place — never copied into `.company/`; stdlib only EXCEPT the `rag_*.py` family below, which needs the opt-in `.company/.rag-venv` — LanceDB + fastembed — created by `rag_setup.sh install`; everything else runs on a bare Python)
 - `decay.py` / `entropy.py` — the decay disposal pass and the entropy KPI pass (`--memory-dir .company/memory`, JSON; decay `--apply` mutates).
 - `frontmatter.py` / `tombstone.py` / `charter_ids.py` / `policy_config.py` — shared single-source libraries hard-imported across the scanners/hooks (frontmatter delimiter contract: `line.strip() == '---'`, opening fence on line 0). `policy_config.py --get KEY --default N` (Phase 29) is the one CLI seam bash callers use to resolve a tunable instead of an inline python heredoc.
 - `prompt_builder.py` — the shared dispatch-prompt assembly seam (Phase 29): role header, a STATED wall-clock budget (seconds, never tokens), a nonce-fenced data block, an output contract, a task boundary. Wired into `supervisor.py`, `fire-trigger.sh`, `research-scan.sh`, `company-run.sh`.
