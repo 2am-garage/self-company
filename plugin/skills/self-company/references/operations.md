@@ -392,14 +392,14 @@ so the wiring survives plugin version bumps with zero stale-path snapshots.
 | `SessionStart` | `startup\|resume\|clear\|compact` | `hook_schedule_guard.sh` | 120s | Cron self-heal: re-installs this project's crontab tick if its signature drifted or the line is missing (idempotent; see "SessionStart sync + self-heal" above). |
 | `UserPromptSubmit` | — | `hook_memory_inject.py` | **30s** | Ask-time memory injection: ranks L2/high-rc L1 by a **fast stdlib** scorer and injects top-k as `additionalContext`. Relevance-gated (injects nothing if nothing scores), token-capped, never blocks. **No fastembed cold-start on this path** (30s cap). |
 | `PreCompact` | `auto\|manual` | `hook_precompact_capture.sh` | 120s | Capture-rescue over the pre-compaction transcript before facts are summarized away; reuses the Stop cooldown to de-dup; never blocks compaction. |
-| `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`shred`/`rmdir`/`truncate`/`find … -delete`/`mv`-away — and, since **Phase 27**, a truncating `>`/`>|` redirect or a bare `tee` (no `-a`) — of any path under `.company/memory/` **or the `.company` store root** (`rm -rf .company` wipes memory too — physical deletion is the decay reap's job, Phase 6). `>>`/`tee -a` (append, not deletion) stay allowed everywhere. Broadens in-script; emits `permissionDecision` with reason. |
+| `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`shred`/`rmdir`/`truncate`/`find … -delete`/`mv`-away — and, since **Phase 27**, a truncating `>`/`>|`/`&>`/`>&` redirect or a bare `tee` (no `-a`) — of any path under `.company/memory/` **or the `.company` store root** (`rm -rf .company` wipes memory too — physical deletion is the decay reap's job, Phase 6). `>>`/`tee -a` (append, not deletion) stay allowed everywhere. Broadens in-script; emits `permissionDecision` with reason. |
 | `PostToolUse` | `Write\|Edit` | `hook_memory_lint.py` | 10s | Validates frontmatter of any `.company/memory/**.md` write (id/tier/status/sources, tombstone vocab); `block`s malformed writes with a reason. Non-memory files untouched. |
 | `SessionEnd` | — | `hook_sessionend_verify.sh` | 120s | Runs the deterministic verify pass so this session's fresh captures are source-stamped before the next SessionStart report. Side-effect only; never fails the session. |
 
 > Matcher key is `matcher` (real Claude Code schema). `PreToolUse` matches all `Bash`
 > and the guard script itself narrows to the dangerous `.company/memory` reap paths
 > plus the `.company` store root — so `rm`, `unlink`, `shred`, `rmdir`, `truncate`,
-> `find … -delete`, `mv`, and (Phase 27) a truncating `>`/`>|`/bare `tee` are all
+> `find … -delete`, `mv`, and (Phase 27) a truncating `>`/`>|`/`&>`/`>&`/bare `tee` are all
 > seen (defense in depth beside the tar floor).
 
 **Global-fire + `.company` opt-in guard.** Plugin hooks fire in **every** repo the
