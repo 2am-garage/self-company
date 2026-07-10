@@ -402,7 +402,7 @@ def main(argv=None):
                         "skill available (default: cwd).")
     p.add_argument("--runs-per-query", type=int, default=3)
     p.add_argument("--model", default=None,
-                   help="e.g. claude-sonnet-4-6 (optional).")
+                   help="e.g. claude-sonnet-5 (optional).")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--timeout", type=float, default=45.0,
                    help="Per-run wall-clock seconds (default 45).")

@@ -31,8 +31,8 @@
 # model: which model the agent uses. timeout: hard wall-clock seconds.
 # daily_cap: max token-spending agent runs per day (the token breaker).
 # Env still wins: SELF_COMPANY_DAILY_MODEL / SELF_COMPANY_DAILY_TIMEOUT override.
-# Default: model claude-sonnet-4-6, timeout 600, daily_cap 4.
-# agent: { model: claude-sonnet-4-6, timeout: 600, daily_cap: 4 }
+# Default: model claude-sonnet-5, timeout 600, daily_cap 4 (Phase 29 Item 2).
+# agent: { model: claude-sonnet-5, timeout: 600, daily_cap: 4 }
 
 # --- Per-employee blocks ------------------------------------------------------
 # Each block accepts ONLY: cadence, duties, budget, enabled. NO role field.
