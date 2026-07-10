@@ -14,7 +14,8 @@
 # never fabricates sources, never fails the cron.
 #
 # Usage: research-scan.sh [PROJECT_DIR]
-#   SELF_COMPANY_RESEARCH_MODEL   model for the pass (default claude-sonnet-4-6)
+#   SELF_COMPANY_RESEARCH_MODEL   model for the pass (default: schedule_config's
+#                                 DEFAULT_AGENT_MODEL — currently claude-sonnet-5)
 #   SELF_COMPANY_RESEARCH_TIMEOUT seconds (default 900)
 ###############################################################################
 set -uo pipefail
@@ -44,9 +45,18 @@ if [[ -z "$CLAUDE_BIN" ]]; then
   echo "[research-scan] claude CLI not found — skipped"; exit 0
 fi
 
+# Phase 29 Item 4 (Bob P1): research-scan NEVER stated its wall-clock budget to
+# the model at all — an open-ended survey could be SIGKILLed mid-write with no
+# warning. $RESEARCH_BUDGET_SECONDS is the SAME value the spawn call below
+# receives, so the stated budget and the real kill deadline can never drift.
+RESEARCH_BUDGET_SECONDS="${SELF_COMPANY_RESEARCH_TIMEOUT:-900}"
+ROLE_LINE="$(python3 "$_SC_LIB_DIR/prompt_builder.py" role \
+  --name "Mike" --role "the self-company R&D Researcher, doing the WEEKLY external research scan")"
+BUDGET_LINE="$(python3 "$_SC_LIB_DIR/prompt_builder.py" budget --seconds "$RESEARCH_BUDGET_SECONDS")"
+
 read -r -d '' PROMPT <<EOF || true
-You are MIKE, the self-company R&D Researcher, doing the WEEKLY external research
-scan (non-interactive, no human). Working dir: $PROJECT_DIR.
+$ROLE_LINE Working dir: $PROJECT_DIR.
+$BUDGET_LINE
 
 Your job: survey the OUTSIDE world for concrete, cited, evidence-backed improvements
 to THIS skill — and report honestly what we already have (Tony measures inside, you
@@ -95,8 +105,14 @@ printf '\n===== research-scan %s =====\n' "$TS" >> "$LOG"
 # <grace>s after budget so no orphan survives into the next scheduled scan.
 # `-k` is GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
 KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
-sc_spawn_capture "$KILL_AFTER" "${SELF_COMPANY_RESEARCH_TIMEOUT:-900}" "$CLAUDE_BIN" \
-  "$PROMPT" "${SELF_COMPANY_RESEARCH_MODEL:-claude-sonnet-4-6}"
+# Phase 29 Item 2: default model resolves through schedule_config's ONE
+# source-of-truth constant (DEFAULT_AGENT_MODEL) instead of a second
+# hardcoded literal here — env override still wins.
+_default_model="$(python3 "$_SC_LIB_DIR/schedule_config.py" --company "$COMPANY" \
+  --agent model 2>/dev/null || true)"
+[[ -n "$_default_model" ]] || _default_model="claude-sonnet-5"
+sc_spawn_capture "$KILL_AFTER" "$RESEARCH_BUDGET_SECONDS" "$CLAUDE_BIN" \
+  "$PROMPT" "${SELF_COMPANY_RESEARCH_MODEL:-$_default_model}"
 "${SC_SPAWN_CMD[@]}" >>"$LOG" 2>&1
 rc=$?
 if (( rc == 0 )); then
