@@ -79,8 +79,17 @@ from frontmatter import (parse as _fm_parse, serialize as _fm_serialize,
                          _atomic_write)  # noqa: F401
 
 RECURSION_GUARD = "SELF_COMPANY_CAPTURE_ACTIVE"
+# CAPTURE extraction runs on Haiku 4.5 — its OWN hardcoded pin, deliberately NOT
+# the sonnet-5 default the rest of Phase 29 bumped to. Cheap, fast, real-time.
 DEFAULT_MODEL = os.environ.get("SELF_COMPANY_CAPTURE_MODEL", "claude-haiku-4-5-20251001")
-MAX_CHAIRMAN_CHARS = 24000   # cap transcript size fed to the model
+# Phase 29 Item 2 tokenizer note (deliberate NON-change, documented per Gibby R1):
+# the sonnet-5 tokenizer re-baseline (~+30% tokens for the same text) applies ONLY
+# to prompts that feed a sonnet-5 agent. MAX_CHAIRMAN_CHARS and
+# RECENT_DIGEST_CHAR_BUDGET (below) both cap text fed to the CAPTURE model, which
+# is Haiku 4.5 (unchanged from pre-P29 — the same model it always used, same
+# tokenizer). These char budgets therefore feed an UNCHANGED model and are
+# intentionally left as-is; they are NOT part of the sonnet-5 joint re-baseline.
+MAX_CHAIRMAN_CHARS = 24000   # cap transcript size fed to the (Haiku 4.5) model
 MAX_OBSERVATIONS = 12        # cap L0 drafts written per session
 
 # Per-session CAPTURE cooldown (survey F3): the Stop hook fires on EVERY
@@ -111,6 +120,8 @@ DAILY_LOCK_NAME = ".daily.lock"
 RECENT_WINDOW_HOURS = 48          # digest window
 RECENT_DIGEST_MAX = 30            # max digest entries
 RECENT_GIST_CHARS = 140           # per-entry one-line gist cap
+# Phase 29 Item 2: intentionally NOT re-baselined — feeds the Haiku 4.5 CAPTURE
+# model (unchanged tokenizer), not a sonnet-5 agent. See MAX_CHAIRMAN_CHARS above.
 RECENT_DIGEST_CHAR_BUDGET = 4000  # total prompt chars the digest may consume
 
 # The three L0/L2 knowledge classes CAPTURE tags each observation with. Kept in

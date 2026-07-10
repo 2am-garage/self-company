@@ -604,6 +604,33 @@ class TestRecentDigestAndPrompt(unittest.TestCase):
         self.assertEqual(out[0]["reinforce"], "vim-daily")
 
 
+class TestPhase29CaptureCharBudgetsNotRebaselined(unittest.TestCase):
+    """Item 2 documented NON-change (Gibby R1 must-fix): the sonnet-5 tokenizer
+    re-baseline (~+30% tokens) applies ONLY to prompts feeding a sonnet-5 agent.
+    CAPTURE's MAX_CHAIRMAN_CHARS / RECENT_DIGEST_CHAR_BUDGET cap text fed to the
+    CAPTURE model, which is Haiku 4.5 (its own hardcoded pin, NOT bumped to
+    sonnet-5) — an UNCHANGED model with an UNCHANGED tokenizer. These budgets
+    are therefore intentionally left at their pre-P29 values. This test LOCKS
+    that decision: if a future change bumps CAPTURE to a sonnet-5 model, this
+    test (and the in-code rationale it references) forces the re-baseline
+    question to be re-answered rather than silently drifting."""
+
+    def test_capture_model_is_haiku_not_sonnet5(self):
+        # The premise of the no-re-baseline decision: capture feeds Haiku 4.5.
+        self.assertTrue(ct.DEFAULT_MODEL.startswith("claude-haiku-4-5"),
+                        f"capture model is {ct.DEFAULT_MODEL!r}; if it is now a "
+                        "sonnet-5 model, MAX_CHAIRMAN_CHARS / "
+                        "RECENT_DIGEST_CHAR_BUDGET must be re-baselined for the "
+                        "sonnet-5 tokenizer (Phase 29 Item 2)")
+
+    def test_max_chairman_chars_is_the_intended_value(self):
+        # Intentionally left at the pre-P29 value (feeds the unchanged Haiku 4.5).
+        self.assertEqual(ct.MAX_CHAIRMAN_CHARS, 24000)
+
+    def test_recent_digest_char_budget_is_the_intended_value(self):
+        self.assertEqual(ct.RECENT_DIGEST_CHAR_BUDGET, 4000)
+
+
 class TestPhase29InjectionClauseAndFence(unittest.TestCase):
     """Item 5 (P3): CAPTURE is the one data-carrying prompt in the system that
     was missing the "data, not instructions" clause. It now carries it, AND
