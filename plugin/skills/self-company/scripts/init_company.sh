@@ -6,15 +6,18 @@
 # Initialize a self-company skeleton in the current repository.
 #
 # Usage:
-#   ./init_company.sh
+#   ./init_company.sh [project_dir]
 #
 # Description:
-#   Copies the company template from assets/company-template/ to ./.company/
-#   in the current working directory (where the script is invoked).
+#   Copies the company template from assets/company-template/ to
+#   <project_dir>/.company/, where project_dir is an optional first
+#   positional argument (default: current working directory, i.e. the
+#   original ./.company/ behavior is unchanged when no arg is given).
 #
-#   - .company/ is HIDDEN and kept PRIVATE: the script ensures the repo's
-#     .gitignore excludes it, so company memory is never committed/pushed.
-#   - If ./.company/ already exists, aborts with warning.
+#   - .company/ is HIDDEN and kept PRIVATE: the script ensures the target
+#     project dir's .gitignore excludes it, so company memory is never
+#     committed/pushed.
+#   - If <project_dir>/.company/ already exists, aborts with warning.
 #   - Template location is resolved relative to this script's directory.
 #   - Creates full directory structure and seeded config/log files.
 #   - Fails fast on errors (set -euo pipefail).
@@ -36,8 +39,12 @@ readonly NC='\033[0m' # No Color
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly TEMPLATE_DIR="${SCRIPT_DIR}/../assets/company-template"
 
-# Target location (current working directory) — hidden + private
-readonly TARGET_DIR="./.company"
+# Target project dir and company dir are resolved in main() from an optional
+# first positional argument, defaulting to "." (today's cwd-relative
+# behavior, byte-compatible when no arg is given). Declared here so helper
+# functions below can see them once main() sets them.
+PROJECT_DIR="."
+TARGET_DIR="./.company"
 
 ################################################################################
 # Helper Functions
@@ -59,10 +66,12 @@ log_success() {
   echo -e "${GREEN}[SUCCESS]${NC} $*"
 }
 
-# Ensure the repo's .gitignore excludes the company folder (idempotent).
+# Ensure the target project's .gitignore excludes the company folder
+# (idempotent). Operates on PROJECT_DIR, not the invoker's cwd, so callers
+# that pass an explicit project dir don't leak a .gitignore edit into cwd.
 ensure_gitignore() {
   local pattern=".company/"
-  local gitignore=".gitignore"
+  local gitignore="${PROJECT_DIR}/.gitignore"
 
   # Already ignored? (covers existing patterns like .company or .company/)
   if [[ -f "${gitignore}" ]] && grep -qxE '\.company/?' "${gitignore}"; then
@@ -95,16 +104,25 @@ sync_scripts() {
 
 main() {
   # --sync-scripts: deprecated no-op (scripts now run from the skill, not copied); -h help.
+  # First non-flag positional arg (if any) is the target project dir; default cwd.
   for arg in "$@"; do
     case "$arg" in
       --sync-scripts) sync_scripts ;;
       -h|--help)
-        echo "Usage: init_company.sh [--sync-scripts]"
-        echo "  (no args)        initialize ./.company/ (data only) from the template"
+        echo "Usage: init_company.sh [project_dir] [--sync-scripts]"
+        echo "  project_dir      target project directory (default: current directory)"
+        echo "  (no args)        initialize <project_dir>/.company (data only) from the template"
         echo "  --sync-scripts   DEPRECATED no-op — scripts run from the skill, nothing to sync"
         exit 0 ;;
+      -*)
+        # Unknown flag: ignore, preserving legacy behavior (no arg validation before).
+        ;;
+      *)
+        PROJECT_DIR="$arg"
+        ;;
     esac
   done
+  TARGET_DIR="${PROJECT_DIR}/.company"
 
   # Check template exists
   if [[ ! -d "${TEMPLATE_DIR}" ]]; then
@@ -126,7 +144,7 @@ main() {
     rmdir "${TARGET_DIR}"
   fi
 
-  log_info "Initializing self-company in: $(pwd)"
+  log_info "Initializing self-company in: $(cd "${PROJECT_DIR}" && pwd)"
   log_info "Copying template from: ${TEMPLATE_DIR}"
 
   # Copy entire template tree

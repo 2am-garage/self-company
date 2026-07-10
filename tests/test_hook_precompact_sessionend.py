@@ -24,10 +24,18 @@ PRECOMPACT = os.path.join(SCRIPTS, "hook_precompact_capture.sh")
 SESSIONEND = os.path.join(SCRIPTS, "hook_sessionend_verify.sh")
 
 
-def _bash(args, stdin="", env=None):
+# Generous bound (never hit on a healthy box; a loaded/CI box just needs
+# headroom past ordinary python3-subprocess-per-hook startup cost). Without
+# an explicit timeout, a genuinely wedged hook would hang subprocess.run()
+# forever -- silently stalling the whole suite instead of failing cleanly
+# with a diagnosable TimeoutExpired.
+_BASH_TIMEOUT_S = 30
+
+
+def _bash(args, stdin="", env=None, timeout=_BASH_TIMEOUT_S):
     return subprocess.run(
         ["bash", *args], input=stdin, capture_output=True, text=True,
-        env={**os.environ, **(env or {})})
+        env={**os.environ, **(env or {})}, timeout=timeout)
 
 
 def _mk_company(base):
@@ -85,9 +93,19 @@ class TestPreCompact(unittest.TestCase):
             r = _bash([PRECOMPACT, "--dry-run"], stdin=payload,
                       env={"CLAUDE_PROJECT_DIR": d})
             self.assertEqual(r.returncode, 0)  # never blocks compaction
+            # Guard BEFORE indexing: under load (or on a wedged box) the hook
+            # can exit 0 with empty stdout (its `|| true` swallows a crashed
+            # capture-trigger.py), and `splitlines()[-1]` on "" raises a bare
+            # IndexError with zero diagnosis. Fail with a clear message
+            # (carrying rc + stderr) instead of crashing the test itself.
+            out = r.stdout.strip()
+            self.assertTrue(
+                out,
+                f"hook_precompact_capture.sh produced no stdout "
+                f"(rc={r.returncode}); stderr:\n{r.stderr}")
             # The dry-run report proves the capture path actually ran over the
             # pre-compaction transcript.
-            report = json.loads(r.stdout.strip().splitlines()[-1])
+            report = json.loads(out.splitlines()[-1])
             self.assertEqual(report["session"], "sess-pc")
             self.assertEqual(report["chairman_lines"], 1)
 
