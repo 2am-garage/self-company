@@ -8,12 +8,21 @@ A comprehensive overview of trigger timing, participants, actions, and token bud
 
 ## Overview Table
 
+> **Model labels below are narrative shorthand, not the live assignment.** Since
+> Phase 29 every employee's model is a per-employee, config-adjustable value
+> (`context.md`'s `model:` field, resolved by `Employee.resolved_model`) — Bob/
+> Gibby/Tom default to `haiku`, Tony/Mike/July to the system default (currently
+> `sonnet`), Phoebe is Chairman-pinned to `claude-sonnet-4-6`, and Elon runs
+> `fable`. See `references/employee-model-table.md` for the authoritative,
+> current table; the "Opus"/"Sonnet" tags here are pre-Phase-29 flavor text
+> describing relative cost tiers, not real model ids.
+
 | Trigger Level | Timing | Who Works | Core Action | Default Model | Parallel / Serial |
 |---|---|---|---|---|---|
-| **Real-Time** | After each conversation | Cross-dept (Haiku) + Gibby (Sonnet) | CAPTURE observations → quick VERIFY → write L0 | Haiku + Sonnet | Parallel: capture; Serial: → verify → write |
-| **Daily** | Scheduled trigger | Tony (Sonnet) + Gibby (Sonnet verifies sources) + Tom watches budget | consolidate, decay, write, verify, upgrade-candidate handoff | Sonnet | Serial: consolidate → decay → write → verify |
-| **Weekly** | Scheduled trigger | Tony + Gibby + Phoebe + July (Sonnet) | Full verification, entropy measurement, performance tuning, report generation (the RAG index is refreshed automatically each DAILY run — Phase 13 A.1) | Sonnet | Mostly parallel; verify → report serial |
-| **Manual** | Chairman explicitly triggers | Elon (director) + all staff (Opus) | deep cleanup, reorganization, cross-tier review, build pipeline | Opus | Case-by-case (typically spec → build → verify serial) |
+| **Real-Time** | After each conversation | Cross-dept (Haiku) + Gibby (Haiku) | CAPTURE observations → quick VERIFY → write L0 | Haiku | Parallel: capture; Serial: → verify → write |
+| **Daily** | Scheduled trigger | Tony (Sonnet) + Gibby (Haiku verifies sources) + Tom watches budget | consolidate, decay, write, verify, upgrade-candidate handoff | Sonnet + Haiku | Serial: consolidate → decay → write → verify |
+| **Weekly** | Scheduled trigger | Tony + Gibby + Phoebe + July | Full verification, entropy measurement, performance tuning, report generation (the RAG index is refreshed automatically each DAILY run — Phase 13 A.1) | see `employee-model-table.md` | Mostly parallel; verify → report serial |
+| **Manual** | Chairman explicitly triggers | Elon (director) + all staff | deep cleanup, reorganization, cross-tier review, build pipeline | see `employee-model-table.md` | Case-by-case (typically spec → build → verify serial) |
 
 ---
 
@@ -91,7 +100,7 @@ Scheduled batch runs **`DAILY_RUNS_PER_DAY` times a day** (default **4×**, ever
 Five steps: Tony as main driver, Gibby guards provenance, Tom watches budget:
 
 - **[1] CONSOLIDATE** (Tony, Sonnet) — Read L0 new memories, compare against L1/L2, decide new / update (reinforce) / mark contradiction. **Also read upgrade candidates from previous round's `decay.py` output**: Tom has written `upgrade_candidates` JSON to the previous day's `ops/logs/daily-<date>.md` "upgrade candidates" section; Tony in this round executes file move + tier change on these memories. See `references/pipeline.md` stage [2] ORGANIZE.
-- **[2] DECAY** (Python script) — Execute `python3 .company/scripts/decay.py --apply`: calculate decay_score, apply tier-based disposition for those exceeding threshold (L0 delete / L1 demote or archive / L2 retain). Upgrade candidates are only listed in the `upgrade_candidates` JSON, not auto-moved. See `references/memory-tiers.md`.
+- **[2] DECAY** (Python script) — Execute `python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/decay.py --apply`: calculate decay_score, apply tier-based disposition for those exceeding threshold (L0 delete / L1 demote or archive / L2 retain). Upgrade candidates are only listed in the `upgrade_candidates` JSON, not auto-moved. See `references/memory-tiers.md`.
 - **[3] WRITE** (Tony, Sonnet) — Land decisions: new / update / conflict adjudication + execute upgrade file move, write standard frontmatter markdown. See `references/pipeline.md` stage [3] WRITE.
 - **[4] VERIFY** (Gibby, Sonnet) — For each day's WRITE output, trace sources; Pass writes to log (add verified_date / verified_by), Reject sends back to CAPTURE for re-capture (max 2 retries then discard, see `policy.md §7.5`). Loop until clean; memories written on this day do not remain in pending_verify state. See `references/pipeline.md` stage [4] VERIFY.
 - **[5] TOKEN-CHECK** (Tom) — Compare daily usage against budget ceiling (see `policy.md §3.1`), alert when approaching, stop subsequent tasks when exhausted. At batch end, write this round's `decay.py` `upgrade_candidates` JSON to `ops/logs/daily-<date>.md` "upgrade candidates" section for Tony's next CONSOLIDATE/WRITE round.
@@ -112,7 +121,7 @@ Update `ops/logs/daily-<date>.md` record of this round's changes:
 
 **Implementation**:
 1. **Option A (Recommended): Use `/schedule` skill**
-   - **Ships in the skill (recommended):** `bash .company/scripts/schedule.sh install` installs an OS crontab entry `7 */6 * * *` (4× a day, off-minute) that runs `daily-run.sh`. `schedule.sh uninstall` / `status` manage it; idempotent. Local + unattended — runs whenever the machine is on, memory never leaves the box.
+   - **Ships in the skill (recommended):** `bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/schedule.sh install` installs an OS crontab entry `7 */6 * * *` (4× a day, off-minute) that runs `daily-run.sh`. `schedule.sh uninstall` / `status` manage it; idempotent. Local + unattended — runs whenever the machine is on, memory never leaves the box.
    - `daily-run.sh` does the deterministic core every run (`decay.py --apply` + `entropy.py`, logged, no tokens) plus an optional bounded headless `claude -p` consolidate/verify pass (hard timeout + recursion-guarded; `--no-agent` skips it).
    - Cron `7 */6 * * *` ≈ 00:07 / 06:07 / 12:07 / 18:07, matching `DAILY_RUNS_PER_DAY=4` (`policy.md §7.7`). NOTE: `/schedule` and `CronCreate` are **session-bound** (only fire while a Claude REPL is running idle), so they are NOT used for unattended 2am runs — the OS cron above is.
 
@@ -156,7 +165,7 @@ Scheduled to run at a fixed day and time each week (default **Monday 02:00 local
     - See `references/pipeline.md` stage [4] VERIFY
 
 [2] ENTROPY-REPORT (Python script + Tony, Sonnet)
-    - Execute `python3 .company/scripts/entropy.py`: calculate this week's Entropy metrics
+    - Execute `python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/entropy.py`: calculate this week's Entropy metrics
     - Four dimensions (duplication / contradiction / stale / unverified): specific values and percentages (see `policy.md §2.1` & `references/memory-tiers.md`)
     - Compare vs. last week: down / flat / up?
     - If up → Tony diagnoses root cause
@@ -177,12 +186,12 @@ Scheduled to run at a fixed day and time each week (default **Monday 02:00 local
 [5] RAG-INDEX REFRESH (Tony) — now AUTOMATIC in the daily core, not a weekly step
     - The LanceDB index is refreshed INCREMENTALLY every daily run by `daily-run.sh`,
       after reinforce+decay+verify+entropy (Phase 13 A.1) — no separate weekly rebuild.
-      It runs `python3 .company/scripts/rag_index.py` (L1/L2 only), skipping unchanged
+      It runs `python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_index.py` (L1/L2 only), skipping unchanged
       bodies via content_hash.
     - Activation is auto-surfaced: `rag_index.py --threshold-check` (deps-free) runs each
       daily and, when active L1+L2 ≥ 50 while the RAG stack is not installed, logs an
       "activate RAG" candidate (Phase 13 A.2). Below threshold → nothing surfaced.
-    - Deps: the fastembed venv (`bash .company/scripts/rag_setup.sh install`). Absent OR
+    - Deps: the fastembed venv (`bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install`). Absent OR
       broken venv → one logged skip line; the deterministic core always completes.
     - See `references/rag.md` §2/§4 for details. (Semantic query consumption —
       ask-time injection in `hook_memory_inject.py` — shipped as Stage B, v0.1.5;
