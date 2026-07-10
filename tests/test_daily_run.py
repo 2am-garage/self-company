@@ -184,19 +184,22 @@ def _fake_rag_venv(company, script_body):
 def _fake_rag_venv_multi(company, index_json, argfile):
     """Plant a fake .company/.rag-venv/bin/python that handles BOTH RAG-venv
     callers in the deterministic core: it records rag_index.py's argv + emits a
-    canned index JSON, emits a trivial reinforce JSON, and passes EVERYTHING ELSE
-    (e.g. entropy.py's re-exec) through to the real interpreter (SC_RAG_REEXEC is
-    already set on that re-exec, so no loop)."""
+    canned index JSON (Phase 28 Item 2c: wrapped as the batch `{"pairs": [...]}`
+    contract, company pair first — `index_json` is that one pair's report),
+    emits a trivial reinforce JSON, and passes EVERYTHING ELSE (e.g. entropy.py's
+    re-exec) through to the real interpreter (SC_RAG_REEXEC is already set on
+    that re-exec, so no loop)."""
     bindir = os.path.join(company, ".rag-venv", "bin")
     os.makedirs(bindir, exist_ok=True)
     py = os.path.join(bindir, "python")
+    pairs_json = json.dumps({"pairs": [json.loads(index_json)]})
     with open(py, "w") as f:
         f.write(
             "#!/usr/bin/env bash\n"
             'case "${1:-}" in\n'
             "  *rag_index.py)\n"
             f'    printf \'%s \' "$@" > "{argfile}"\n'
-            f"    echo '{index_json}'\n"
+            f"    echo '{pairs_json}'\n"
             "    ;;\n"
             "  *reinforce_memory.py)\n"
             '    echo \'{"applied": true, "threshold": 0.85, "reinforcements": [],'
@@ -242,8 +245,9 @@ class TestDailyRunRagIndex(unittest.TestCase):
             with open(argfile) as f:
                 args = f.read()
             self.assertIn("rag_index.py", args)
-            self.assertIn("--memory-dir", args)
-            self.assertIn("--index-dir", args)
+            # Phase 28 Item 2c: batch mode — the company store is ONE --pair
+            # (no separate --memory-dir/--index-dir flags in this call shape).
+            self.assertIn("--pair", args)
             self.assertNotIn("--rebuild", args)       # incremental (idempotent) — never full rebuild
             self.assertNotIn("--include-l0", args)     # D-A: L1/L2 only, no L0
             # index refresh runs AFTER decay (post-consolidation truth)
@@ -1592,6 +1596,66 @@ class TestPlanTickFailOpen(unittest.TestCase):
             text = _read_log(company)
             self.assertNotIn("gated off tony.decay", text)
             self.assertIn("- decay --apply:", text)   # decay actually ran
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+class TestRagBatchSpawnCount(unittest.TestCase):
+    """Phase 28 Item 2c: ONE rag_index.py process refreshes the company store
+    AND every rag employee's store, regardless of employee count (was
+    1 + N_rag_employees processes before)."""
+
+    _INDEX_JSON = ('{"embedded": 0, "skipped_unchanged": 0, "deleted_stale": 0,'
+                   ' "table_rows": 0, "l1_l2_count": 0, "warnings": []}')
+
+    def _write_emp_mem(self, company, emp):
+        emp_mem = os.path.join(company, "org", "employees", emp, "memory")
+        os.makedirs(emp_mem, exist_ok=True)
+        with open(os.path.join(emp_mem, "note.md"), "w") as f:
+            f.write(
+                "---\nid: note-%s\ntier: L1\nowner: %s\nsources: [\"[s#1]\"]\n"
+                "created: 2026-06-01\nlast_reinforced: %s\n"
+                "reinforce_count: 1\ndecay_score: 1.0\nstatus: active\n---\nbody\n"
+                % (emp, emp, _today()))
+
+    def test_one_process_for_company_plus_two_rag_employees(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            counter = os.path.join(d, "rag_calls.txt")
+            open(counter, "w").close()
+            bindir = os.path.join(company, ".rag-venv", "bin")
+            os.makedirs(bindir, exist_ok=True)
+            py = os.path.join(bindir, "python")
+            with open(py, "w") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    'case "${1:-}" in\n'
+                    "  *rag_index.py)\n"
+                    f'    printf x >> "{counter}"\n'
+                    f"    echo '{{\"pairs\": [{self._INDEX_JSON}]}}'\n"
+                    "    ;;\n"
+                    "  *reinforce_memory.py)\n"
+                    '    echo \'{"applied": true, "threshold": 0.85, "reinforcements": [],'
+                    ' "skipped_l2": [], "scanned": 0}\'\n'
+                    "    ;;\n"
+                    "  *)\n"
+                    '    exec python3 "$@"\n'
+                    "    ;;\n"
+                    "esac\n")
+            os.chmod(py, 0o755)
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            # tony and mike are rag-mode by default (employee.MEMORY_MODE_DEFAULTS).
+            self._write_emp_mem(company, "tony")
+            self._write_emp_mem(company, "mike")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(counter) as f:
+                calls = f.read()
+            self.assertEqual(len(calls), 1,
+                             "expected exactly ONE rag_index.py process, got %d" % len(calls))
+            text = _read_log(company)
+            self.assertIn("refreshed 2 rag-employee store(s)", text)
         finally:
             subprocess.run(["rm", "-rf", d])
 
