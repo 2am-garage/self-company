@@ -8,7 +8,8 @@ down, a keep/discard/crash verdict, and a one-line description of what was tried
 You scan it in seconds.
 
 This builds the same thing for the self-company's unattended daily runs. One row
-per `daily-run.sh` execution, parsed deterministically from ops/logs/daily-*.md:
+per `daily-run.sh` execution, read through daily_log.py (Phase 27 Item 1's shared
+JSONL reader — the .md log stays the human render; the JSONL is the data source):
 
   run                entropy(down)   mem   status   what happened
   06-29 18:07        0.0356 v0.0516   45   keep     verify +14, merged dups, 1 upgrade-cand
@@ -17,24 +18,43 @@ Mapping (autoresearch -> self-company):
   commit      -> run timestamp
   val_bpb     -> entropy        (lower is better; same direction as val_bpb)
   memory_gb   -> memory count
-  status      -> keep / flat / skip / fail
+  status      -> keep / flat / skip / fail / warn / abort / locked / stale-lock
+                 / running / crashed
   description -> decay/verify/agent actions this run
 
 Status verdict:
-  keep  — something substantive moved (entropy dropped, decayed, verified, or
-          upgrade candidates surfaced) — the "keep" of a good experiment
-  flat  — ran clean but nothing changed (no-op maintenance) — like "discard"
-  skip  — agent step was BENIGNLY skipped (daily cap hit / no claude CLI)
-  fail  — the agent died (rc!=0), TIMED OUT, or was AUTH_FAIL-skipped — an
-          unhealthy agent day is never masked as keep/skip, even when the
-          deterministic half moved things (Phase 5 Item 3 / N4: the 18:07
-          "keep | verify +68" row on a dead-agent day was the bug)
+  keep       — something substantive moved (entropy dropped, decayed, verified,
+               or upgrade candidates surfaced) — the "keep" of a good experiment
+  flat       — ran clean but nothing changed (no-op maintenance) — like "discard"
+  skip       — agent step was BENIGNLY skipped (daily cap hit / no claude CLI)
+  fail       — the agent died (rc!=0), TIMED OUT, or was AUTH_FAIL-skipped — an
+               unhealthy agent day is never masked as keep/skip, even when the
+               deterministic half moved things (Phase 5 Item 3 / N4: the 18:07
+               "keep | verify +68" row on a dead-agent day was the bug)
+  warn       — a memory-rot warning (Phase 25 Item 3) OR a core-step timeout
+               (Phase 27 Item 4) was recorded this run — never masked behind
+               keep/flat even when something else legitimately moved
+  abort      — the deterministic core's safety floor failed (Phase 25 Item 1) —
+               reinforce/decay/verify did NOT run this tick
+  locked     — a benign one-off flock contention: this cron tick found
+               .daily.lock already held and skipped (Phase 27 Item 3) — a
+               RECORDED tick that did NOT run, distinct from "ran, nothing
+               changed"
+  stale-lock — a wedged/orphaned holder past the staleness tripwire
+               (Phase 25 Item 4.3) — never a silent skip
+  running    — the run's agent step is still streaming (in-flight)
+  crashed    — a `start` event with no matching `end` past the in-flight
+               window (Phase 27 Item 1) — the process died mid-core (kill -9,
+               reboot), classified purely from timestamps, never via
+               agent-log-mtime probing
 
 Usage:
   report.py [--company DIR]                 # print markdown ledger to stdout
   report.py [--company DIR] --write         # also write ops/reports/ledger.md
   report.py [--company DIR] --tsv           # emit raw TSV instead of markdown
   report.py [--company DIR] --limit N       # only the last N runs
+  report.py [--company DIR] --window-days N # only runs within N days (default 30)
+  report.py [--company DIR] --all           # full history, ignoring the window
 
 Pure stdlib, read-only (except --write).
 """

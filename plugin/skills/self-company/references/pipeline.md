@@ -239,7 +239,13 @@ Decision list:
    - Don't write file
 
 2. **Update ops/logs**
-   - File: `ops/logs/daily-YYYY-MM-DD.md`
+   - File: `ops/logs/daily-YYYY-MM-DD.md` (human render) — since **Phase 27**,
+     `daily-run.sh` also appends a machine-readable `start`/`end` event pair to
+     a sibling `ops/logs/daily-YYYY-MM-DD.jsonl`, read by every consumer
+     (`report.py`, `notify-status.py`, `org-status.py`, `fleet.py`) through the
+     single shared reader `scripts/daily_log.py`. The `.md` stays the human
+     render, unchanged; the JSONL is the data interface — see
+     `references/operations.md` "Observability spine" for the full mechanism.
    - Log format:
      ```markdown
      # Daily Memory Log — 2026-06-24
