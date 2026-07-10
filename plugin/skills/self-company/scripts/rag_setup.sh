@@ -65,7 +65,7 @@ try:
 except Exception as e:
     print(f"  reranker warm-up skipped ({e}); semantic injection will use the cosine floor only")
 PY
-    echo "[rag_setup] done. Build the index with: python3 .company/scripts/rag_index.py --rebuild"
+    echo "[rag_setup] done. Build the index with: python3 $SCRIPT_DIR/rag_index.py --rebuild"
     ;;
   status)
     if [[ -x "$PY" ]] && "$PY" -c "import lancedb, fastembed" 2>/dev/null; then

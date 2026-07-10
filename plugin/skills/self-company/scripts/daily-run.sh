@@ -885,7 +885,7 @@ esac
 # threshold AND the RAG stack is not yet installed (venv absent). Once installed,
 # RAG is active and refreshing above, so no candidate is raised.
 if (( _run_rag_index )) && (( RAG_OVER == 0 )) && [[ ! -x "$RAG_PY" ]]; then
-  echo "- rag-index: RAG activation candidate — active L1+L2 >= RAG_ENABLE_THRESHOLD but the RAG stack is not installed; run 'bash .company/scripts/rag_setup.sh install' to enable semantic memory search (Tony -> Elon)" >> "$LOG"
+  echo "- rag-index: RAG activation candidate — active L1+L2 >= RAG_ENABLE_THRESHOLD but the RAG stack is not installed; run 'bash $SCRIPTS/rag_setup.sh install' to enable semantic memory search (Tony -> Elon)" >> "$LOG"
 fi
 
 # --- Phase 18/18b: per-employee memory index refresh summary (RAG employees) --

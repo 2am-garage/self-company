@@ -5,7 +5,8 @@ Uses **fastembed** (ONNX, CPU, fully offline) instead of an Ollama daemon: no
 background service, a ~130 MB model, and the same privacy guarantee (nothing
 leaves the machine). Installed into the project's `.company/.rag-venv` by
 `rag_setup.sh`; rag_index.py / rag_query.py re-exec into that venv so plain
-`python3 .company/scripts/rag_*.py` just works once setup has run.
+`python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_*.py` just works
+once setup has run.
 
 Privacy: model + inference are entirely local. No network at query time.
 """
