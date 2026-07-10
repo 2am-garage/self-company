@@ -365,5 +365,57 @@ class TestNeverFails(Base):
         self.assertNotIn("flagged_for_review", blob)
 
 
+# ============================================================ Phase 29 Item 1
+class TestModelTableWarnings(Base):
+    """july_audit.py step 4: a non-empty `model:` that doesn't resolve through
+    the alias map / claude-* passthrough is a WARN finding — never a gate, and
+    it runs for EVERY roster employee (including managers)."""
+
+    def _desk_with_model(self, name, model_value, role="Worker"):
+        d = os.path.join(self.company, "org", "employees", name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "context.md"), "w", encoding="utf-8") as f:
+            f.write(f"---\nname: {name}\nrole: {role}\nmodel: {model_value}\n---\n"
+                    f"{name}'s desk.\n")
+
+    def test_valid_model_produces_no_warning(self):
+        self._desk_with_model("tony", "sonnet")
+        r = self.audit()
+        self.assertEqual(r["model_warnings"], [])
+        self.assertEqual(r["summary"]["model_warnings_total"], 0)
+
+    def test_bad_model_surfaces_warn_naming_employee_and_value(self):
+        self._desk_with_model("bob", "haiku → sonnet")
+        r = self.audit()
+        self.assertEqual(len(r["model_warnings"]), 1)
+        finding = r["model_warnings"][0]
+        self.assertEqual(finding["employee"], "bob")
+        self.assertEqual(finding["value"], "haiku → sonnet")
+        self.assertIn("bob", finding["warning"])
+        self.assertEqual(r["summary"]["model_warnings_total"], 1)
+
+    def test_bad_model_is_a_finding_not_a_gate(self):
+        # The audit still completes normally (rc 0, no exception) — a bad
+        # model value never blocks the report.
+        self._desk_with_model("bob", "haiku → sonnet")
+        rc, out, _ = run_script("july_audit.py", "--company", self.company,
+                                "--home", self.home, "--now", "2026-07-10")
+        self.assertEqual(rc, 0)
+        r = json.loads(out)
+        self.assertEqual(r["model_warnings"][0]["employee"], "bob")
+
+    def test_manager_model_also_checked(self):
+        # Model warnings are NOT gated by the manager boundary (capability
+        # audit's manager skip does not apply here — model is execution config).
+        self._desk_with_model("elon", "gpt-4", role="CEO")
+        r = self.audit()
+        self.assertEqual(r["employees"]["elon"]["audited"], False)   # capability audit still skips elon
+        self.assertEqual(r["model_warnings"][0]["employee"], "elon")  # model check does not
+
+    def test_no_desks_no_warnings(self):
+        r = self.audit()
+        self.assertEqual(r["model_warnings"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -207,5 +207,55 @@ class TestParseFailClosed(Base):
         self.assertEqual(out.strip(), "")
 
 
+# ==================================================== Phase 29 Item 1 model WARN
+class TestModelWarnings(Base):
+    """A bad `context.md` model: value is a WARN finding, never a rejection —
+    exit code is driven ONLY by R1-R6 violations, model warnings ride alongside."""
+
+    def _desk_with_model(self, company, name, model_value):
+        d = os.path.join(company, "org", "employees", name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "context.md"), "w", encoding="utf-8") as f:
+            f.write(f"---\nname: {name}\nmodel: {model_value}\n---\n{name}.\n")
+
+    def test_no_desks_no_warn_lines(self):
+        rc, out, _ = self.validate(self.company())
+        self.assertEqual(rc, 0)
+        self.assertIn("ok", out)
+        self.assertNotIn("WARN", out)
+
+    def test_bad_model_warns_but_still_exits_0(self):
+        c = self.company()
+        self._desk_with_model(c, "bob", "haiku → sonnet")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0)          # a model finding is NOT a violation
+        self.assertIn("ok", out)
+        self.assertIn("WARN", out)
+        self.assertIn("bob", out)
+
+    def test_bad_model_warns_alongside_a_real_violation(self):
+        c = self.company("gibby: { duties: [build] }\n")   # R1 violation
+        self._desk_with_model(c, "bob", "haiku → sonnet")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)           # R1 still rejects
+        self.assertIn("R1", out)
+        self.assertIn("WARN", out)
+        self.assertIn("bob", out)
+
+    def test_valid_model_produces_no_warn_line(self):
+        c = self.company()
+        self._desk_with_model(c, "bob", "haiku")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("WARN", out)
+
+    def test_quiet_suppresses_model_warnings_too(self):
+        c = self.company()
+        self._desk_with_model(c, "bob", "haiku → sonnet")
+        rc, out, _ = self.validate(c, "--quiet")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

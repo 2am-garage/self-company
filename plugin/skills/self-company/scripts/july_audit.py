@@ -68,6 +68,17 @@ except Exception:                                              # pragma: no cove
     Employee = None
     EMPLOYEES = ("tony", "gibby", "bob", "mike", "elon", "phoebe", "tom", "july")
 
+# Phase 29 Item 1 (Chairman's requirement, step 4): the DEFAULT a bad `model:`
+# value degrades to — imported so the WARN check uses the SAME default the
+# real dispatch path (Employee.resolved_model) would fall back to. A missing
+# schedule_config degrades to the current known default rather than crashing
+# the audit.
+try:
+    import schedule_config as _sc
+    _DEFAULT_MODEL = _sc.DEFAULT_AGENT_MODEL
+except Exception:                                              # pragma: no cover
+    _DEFAULT_MODEL = "claude-sonnet-5"
+
 # ---------------------------------------------------------------- topology
 # Managers are off-limits (persona boundary). The Gibby/Bob red-blue pair may be
 # CLASSIFIED (so drift is visible) but never AUTO-changed — flagged for review.
@@ -384,6 +395,31 @@ def write_proposals(company, report):
         return None
 
 
+# ============================================================ model table (Item 1)
+def audit_model_table(company, roster):
+    """Phase 29 Item 1 step 4: surface a non-empty `model:` value that doesn't
+    resolve through the alias map / a valid `claude-*` id as a WARN finding
+    naming the employee and the bad value. A FINDING, not a gate — dispatch
+    already degrades safely via Employee.resolved_model; this is visibility
+    only, so the Chairman sees a typo'd model without it silently costing
+    nothing but silently ALSO fixing nothing. Runs for EVERY employee
+    (including managers) — the model table is execution config, orthogonal to
+    the capability-profile audit (which stops at the manager boundary).
+    Never raises: an unreadable desk just yields no finding for that name."""
+    findings = []
+    if Employee is None:
+        return findings
+    for name in roster:
+        try:
+            emp = Employee.load(name, company)
+            _, warning = emp.resolved_model(_DEFAULT_MODEL)
+        except Exception:
+            continue
+        if warning:
+            findings.append({"employee": name, "value": emp.model, "warning": warning})
+    return findings
+
+
 # ============================================================ audit
 def audit(company, home=None, now=None, apply=False):
     """Run the full capability audit — PROPOSE-ONLY (P17-D2). Dry-run by default;
@@ -436,6 +472,11 @@ def audit(company, home=None, now=None, apply=False):
         totals["gap"] += sum(len(v) for v in res["gap"].values())
         totals["over_grant"] += sum(len(v) for v in res["over_grant"].values())
 
+    # Phase 29 Item 1 step 4: model-table WARN findings. Every roster employee
+    # (including managers) — the model table is execution config, orthogonal
+    # to the capability audit's manager boundary above.
+    model_warnings = audit_model_table(company, roster)
+
     report = {
         "schema": "july-capability-audit/1",
         "generated": generated,
@@ -444,6 +485,7 @@ def audit(company, home=None, now=None, apply=False):
         "completeness": {d: bool(available[d].get("complete")) for d in available},
         "sources": {d: available[d]["source"] for d in available},
         "employees": employees_out,
+        "model_warnings": model_warnings,
         "summary": {
             "workers_audited": len(per_emp),
             "managers_skipped": sorted(n for n in roster if n in MANAGERS),
@@ -454,6 +496,7 @@ def audit(company, home=None, now=None, apply=False):
             "over_grant_total": totals["over_grant"],
             # every finding is a proposal (nothing is auto-applied)
             "proposals_total": totals["stale"] + totals["gap"] + totals["over_grant"],
+            "model_warnings_total": len(model_warnings),
         },
     }
 
@@ -471,7 +514,9 @@ def _log_july(company, report):
             f"proposals {s['proposals_total']} "
             f"(stale {s['stale_total']}, gap {s['gap_total']}, over {s['over_grant_total']}) "
             f"— propose-only, no context.md edited"
-            + (f" | unknown env: {','.join(s['unknown_dimensions'])}" if s['unknown_dimensions'] else ""))
+            + (f" | unknown env: {','.join(s['unknown_dimensions'])}" if s['unknown_dimensions'] else "")
+            + (f" | model WARN: {s['model_warnings_total']} employee(s) degraded to default"
+               if s.get("model_warnings_total") else ""))
     try:
         if Employee is not None:
             Employee.load("july", company).log(line)
