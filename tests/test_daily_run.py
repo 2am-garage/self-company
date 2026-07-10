@@ -7,6 +7,7 @@ manually (and the agent is always run with --no-agent here so tests stay
 hermetic and token-free).
 """
 
+import json
 import os
 import subprocess
 import tempfile
@@ -1156,6 +1157,158 @@ class TestC3BackupIntegrity(unittest.TestCase):
             bdir = os.path.join(company, "backups")
             if os.path.isdir(bdir):
                 self.assertEqual(os.listdir(bdir), [])
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+def _read_jsonl_end(company, date=None):
+    """Test helper: the LAST 'end' event in today's (or `date`'s) JSONL."""
+    date = date or _today()
+    path = os.path.join(company, "ops", "logs", f"daily-{date}.jsonl")
+    with open(path) as f:
+        lines = [json.loads(ln) for ln in f if ln.strip()]
+    ends = [e for e in lines if e.get("event") == "end"]
+    return ends[-1] if ends else None
+
+
+# NOTE: elon_survey.py (later in the same pipeline) ALSO invokes decay.py /
+# verify_memory.py / entropy.py internally as a read-only subprocess with NO
+# timeout of its own, distinguished by lacking "--apply" in argv (its call is
+# `--now <date>`, no --apply). If we blindly hang on every invocation, THAT
+# untimed nested call hangs forever too. So the sleeper only hangs when
+# "--apply" is present (daily-run.sh's own direct, timeout-wrapped core-loop
+# call) and behaves as an instant no-op otherwise (matches every other caller).
+_SLEEPER_IGNORE_TERM_APPLY_ONLY = (
+    "import signal, sys, time\n"
+    "if '--apply' not in sys.argv:\n"
+    "    print('{}')\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "while True:\n"
+    "    time.sleep(0.05)\n"
+)
+
+
+class TestItem4CoreStepTimeout(unittest.TestCase):
+    """Phase 27 Item 4: each bare core step is bounded by
+    `timeout -k GRACE BUDGET`. A black-holed step (fastembed download, etc.)
+    can no longer hold .daily.lock for hours."""
+
+    def _replace_with_sleeper(self, d, script_name):
+        path = os.path.join(d, "scripts", script_name)
+        with open(path, "w") as f:
+            f.write(_SLEEPER_IGNORE_TERM_APPLY_ONLY)
+
+    def test_a_timed_out_step_distinct_log_jsonl_later_steps_run_lock_released(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            self._replace_with_sleeper(d, "decay.py")
+            env = {"SELF_COMPANY_CORE_STEP_TIMEOUT": "1",
+                   "SELF_COMPANY_CORE_STEP_KILL_GRACE": "1"}
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"], env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertIn("- decay: TIMED OUT after 1s", text)
+            self.assertIn("step skipped this tick, will retry next run", text)
+            # later steps still ran (core continues past a step timeout)
+            self.assertIn("- entropy", text)
+            end = _read_jsonl_end(company)
+            self.assertEqual(end["steps"]["decay"]["outcome"], "timeout")
+            # lock released: a second, immediate cron tick does not lock-skip
+            # (same short budget — decay.py is still the sleeper, but that's
+            # irrelevant here: we're only proving the FIRST run's lock didn't
+            # leak past its own exit).
+            r2 = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent", "--cron"], env=env)
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertNotIn("cron tick SKIPPED", _read_log(company))
+            # run classified non-flat/keep via report.py
+            rc, out, err = _helpers.run_script("report.py", "--company", company)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("`warn`", out)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_b_sigterm_ignoring_step_is_sigkilled_within_grace(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            self._replace_with_sleeper(d, "decay.py")
+            env = {"SELF_COMPANY_CORE_STEP_TIMEOUT": "1",
+                   "SELF_COMPANY_CORE_STEP_KILL_GRACE": "1"}
+            start = time.monotonic()
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"], env=env)
+            elapsed = time.monotonic() - start
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(elapsed, 30, "budget+grace must bound the step, not hang")
+            self.assertIn("- decay: TIMED OUT after 1s", _read_log(company))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_c_healthy_run_zero_timing_change_byte_identical_md(self):
+        # A healthy run never comes close to the 900s default budget — the
+        # .md render must be untouched by Item 4's plumbing.
+        d1 = _fresh_project()
+        d2 = _fresh_project()
+        try:
+            c1, c2 = os.path.join(d1, ".company"), os.path.join(d2, ".company")
+            _write_mem(c1, "obs-a", last_reinforced=_today())
+            _write_mem(c2, "obs-a", last_reinforced=_today())
+            r1 = _bash([os.path.join(d1, "scripts", "daily-run.sh"), d1, "--no-agent"])
+            r2 = _bash([os.path.join(d2, "scripts", "daily-run.sh"), d2, "--no-agent"],
+                      env={"SELF_COMPANY_CORE_STEP_TIMEOUT": "900"})
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            # Normalize the two independently-timed runs' own wall-clock
+            # stamps (header ts + backup filename ts) before comparing — the
+            # invariant under test is Item 4 changed nothing else in the
+            # render, not that two separate processes share a timestamp.
+            import re as _re
+            def _normalize(text, project_dir):
+                text = _re.sub(r"## Daily run \S+", "## Daily run TS", text)
+                text = _re.sub(r"mem-\d{8}T\d{6}Z", "mem-TS", text)
+                text = text.replace(project_dir, "PROJECT_DIR")
+                return text
+            self.assertEqual(_normalize(_read_log(c1), d1), _normalize(_read_log(c2), d2))
+        finally:
+            subprocess.run(["rm", "-rf", d1])
+            subprocess.run(["rm", "-rf", d2])
+
+
+class TestItem5Prune(unittest.TestCase):
+    """Phase 27 Item 5: age-prune wired into daily-run.sh's end-of-run."""
+
+    def test_prune_line_appears_and_old_logs_removed(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            logs = os.path.join(company, "ops", "logs")
+            os.makedirs(logs, exist_ok=True)
+            old_date = "2020-01-01"
+            open(os.path.join(logs, f"daily-{old_date}.md"), "w").close()
+            open(os.path.join(logs, f"agent-{old_date}.log"), "w").close()
+            open(os.path.join(logs, f".agent_runs_{old_date}"), "w").close()
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("- prune:", _read_log(company))
+            self.assertFalse(os.path.exists(os.path.join(logs, f"daily-{old_date}.md")))
+            self.assertFalse(os.path.exists(os.path.join(logs, f"agent-{old_date}.log")))
+            self.assertFalse(os.path.exists(os.path.join(logs, f".agent_runs_{old_date}")))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_prune_never_fatal_on_low_retain_days_refusal(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"],
+                      env={"SELF_COMPANY_LOG_RETAIN_DAYS": "1"})   # < window+1 -> refused
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("- prune: prune refused", _read_log(company))
         finally:
             subprocess.run(["rm", "-rf", d])
 

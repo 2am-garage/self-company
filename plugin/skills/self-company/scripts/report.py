@@ -51,11 +51,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import daily_log  # noqa: E402
 
 
-def collect(company):
+def collect(company, window_days=daily_log.DEFAULT_WINDOW_DAYS):
     """Every real (non-dry-run) daily-run, oldest first, as a Run dict (see
-    daily_log.py). report.py wants the FULL history (not Item 5's 30-day
-    hook-latency window) since its own ledger is the long-lived record."""
-    return daily_log.read_runs(company, window_days=None)
+    daily_log.py). Item 5: reports read a month by default, not a lifetime —
+    pass window_days=None (the ledger's --all flag) for the full history."""
+    return daily_log.read_runs(company, window_days=window_days)
 
 
 def verdict(r, prev_entropy):
@@ -219,9 +219,14 @@ def main(argv=None):
     ap.add_argument("--write", action="store_true", help="write ops/reports/ledger.md")
     ap.add_argument("--tsv", action="store_true", help="emit raw TSV instead of markdown")
     ap.add_argument("--limit", type=int, default=0, help="only the last N runs")
+    ap.add_argument("--window-days", dest="window_days", type=int,
+                    default=daily_log.DEFAULT_WINDOW_DAYS,
+                    help="only runs within the last N days (Item 5; default 30)")
+    ap.add_argument("--all", action="store_true",
+                    help="full history, ignoring --window-days (Item 5)")
     args = ap.parse_args(argv)
 
-    rows = collect(args.company)
+    rows = collect(args.company, window_days=None if args.all else args.window_days)
     table = build(rows)
     if args.limit > 0:
         table = table[-args.limit:]

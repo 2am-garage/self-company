@@ -144,6 +144,46 @@ class TestKillMidWriteHarness(unittest.TestCase):
             else:
                 self.assertEqual(data, b"ORIGINAL\n")
 
+    def test_timeout_dash_k_sigkill_never_leaves_truncated_file(self):
+        # Phase 27 Item 4 acceptance (d): daily-run.sh wraps each core step in
+        # `timeout -k GRACE BUDGET ...` — this rides the SAME harness above
+        # (extended, not duplicated) but routes the kill through the actual
+        # `timeout` coreutil daily-run.sh invokes, at both stages: a plain
+        # SIGTERM-at-budget kill AND a `-k` grace SIGKILL of a TERM-ignoring
+        # writer. Either way _atomic_write's tmp-then-replace means the
+        # target is always either the complete OLD content or one complete
+        # NEW payload — never truncated.
+        payload_size = 2_000_000
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "mem.md")
+            with open(target, "w") as f:
+                f.write("ORIGINAL\n")
+            script = (
+                "import signal\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"  # forces the -k grace SIGKILL
+                + self._writer_script(target, payload_size)
+            )
+            # budget=1s (SIGTERM fires almost immediately, ignored), grace=1s
+            # (then SIGKILL) -- bounded well under the test framework's timeout.
+            proc = subprocess.run(["timeout", "-k", "1", "1", sys.executable, "-c", script],
+                                  timeout=10)
+            # 124/137: `timeout` observed the kill and translated its own exit
+            # status; -9: this environment's `timeout` propagates SIGKILL to
+            # itself too (process-group signalling) — either way confirms the
+            # writer was actually SIGKILLed, which is what this test attacks.
+            self.assertIn(proc.returncode, (124, 137, -9))
+            with open(target, "rb") as f:
+                data = f.read()
+            full_len = payload_size + 1
+            self.assertIn(len(data), {len("ORIGINAL\n"), full_len},
+                          f"target file has an invalid (partial) length {len(data)} "
+                          "— a `timeout -k` SIGKILL mid-write must never leave a truncated file")
+            if len(data) == full_len:
+                self.assertIn(data, (b"A" * payload_size + b"\n",
+                                     b"B" * payload_size + b"\n"))
+            else:
+                self.assertEqual(data, b"ORIGINAL\n")
+
 
 if __name__ == "__main__":
     unittest.main()

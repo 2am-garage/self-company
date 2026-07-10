@@ -433,6 +433,79 @@ def read_runs(company, window_days=DEFAULT_WINDOW_DAYS, now=None):
 
 
 # ---------------------------------------------------------------------------
+# Item 5: age-prune ops/logs by FILENAME date, never mtime (a restored backup
+# must not resurrect ancient logs' lifetimes). Best-effort: a failure (e.g. a
+# read-only dir) must never fail the caller's run — daily-run.sh logs a
+# warning and moves on.
+# ---------------------------------------------------------------------------
+
+DEFAULT_RETAIN_DAYS = 90
+
+_AGENT_LOG_RE = re.compile(r"^agent-(\d{4}-\d{2}-\d{2})\.log$")
+_DAILY_FILE_RE = re.compile(r"^daily-(\d{4}-\d{2}-\d{2})\.(md|jsonl)$")
+_AGENT_RUNS_RE = re.compile(r"^\.agent_runs_(\d{4}-\d{2}-\d{2})$")
+
+
+def prune(company, retain_days=DEFAULT_RETAIN_DAYS, today=None, window_days=DEFAULT_WINDOW_DAYS):
+    """Delete agent-*.log / daily-*.md / daily-*.jsonl older than retain_days
+    (by FILENAME date), and every .agent_runs_* counter not from `today` (the
+    daily token-cap ledger — today's counter must never be touched, or the
+    breaker resets mid-day). Returns (removed_count, warning_or_None).
+
+    Refuses (removes nothing) when retain_days < window_days + 1 — never
+    delete what the default reader still parses."""
+    if retain_days < window_days + 1:
+        return 0, (f"prune refused: retain-days {retain_days} < window+1 "
+                    f"({window_days + 1}) — would delete what the default reader still reads")
+    today = today or datetime.now().date()
+    if isinstance(today, str):
+        try:
+            today = datetime.strptime(today, "%Y-%m-%d").date()
+        except ValueError:
+            today = datetime.now().date()
+    cutoff = today - timedelta(days=retain_days)
+    logdir = _logs_dir(company)
+    try:
+        entries = list(logdir.iterdir())
+    except FileNotFoundError:
+        return 0, None   # nothing to prune yet (fresh install) — not a failure
+    except OSError as e:
+        return 0, f"prune skipped: {e}"   # e.g. a read-only/inaccessible dir
+
+    removed = 0
+    for p in entries:
+        name = p.name
+        m = _AGENT_RUNS_RE.match(name)
+        if m:
+            try:
+                file_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if file_date >= today:
+                continue   # NEVER today's counter — the cap ledger stays intact mid-day
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+            continue
+        m = _AGENT_LOG_RE.match(name) or _DAILY_FILE_RE.match(name)
+        if not m:
+            continue
+        try:
+            file_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue   # malformed filename date — skip, never crash
+        if file_date < cutoff:
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed, None
+
+
+# ---------------------------------------------------------------------------
 # CLI — `append` is daily-run.sh's write path; the rest are debug helpers.
 # ---------------------------------------------------------------------------
 
@@ -458,6 +531,16 @@ def _cmd_dump(args):
     return 0
 
 
+def _cmd_prune(args):
+    removed, warning = prune(args.company, retain_days=args.retain_days,
+                              today=args.today, window_days=args.window_days)
+    if warning:
+        print(warning)
+        return 0   # best-effort: a prune warning is never a fatal CLI error
+    print(f"removed {removed} file(s) (>{args.retain_days}d)")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -471,6 +554,13 @@ def main(argv=None):
     p.add_argument("--window-days", dest="window_days", type=int, default=DEFAULT_WINDOW_DAYS)
     p.add_argument("--all", action="store_true")
     p.set_defaults(func=_cmd_dump)
+
+    p = sub.add_parser("prune", help="age-prune ops/logs by filename date (Item 5)")
+    p.add_argument("--company", default=".company")
+    p.add_argument("--retain-days", dest="retain_days", type=int, default=DEFAULT_RETAIN_DAYS)
+    p.add_argument("--today", default=None)
+    p.add_argument("--window-days", dest="window_days", type=int, default=DEFAULT_WINDOW_DAYS)
+    p.set_defaults(func=_cmd_prune)
 
     args = ap.parse_args(argv)
     return args.func(args)

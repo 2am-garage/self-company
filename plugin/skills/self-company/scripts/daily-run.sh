@@ -81,7 +81,7 @@ MODE="manual"; (( IS_CRON )) && MODE="cron"
 # on a slow link can legitimately need most of this) — see the `timeout -k`
 # wraps on the deterministic core below.
 CORE_STEP_TIMEOUT="${SELF_COMPANY_CORE_STEP_TIMEOUT:-900}"
-CORE_STEP_KILL_GRACE=30
+CORE_STEP_KILL_GRACE="${SELF_COMPANY_CORE_STEP_KILL_GRACE:-30}"
 # Item 3: skip-streak marker — daily-run.sh is its ONLY writer (the flock-skip
 # path increments it; any lock-ACQUIRED run resets it to 0). notify-status.py
 # only READS it to decide escalation.
@@ -1385,6 +1385,19 @@ event = {
 daily_log.append_event(jsonl_path, event)
 PY
 rm -f "$_core_abort_reason_file"
+
+# --- Item 5: age-prune ops/logs — best-effort, NEVER fatal, after the JSONL
+# end-event (so this run's OWN pair is never at risk of being pruned by a
+# malformed/aggressive RETAIN_DAYS). Date-from-FILENAME (daily_log.py's
+# prune()), not mtime — a restored backup must not resurrect ancient logs'
+# lifetimes. Never touches TODAY's .agent_runs_ counter (the daily CAP
+# ledger). Refuses (removes nothing, warns) if RETAIN_DAYS < window+1.
+LOG_RETAIN_DAYS="${SELF_COMPANY_LOG_RETAIN_DAYS:-90}"
+_prune_out="$(python3 "$SCRIPTS/daily_log.py" prune --company "$COMPANY" \
+  --retain-days "$LOG_RETAIN_DAYS" --today "$DATE" 2>/dev/null)"
+if [[ -n "$_prune_out" ]]; then
+  echo "- prune: $_prune_out" >> "$LOG"
+fi
 
 echo "[daily-run] done ($DATE) — see $LOG"
 exit 0

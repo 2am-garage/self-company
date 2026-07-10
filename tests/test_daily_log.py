@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 
@@ -278,6 +279,96 @@ class TestLegacyFallback(unittest.TestCase):
             runs = dl.read_runs(os.path.join(d, ".company"), window_days=None,
                                  now=datetime(2026, 7, 10))
             self.assertEqual(runs[-1]["agent"], "running")
+
+
+class TestPrune(unittest.TestCase):
+    """Phase 27 Item 5: age-prune ops/logs by FILENAME date, never mtime;
+    NEVER touch today's .agent_runs_ counter (the daily CAP ledger)."""
+
+    def _seed_200_days(self, logdir, today):
+        for i in range(200):
+            d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            open(os.path.join(logdir, f"daily-{d}.md"), "w").close()
+            open(os.path.join(logdir, f"daily-{d}.jsonl"), "w").close()
+            open(os.path.join(logdir, f"agent-{d}.log"), "w").close()
+            open(os.path.join(logdir, f".agent_runs_{d}"), "w").close()
+
+    def test_a_200_day_fixture_leaves_at_most_90_and_todays_counter_intact(self):
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            today = datetime(2026, 7, 10).date()
+            self._seed_200_days(logdir, today)
+            removed, warning = dl.prune(os.path.join(d, ".company"), retain_days=90, today=today)
+            self.assertIsNone(warning)
+            self.assertGreater(removed, 0)
+            remaining_daily = sorted(
+                f for f in os.listdir(logdir) if f.startswith("daily-") and f.endswith(".md"))
+            self.assertLessEqual(len(remaining_daily), 91)   # today + 90 back
+            # today's counter is intact; every OTHER counter is gone
+            counters = [f for f in os.listdir(logdir) if f.startswith(".agent_runs_")]
+            self.assertEqual(counters, [f".agent_runs_{today.isoformat()}"])
+
+    def test_b_refuses_retain_days_below_window_plus_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            today = datetime(2026, 7, 10).date()
+            self._seed_200_days(logdir, today)
+            before = len(os.listdir(logdir))
+            removed, warning = dl.prune(os.path.join(d, ".company"), retain_days=10,
+                                         today=today, window_days=30)
+            self.assertEqual(removed, 0)
+            self.assertIsNotNone(warning)
+            self.assertIn("refused", warning)
+            self.assertEqual(len(os.listdir(logdir)), before)   # nothing touched
+
+    def test_c_malformed_filenames_never_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            open(os.path.join(logdir, "daily-not-a-date.md"), "w").close()
+            open(os.path.join(logdir, "agent-2026-13-99.log"), "w").close()   # invalid calendar date
+            open(os.path.join(logdir, "random-file.txt"), "w").close()
+            removed, warning = dl.prune(os.path.join(d, ".company"), retain_days=90,
+                                         today=datetime(2026, 7, 10).date())
+            self.assertIsNone(warning)   # never crashes
+            # malformed/unrelated files are left alone (skipped, not guessed at)
+            self.assertEqual(len(os.listdir(logdir)), 3)
+
+    def test_d_backup_restored_old_logs_pruned_by_filename_not_mtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            old_date = "2025-01-01"
+            p = os.path.join(logdir, f"daily-{old_date}.md")
+            open(p, "w").close()
+            fresh = time.time()
+            os.utime(p, (fresh, fresh))    # mtime says "just restored", filename says ancient
+            removed, warning = dl.prune(os.path.join(d, ".company"), retain_days=90,
+                                         today=datetime(2026, 7, 10).date())
+            self.assertIsNone(warning)
+            self.assertEqual(removed, 1)
+            self.assertFalse(os.path.exists(p))
+
+    def test_prune_failure_on_missing_dir_never_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            # No ops/logs dir at all.
+            removed, warning = dl.prune(os.path.join(d, ".company"), retain_days=90,
+                                         today=datetime(2026, 7, 10).date())
+            self.assertEqual(removed, 0)
+            self.assertIsNone(warning)   # missing dir is not an error worth surfacing
+
+    def test_prune_failure_on_unreadable_dir_warns_never_raises(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permission bits")
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            open(os.path.join(logdir, "daily-2020-01-01.md"), "w").close()
+            os.chmod(logdir, 0o000)
+            try:
+                removed, warning = dl.prune(os.path.join(d, ".company"), retain_days=90,
+                                             today=datetime(2026, 7, 10).date())
+            finally:
+                os.chmod(logdir, 0o755)   # restore so tempdir cleanup can proceed
+            self.assertEqual(removed, 0)
+            self.assertIsNotNone(warning)   # surfaced, but never raised
 
 
 if __name__ == "__main__":
