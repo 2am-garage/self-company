@@ -2,7 +2,7 @@
 
 > **Tony's domain.** RAG is a local, offline vector index (LanceDB + fastembed) over the markdown memory store, used to catch semantic matches keyword search misses. It is **wired into the pipeline** as of Phase 13 — the daily index refresh (Stage A) and ask-time semantic injection (Stage B, v0.1.5) both run live. As of **Phase 24** the index is also **hybrid** (vector + BM25/FTS fused via RRF, §7) and **model-stamped** (§13 — the migration mechanism for a future embedding-model swap). The one piece that isn't pre-installed is the local venv; until you run the one command below the company transparently uses the keyword floor:
 > ```bash
-> bash .company/scripts/rag_setup.sh install
+> bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install
 > ```
 > This creates a private venv at `.company/.rag-venv` and installs **LanceDB + fastembed** (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384-dim, MULTILINGUAL, local CPU, no daemon, fully offline). No Ollama. Everything degrades gracefully: with no venv the pipeline runs exactly as before.
 >
@@ -65,15 +65,15 @@ The RAG **logic is wired** (daily index refresh + ask-time semantic injection), 
 ## 3. One-Time Setup
 
 ```bash
-bash .company/scripts/rag_setup.sh install
+bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install
 ```
 
-Creates `.company/.rag-venv`, installs LanceDB + fastembed, and warms the embedding model (one-time ~470 MB download of `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, multilingual). `rag_index.py` / `rag_query.py` auto re-exec into that venv, so plain `python3 .company/scripts/rag_*.py` just works afterward.
+Creates `.company/.rag-venv`, installs LanceDB + fastembed, and warms the embedding model (one-time ~470 MB download of `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, multilingual). `rag_index.py` / `rag_query.py` auto re-exec into that venv, so plain `python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_*.py` just works afterward.
 
 Other subcommands:
 ```bash
-bash .company/scripts/rag_setup.sh status      # INSTALLED / not installed
-bash .company/scripts/rag_setup.sh uninstall   # remove the venv
+bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh status      # INSTALLED / not installed
+bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh uninstall   # remove the venv
 ```
 
 The venv lives under `.company/` (gitignored, per-project, never committed).
@@ -87,7 +87,7 @@ Once activated, the index is kept fresh **automatically** by `daily-run.sh`. The
 Each daily run, after the deterministic core has settled (**reinforce → decay → verify → entropy**), the RAG-index step runs an **incremental** rebuild so the index reflects **post-consolidation truth** (absorbed L0 duplicates gone, decay's tier promotions applied):
 
 ```bash
-python3 .company/scripts/rag_index.py --memory-dir .company/memory --index-dir .company/memory/index
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_index.py --memory-dir .company/memory --index-dir .company/memory/index
 ```
 
 The step is:
@@ -108,9 +108,9 @@ What it does each run:
 
 After a major reorganization or suspected corruption:
 ```bash
-python3 .company/scripts/rag_index.py --rebuild
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_index.py --rebuild
 # or nuke and rebuild:
-rm -rf .company/memory/index && python3 .company/scripts/rag_index.py --rebuild
+rm -rf .company/memory/index && python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_index.py --rebuild
 ```
 
 ---
@@ -133,7 +133,7 @@ Because paths are always stored, retrieval always resolves back to live markdown
 Once built, query the index semantically:
 
 ```bash
-python3 .company/scripts/rag_query.py --query "what does the Chairman prefer for documentation?" --top-k 5
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_query.py --query "what does the Chairman prefer for documentation?" --top-k 5
 ```
 
 | Argument | Default | Meaning |
@@ -208,7 +208,7 @@ The RAG stack fails loud and clear with fallback instructions, never silently.
 Both `rag_index.py` (full build) and `rag_query.py` exit **2** with an actionable message when the RAG venv isn't installed:
 ```
 [rag_index] RAG backend not installed. Run:
-  bash .company/scripts/rag_setup.sh install
+  bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install
 (installs LanceDB + fastembed into .company/.rag-venv; see references/rag.md)
 ```
 `rag_query.py` additionally hints the grep fallback and distinguishes "no index yet" (build it first) from "backend unavailable".
@@ -217,7 +217,7 @@ Both `rag_index.py` (full build) and `rag_query.py` exit **2** with an actionabl
 
 `--threshold-check` works with **no venv, no LanceDB, no fastembed**:
 ```bash
-python3 .company/scripts/rag_index.py --threshold-check
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_index.py --threshold-check
 ```
 It only counts active L1/L2 and exits 0 (at/over threshold) or 1 (under) — the mechanism behind the daily activation surface (§2).
 
@@ -251,7 +251,7 @@ grep -B2 -A2 -ri "keyword" .company/memory/    # with context
 ## 9. Troubleshooting
 
 ### "No module named lancedb / fastembed"
-Backend not installed → `bash .company/scripts/rag_setup.sh install`.
+Backend not installed → `bash ${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh install`.
 
 ### "Index is out of sync after a markdown edit"
 Incremental skipped an edited file (rare hash edge) → force a full rebuild: `rag_index.py --rebuild`.
@@ -295,7 +295,7 @@ This was the Phase 24 diagnosis: an English-only embedding model on a non-Englis
 
 ## 12. References
 
-- **Scripts**: `.company/scripts/rag_setup.sh`, `rag_index.py`, `rag_query.py`, `rag_embed.py`, `rag_stamp.py`, `rag_rerank.py`.
+- **Scripts**: `${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/rag_setup.sh`, `rag_index.py`, `rag_query.py`, `rag_embed.py`, `rag_stamp.py`, `rag_rerank.py`.
 - **Index location**: `.company/memory/index/` (LanceDB, gitignored).
 - **Policy tunables**: `org/policy.md §8 RAG`.
 - **Design**: `design/self-company-design.md §8`.
