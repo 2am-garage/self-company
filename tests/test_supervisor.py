@@ -453,6 +453,28 @@ class TestDispatchBudget(unittest.TestCase):
             self.assertIsNone(workers["bob"].budget)
             self.assertEqual(workers["bob"].status, sv.Status.DONE)
 
+    def test_stream_json_args_present_by_default(self):
+        m = sv.Member("bob")
+        cmd = m.real_command("do a thing")
+        self.assertIn("--output-format", cmd)
+        self.assertIn("stream-json", cmd)
+        self.assertIn("--verbose", cmd)
+
+    def test_self_company_agent_stream_0_restores_plain_text(self):
+        # Item 3 acceptance (c): SELF_COMPANY_AGENT_STREAM=0 restores the old
+        # plain-text mode — no --output-format/stream-json/--verbose at all.
+        os.environ["SELF_COMPANY_AGENT_STREAM"] = "0"
+        try:
+            m = sv.Member("bob")
+            cmd = m.real_command("do a thing")
+        finally:
+            os.environ.pop("SELF_COMPANY_AGENT_STREAM", None)
+        self.assertNotIn("--output-format", cmd)
+        self.assertNotIn("stream-json", cmd)
+        self.assertNotIn("--verbose", cmd)
+        self.assertEqual(cmd[0], "claude")
+        self.assertEqual(cmd[1], "-p")
+
 
 # --------------------------------------------- Phase 29 Item 1: model routing
 class TestPromptBuilderIntegration(unittest.TestCase):
