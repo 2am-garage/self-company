@@ -77,6 +77,14 @@ employees as live child processes (`claude -p`); the cycle is logged to
 `ops/reports/company-runs.md`. Not app-visible (native widgets belong to the host),
 but fully modular. `--demo` runs the whole flow with no LLM.
 
+Phoebe's plan call (Phase 29 fold-in H3) runs with `--output-format json` (one
+parseable envelope; her answer lives in `.result`), and every returned employee id
+is validated against the REAL roster (`supervisor.py --list`) before dispatch: an
+unknown id is dropped with a logged warning and a `plan:partial` ledger annotation;
+if NOTHING valid survives, the run falls back to the heuristic bob+gibby plan
+labeled `heuristic-after-invalid-plan` in the ledger — a hallucinated employee id
+can no longer silently dispatch nobody while still logging as a clean success.
+
 **Trigger #3 (event-driven)** is push-first: the company is dormant until an
 external producer (a training run, trading bot, CI job, …) fires it — no polling,
 no daemon. Triggers are **user-defined**, declarative, one file per trigger under
@@ -601,12 +609,24 @@ processes** and reads their stdout streams in real time via `select()`, so statu
 is event-driven and synced with the actual work — the supervisor IS the parent of
 the process tree. It is ephemeral (exists only while work runs) and covers ALL
 employees (discovered from `org/employees/`, not a hardcoded subset). OOP:
-`Employee` / `Worker` / `Supervisor` / `LiveTree`. Status protocol: a worker
-prints `@status <phase>` lines as it works; the same protocol serves a simulated
-demo worker and a real `claude -p` agent, so the supervisor is host-agnostic.
+`Employee` / `Worker` / `Supervisor` / `LiveTree`.
+
+Status protocol (Phase 29 Item 3): a real worker is spawned with `claude -p
+PROMPT --model M --output-format stream-json --verbose`, and `Worker.consume_line`
+derives live phases from the stream-json EVENT SHAPE itself — an `assistant`
+message with a `tool_use` block sets the phase to the tool name; a `result` event
+sets `done`/`failed` from `is_error`. Before this, real dispatch was blind: plain
+`-p` output only reaches stdout at process EOF, so a live tree never actually moved
+for a real agent (only the demo/echo worker did). The legacy `@status <phase>`
+marker still works as optional garnish — scanned both as a bare line and inside an
+assistant text block — so a model that still emits it, or a `SELF_COMPANY_AGENT_STREAM=0`
+plain-text fallback, is still classified correctly (just batched at EOF instead of
+live). Demo workers are unaffected (they only ever spoke `@status`).
 
 - `supervisor.py --demo` — simulate all employees live (no LLM).
-- `supervisor.py --dispatch '{"phoebe":"...","bob":"..."}'` — real agents.
+- `supervisor.py --dispatch '{"phoebe":"...","bob":"..."}'` — real agents, each on
+  its OWN resolved model (see `references/employee-model-table.md`) and streaming
+  live phases.
 
 Honest ceiling: in a real terminal this is a live TUI; viewed remotely in the
 Claude app it streams as text (native widgets belong to the host — the one thing

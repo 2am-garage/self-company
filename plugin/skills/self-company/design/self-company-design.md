@@ -20,16 +20,26 @@
 | Agent | Title | Tier | Responsibility | Default Model |
 |---|---|---|---|---|
 | **Chairman (Uwe)** | Chairman | owner | Final decisions, taste, manual triggers | — |
-| **Elon** | CEO | manager | Set direction, upgrade adjudication, lead manual deep cleanups | Opus / Sonnet |
-| **Phoebe** | PM | manager (above July) | Execution gateway: intent → spec/plan, dispatch tasks, track progress, all work goes through her | Sonnet |
+| **Elon** | CEO | manager | Set direction, upgrade adjudication, lead manual deep cleanups | Fable |
+| **Phoebe** | PM | manager (above July) | Execution gateway: intent → spec/plan, dispatch tasks, track progress, all work goes through her | Sonnet (pinned to `claude-sonnet-4-6`) |
 | **July** | HR | team lead (half a tier above the five workers) | **Tune the five workers**: personality/prompt/performance review/enable/disable | Sonnet |
-| **Bob** | Build Engineer | worker | Per Phoebe's plan, **produce code / files** | Haiku → Sonnet |
-| **Gibby** | QA Engineer | worker | **Red Team** — assume output is broken, rotate attack surfaces to hit Bob; 3 unbroken rounds to pass | Sonnet |
+| **Bob** | Build Engineer | worker | Per Phoebe's plan, **produce code / files** | Haiku |
+| **Gibby** | QA Engineer | worker | **Red Team** — assume output is broken, rotate attack surfaces to hit Bob; 3 unbroken rounds to pass | Haiku |
 | **Tony** | Improvement Engineer | worker | Think: measure entropy, evaluate company health, memory maintenance logic (decay/dedup/contradiction), RAG strategy, **write upgrade proposals to Elon** | Sonnet |
-| **Tom** | IT / Ops Engineer | worker | Execute: `./company/` skeleton, scheduling/hooks, **token breaker**, backups, file integrity, **execute Elon-approved upgrades** | Sonnet |
+| **Tom** | IT / Ops Engineer | worker | Execute: `./company/` skeleton, scheduling/hooks, **token breaker**, backups, file integrity, **execute Elon-approved upgrades** | Haiku |
 | **Mike** | R&D Researcher | worker | Survey the external world (literature, comparable harnesses, ecosystem); return **cited, applicability-ranked briefs** — evidence packs for specs. Tony measures inside, Mike surveys outside | Sonnet |
 
 > RAG strategy owned by Tony; token monitoring and breaker owned by Tom (user-specified).
+> **Default Model** here is each employee's `context.md` `model:` field (Phase 29) —
+> Layer-A data, adjustable with a one-line edit and no code change; "Sonnet"
+> resolves to the current system default (`schedule_config.DEFAULT_AGENT_MODEL`).
+> Phoebe is the one deliberate exception: pinned to the literal `claude-sonnet-4-6`
+> id rather than the `sonnet` alias, so she does not move when the default is
+> bumped (a Chairman decision, not a code constraint). See
+> `references/employee-model-table.md` for the full alias map and degrade
+> contract, and note this column only governs a HEADLESS dispatch
+> (`supervisor.py`) — an interactive session with the Chairman runs under
+> whatever model that session itself is using.
 
 ### Bob⚔Gibby Red/Blue Adversarial (Bob=Blue defend/build, Gibby=Red attack)
 
@@ -154,7 +164,7 @@ name: Bob
 role: Build Engineer
 manager: Phoebe                 # dispatch source
 people_lead: July               # performance tuning
-model: sonnet
+model: haiku                    # alias -> claude-haiku-4-5; unset/invalid -> DEFAULT (Phase 29, see references/employee-model-table.md)
 reads:                          # load only these, not everything
   - org/employees/bob/          #   own desk
   - <Phoebe-delivered spec/plan>    #   current task
@@ -335,7 +345,7 @@ Target: entropy declines or stays flat after each maintenance
 | Tactic | How |
 |---|---|
 | **Tiered triggers** | Real-time=cheap small work; daily/weekly=batch big work (see §7) |
-| **Cheap models for frequent work** | CAPTURE uses Haiku; VERIFY / maintenance uses Sonnet; only manual deep cleanups touch Opus |
+| **Cheap models for frequent work** | CAPTURE uses Haiku; VERIFY / maintenance uses Sonnet; only manual deep cleanups (Elon) touch Fable |
 | **Batch not per-item** | Tony doesn't run per-item, accumulates to once-daily/weekly |
 | **Per-period budget cap** | `policy.md` sets daily / weekly token ceiling, stop if exceeded, defer to next period |
 | **Event-driven, not polling** | Triggered by conversation end / scheduling, no active polling/idle spinning |
@@ -351,7 +361,7 @@ Target: entropy declines or stays flat after each maintenance
 | **Daily** | Scheduled | Tony (+ Tom guards budget) | Dedup, decay, promotion assessment | Sonnet |
 | **Weekly** | Scheduled | Tony + Gibby + Phoebe + July | Full verify, rebuild RAG, produce report, measure entropy, worker performance tune | Sonnet |
 | **Weekly (external)** | Scheduled (`research-scan.sh`) | **Mike (R&D)** | Survey the web/ecosystem for improvements, write a cited brief to `ops/research/`, file proposals for Tony/Elon | Sonnet |
-| **Manual** | Chairman calls | Elon (lead) + everyone | Deep cleanup, reorganize, cross-layer review, build pipeline | Opus |
+| **Manual** | Chairman calls | Elon (lead) + everyone | Deep cleanup, reorganize, cross-layer review, build pipeline | Fable |
 
 > Parallelizable: multiple agents can work on same stage; cross-stage serial (capture→organize→write→verify has dependencies). Build pipeline (Bob⚔Gibby) triggered per-project by Chairman.
 

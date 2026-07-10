@@ -248,7 +248,51 @@ the R1–R6 validator are untouched.
 
 ---
 
-Version: v1.4 (2026-07-08) — + shared company-memory READ at dispatch (Phase 18c): `shared_memory_read` capability (elon by default) reads the SHARED corpus into a dispatched worker via `Employee.dispatch_context`, with a `SC_NO_MEMORY_INJECT` double-injection guard on the spawned worker. Prior: v1.3 (2026-07-07) — per-employee memory MODE (rag/flat) + own-store recall-at-dispatch via `Employee.recall_context`.
+## 8. Headless dispatch: model routing, live phases, and the shared prompt builder (Phase 29)
+
+Three changes to `supervisor.py`'s `Member.real_command` / `Worker` — the ONLY
+things that changed about headless dispatch; the memory-injection wiring in §7 is
+untouched.
+
+**Per-employee model routing (Item 1).** Every dispatched worker used to run the
+same hardcoded model regardless of its desk. `real_command` now resolves the
+`--model` argv via `Employee.resolved_model(default)` — see
+`references/employee-model-table.md` for the full alias map, degrade contract, and
+current per-employee assignments. The resolved model (and any degrade warning) is
+recorded on the dispatch event log, so a run record proves which model each
+worker actually ran.
+
+**Live phases via stream-json (Item 3).** A real worker is spawned with
+`--output-format stream-json --verbose` instead of bare `-p PROMPT`: plain-text
+`claude -p` output only reaches stdout at process EOF, so the supervisor's live
+tree never actually moved for a real agent before this — only the simulated demo
+worker did. `Worker.consume_line` now derives phases from the event stream itself
+(`assistant` + `tool_use` → phase = the tool name; `result` → `done`/`failed` from
+`is_error`) — one `json.loads` per line, never a regex scrape. The legacy
+`@status <phase>` marker still works as optional garnish (scanned both bare and
+embedded inside an assistant text block), and `SELF_COMPANY_AGENT_STREAM=0`
+restores the old plain-text/EOF-batched mode.
+
+**Shared prompt builder + inlined persona (Item 4 + P5).** The dispatch prompt is
+assembled via `scripts/prompt_builder.py` — role header, a STATED wall-clock
+budget (seconds, never tokens — a CLI worker has no usage counter to pace
+against), the employee's PERSONA BODY inlined directly (fence-safe, capped
+~2000 chars) instead of a "go read `persona.md`" errand a worker sometimes
+skipped, an output contract, and a task boundary (Mike's Idea 7's four elements:
+objective / output contract / tool guidance / boundaries). The same builder is
+also wired into `fire-trigger.sh`, `research-scan.sh`, and `company-run.sh`'s
+Phoebe planning prompt — see `scripts/prompt_builder.py`'s module docstring for
+the five composable functions and the CLI bash callers use.
+
+---
+
+Version: v1.5 (2026-07-10) — Phase 29: per-employee model routing at dispatch
+(`Employee.resolved_model`), live stream-json phases replacing the blind
+plain-text `@status` wait, and the shared `prompt_builder.py` (role header,
+stated wall-clock budget, inlined persona, output contract, task boundary) wired
+into every dispatch prompt. See `references/employee-model-table.md` for the
+model contract.
+Prior: v1.4 (2026-07-08) — + shared company-memory READ at dispatch (Phase 18c): `shared_memory_read` capability (elon by default) reads the SHARED corpus into a dispatched worker via `Employee.dispatch_context`, with a `SC_NO_MEMORY_INJECT` double-injection guard on the spawned worker. Prior: v1.3 (2026-07-07) — per-employee memory MODE (rag/flat) + own-store recall-at-dispatch via `Employee.recall_context`.
 Prior: v1.2 (2026-07-07) — + per-employee memory (recall at dispatch, capture at close).
 Prior: v1.1 (2026-06-29) — orchestration/execution split, sub-agent isolation, parallel dispatch, tools registry.
-Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice + `memory:` mode), `scripts/employee.py` (`memory_mode`/`remember`/`recall`/`recall_context`).
+Related: `SKILL.md` (org chart, addressing protocol), `org/triggers.md` (cadence/parallelism), `org/tools.md` (tool inventory + grants), each `org/employees/<name>/context.md` (per-worker slice + `memory:` mode + `model:` — see `references/employee-model-table.md`), `scripts/employee.py` (`memory_mode`/`remember`/`recall`/`recall_context`/`resolved_model`), `scripts/prompt_builder.py` (shared prompt assembly).

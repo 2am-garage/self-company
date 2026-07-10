@@ -3,9 +3,7 @@ name: Elon
 role: CEO
 manager: Chairman
 people_lead: ~
-model: |
-  sonnet (standard decisions)
-  opus (deep thinking during manual deep cleanups)
+model: fable                    # Phase 29 Item 1 (Chairman's change): CEO — highest judgment; rare/high-stakes dispatches only
 memory: rag                    # Phase 18b: rag planner — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   # My own desk
@@ -85,9 +83,14 @@ As a decision-maker, Elon needs:
 - ✗ Memory internals (Tony/Gibby own maintenance)
 - ✗ Phoebe's full dispatch details (beyond decision scope)
 
-**Model tier:**
-- **Sonnet**: Day-to-day decisions (approve upgrades, set direction, arbitrate conflicts)
-- **Opus**: Manual deep cleanups (full diagnosis, cross-team coordination, strategic adjustments)
+**Model tier (Phase 29 Item 1 — adjustable in `model:` above, no code change):**
+- `fable` — Elon's current pin. CEO dispatches are rare and high-judgment
+  (cross-team diagnosis, strategic sign-off, deep cleanups) — exactly the case
+  for the highest-capability model despite its cost ($10/$50 per MTok).
+- Editing this line to `sonnet`/`opus`/`haiku`/a literal `claude-*` id retunes
+  Elon's dispatch model with zero code change; leaving it blank or breaking it
+  degrades safely to the system DEFAULT (never blank, never a crash — see
+  `references/employee-model-table.md`).
 
 **Token budget:** v2 will derive from `org/policy.md` token ceiling globally; placeholder here.
 

@@ -3,7 +3,7 @@ name: Tony
 role: Improvement Engineer
 manager: Phoebe                      # dispatch source and progress tracking
 people_lead: July                    # performance tuning and persona maintenance
-model: sonnet
+model: sonnet                   # Phase 29 Item 1: analyst — alias resolves to the current DEFAULT (schedule_config.DEFAULT_AGENT_MODEL)
 memory: rag                    # Phase 18b: rag analyst — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   - org/employees/tony/              # my own desk (persona, context, scratchpad, log)

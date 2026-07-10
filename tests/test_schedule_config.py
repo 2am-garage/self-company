@@ -75,8 +75,11 @@ class TestDefaults(Base):
         self.assertEqual(out.strip(), "9 3 * * 0")
 
     def test_no_yaml_agent_defaults(self):
+        # Phase 29 Item 2: the default model bumped sonnet-4-6 -> sonnet-5;
+        # sourced from the ONE constant (schedule_config.DEFAULT_AGENT_MODEL)
+        # so this test can never drift from the real default.
         c = self.company()
-        for key, val in (("model", "claude-sonnet-4-6"), ("timeout", "600"), ("daily_cap", "4")):
+        for key, val in (("model", sc.DEFAULT_AGENT_MODEL), ("timeout", "600"), ("daily_cap", "4")):
             rc, out, _ = run_script("schedule_config.py", "--company", c, "--agent", key)
             self.assertEqual((rc, out.strip()), (0, val), key)
 
@@ -368,7 +371,7 @@ class TestPlanTick(Base):
         plan = self.plan(self.company(), 3, 2)
         self.assertTrue(all(plan["steps"].values()))
         self.assertEqual(plan["agent"],
-                         {"model": "claude-sonnet-4-6", "timeout": 600, "daily_cap": 4})
+                         {"model": sc.DEFAULT_AGENT_MODEL, "timeout": 600, "daily_cap": 4})
 
     def test_step_set_matches_step_owner_table(self):
         # No second list to drift from should_run's own routing table.

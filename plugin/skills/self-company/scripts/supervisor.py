@@ -25,10 +25,21 @@ _recall_memory loads it) rather than duplicating it: process-spawning is not a
 data-model concern, so the two responsibilities stay separate but the data model
 stays single-sourced.
 
-Status protocol: a worker prints lines beginning with '@status <phase>' as it
-works ('@status planning', '@status done'). Everything else is treated as a log
-line. The same protocol works for a simulated demo worker and for a real
-`claude -p` agent told to emit those markers — the supervisor is agnostic.
+Status protocol (demo workers + legacy real-worker fallback): a worker prints
+lines beginning with '@status <phase>' as it works ('@status planning',
+'@status done'). Everything else is treated as a log line.
+
+Phase 29 Item 3: a REAL worker is spawned with `--output-format stream-json
+--verbose` (mirroring daily-run.sh's own STREAM_ARGS — that script learned this
+lesson for its own headless agent first; the supervisor never got the memo
+until now). Plain-text `claude -p` output only ever reaches the terminal at
+EOF, so a live '@status' stream was never actually live for a real agent — only
+the demo (echo) worker ever moved. Worker.consume_line now derives phases from
+the stream-json event shape itself (assistant tool_use -> phase = the tool
+name; a `result` event -> done/failed) and additionally still honors an
+embedded '@status <word>' marker inside assistant text, so the legacy protocol
+still works wherever a model happens to emit it. `SELF_COMPANY_AGENT_STREAM=0`
+restores the old plain-text mode (EOF-batched, classified the same way).
 
 Honest ceiling: in a real terminal this is a live TUI tree; viewed remotely in
 the Claude app it streams as text (the app renders text, not skill widgets). That
@@ -46,6 +57,7 @@ import argparse
 import enum
 import json
 import os
+import re
 import select
 import shutil
 import subprocess
@@ -53,6 +65,31 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    # Phase 29 Item 2: the ONE source-of-truth default model constant. Imported
+    # here (not hardcoded) so a single edit to schedule_config.DEFAULT_AGENT_MODEL
+    # moves every dispatch default at once — Item 1's per-employee table falls
+    # back to THIS when context.md's `model:` is unset/blank/invalid.
+    import schedule_config as _sc
+    DEFAULT_MODEL = _sc.DEFAULT_AGENT_MODEL
+except Exception:                                              # pragma: no cover
+    DEFAULT_MODEL = "claude-sonnet-5"
+
+try:
+    # Phase 29 Item 4 (Bob P1 + P2, Mike Idea 7): the ONE shared prompt-
+    # assembly seam — role header, stated wall-clock budget, nonce fence,
+    # output contract, task boundary. A missing module degrades to the
+    # pre-Item-4 inline prompt strings (never blocks a dispatch).
+    import prompt_builder as _pb
+except Exception:                                              # pragma: no cover
+    _pb = None
+
+# P5: cap the inlined persona body so it can never balloon a worker prompt —
+# a SEPARATE budget from the memory-injection cap (Elon's note: persona does
+# NOT eat the memory budget).
+_PERSONA_INLINE_CHARS = 2000
 
 
 # --- Item 3 (TOM-1): bound the live dispatch path ----------------------------
@@ -186,9 +223,64 @@ class Member:
             pass
         return None
 
-    def real_command(self, task, model="claude-sonnet-4-6"):
-        """A real headless agent, primed with this employee's role and the task,
-        told to emit @status markers so the supervisor can stream live phases.
+    def _resolve_model(self, default_model):
+        """Phase 29 Item 1: resolve THIS employee's `context.md` model: field via
+        the ONE resolution function (employee.Employee.resolved_model) — never a
+        second alias table here. Any trouble loading the desk degrades to
+        `default_model` silently (mirrors _recall_memory's own import-guard
+        discipline: a dispatch must never fail because memory/model resolution
+        broke). Returns (model_id, warning_or_None)."""
+        try:
+            from employee import Employee as EmployeeModel
+            return EmployeeModel.load(self.id, self.company_dir).resolved_model(default_model)
+        except Exception:
+            return default_model, None
+
+    def _load_persona(self):
+        """P5 (Phase 29 fold-in): read THIS employee's persona.md BODY, capped
+        to _PERSONA_INLINE_CHARS, so real_command can inline it directly
+        instead of sending the worker on an errand ("Read your persona at
+        ..."). A missing/unreadable persona (or missing employee.py) degrades
+        to "" — real_command then falls back to the role-line-only prompt,
+        never blocking a dispatch. Persona does NOT share the memory-injection
+        budget (_DISPATCH_INJECT_BUDGET) — a separate, fixed cap."""
+        try:
+            from employee import Employee as EmployeeModel
+            path = EmployeeModel.load(self.id, self.company_dir).persona_path
+            text = Path(path).read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+        if not text:
+            return ""
+        if len(text) > _PERSONA_INLINE_CHARS:
+            text = text[:_PERSONA_INLINE_CHARS].rstrip() + "…"
+        return text
+
+    def real_command(self, task, default_model=None):
+        """A real headless agent, primed with this employee's role, persona,
+        and the task. Assembled via the Phase 29 Item 4 shared prompt_builder
+        (role header, stated wall-clock budget, output contract, task
+        boundary — Mike's Idea 7 four elements) when available; degrades to
+        the pre-Item-4 inline strings if the module can't be imported (never
+        blocks a dispatch).
+
+        Phase 29 Item 1: the model is resolved from THIS employee's context.md
+        `model:` field (haiku/sonnet/opus/fable alias, a `claude-*` id verbatim,
+        or `default_model` on unset/invalid — see employee.Employee.resolved_model
+        for the full degrade contract). `default_model` defaults to the module
+        constant DEFAULT_MODEL (schedule_config.DEFAULT_AGENT_MODEL) when the
+        caller doesn't pass one, so there is exactly one default in the system.
+
+        Phase 29 Item 3: real workers are spawned with `--output-format
+        stream-json --verbose` (mirroring daily-run.sh's STREAM_ARGS) so the
+        supervisor's live tree derives phases from the actual event stream
+        instead of a buffered-to-EOF '@status' marker the model may forget.
+        `SELF_COMPANY_AGENT_STREAM=0` restores the old plain-text mode.
+
+        P5: the persona BODY is inlined directly (fence-safe, via
+        prompt_builder.fence) instead of telling the worker to go read it off
+        disk — a worker that skips the read (models sometimes do) used to
+        silently run persona-less; now the persona travels WITH the prompt.
 
         Before dispatch, inject this employee's relevant MEMORY (Phase 18 Item 4 +
         Phase 18c): for a `rag`-mode employee, the OWN-store "Relevant past
@@ -196,32 +288,84 @@ class Member:
         SHARED "Relevant company memory" block. A `flat`, non-shared-read employee
         (e.g. bob/gibby/tom) with no relevant memory injects NOTHING
         (dispatch_context returns ""). The two blocks share one budget and are
-        deduped by employee.py."""
-        prompt = (
-            f"You are {self.name} ({self.role}) in the self-company, working "
-            f"non-interactively. Task: {task}\n"
-            f"Read your persona at .company/org/employees/{self.id}/persona.md and stay "
-            f"in role. As you work, print progress lines beginning with '@status ' "
-            f"followed by ONE short phase word (e.g. '@status planning', '@status "
-            f"working', '@status reviewing'). Print '@status done' when finished. "
-            f"Keep it tight."
-        )
+        deduped by employee.py — separate from the persona's own fixed cap."""
+        if default_model is None:
+            default_model = DEFAULT_MODEL
+        model, warning = self._resolve_model(default_model)
+        self.last_model_warning = warning   # surfaced by Supervisor._emit
+        budget = _dispatch_budget()
+
+        if _pb is not None:
+            persona = self._load_persona()
+            parts = [
+                _pb.role_header(self.name, self.role),
+                _pb.budget_line(budget),
+                f"Task: {task}",
+            ]
+            if persona:
+                parts.append(_pb.fence(persona, label="PERSONA"))
+            parts.append(_pb.output_contract(
+                "your tool calls and final reply",
+                "do the task directly; print progress lines beginning with "
+                "'@status <phase>' (e.g. '@status planning', '@status done') as "
+                "optional garnish — the supervisor also derives phases from your "
+                "tool calls"))
+            parts.append(_pb.task_boundary(
+                "stay in role and use only your granted tools; keep it tight; "
+                "wrap up cleanly before the budget above runs out"))
+            prompt = "\n\n".join(parts)
+        else:                                        # pragma: no cover - defensive
+            prompt = (
+                f"You are {self.name} ({self.role}) in the self-company, working "
+                f"non-interactively. Task: {task}\n"
+                f"Read your persona at .company/org/employees/{self.id}/persona.md and stay "
+                f"in role. As you work, print progress lines beginning with '@status ' "
+                f"followed by ONE short phase word (e.g. '@status planning', '@status "
+                f"working', '@status reviewing'). Print '@status done' when finished. "
+                f"Keep it tight."
+            )
         memory = self._recall_memory(task)
         if memory:
             prompt = f"{prompt}\n\n{memory}"
-        return ["claude", "-p", prompt, "--model", model]
+        cmd = ["claude", "-p", prompt, "--model", model]
+        if os.environ.get("SELF_COMPANY_AGENT_STREAM", "1") != "0":
+            cmd += ["--output-format", "stream-json", "--verbose"]
+        return cmd
+
+
+def _model_from_cmd(cmd):
+    """Pull the `--model` value back out of an already-built argv (post-hoc
+    introspection, not a second resolution path) — Phase 29 Item 1 acceptance
+    (e): the event log must show which model each worker actually ran, without
+    Worker/Supervisor needing their own copy of the resolution logic. Demo cmds
+    carry no `--model`; returns None there."""
+    try:
+        return cmd[cmd.index("--model") + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+# Phase 29 Item 3: the legacy '@status <word>' marker, now scanned WITHIN an
+# assistant text block (stream-json) as well as a bare plain-text line — a
+# model that still emits it (inside a text content block, possibly mid-string)
+# keeps working; a model that never does now still produces phase transitions
+# from the event stream itself (tool_use -> phase, result -> done/failed).
+_EMBEDDED_STATUS_RE = re.compile(r"(?:^|\n)@status\s+(\S+)")
 
 
 class Worker:
-    """Wraps one running employee process; parses its live @status stream."""
+    """Wraps one running employee process; parses its live event stream —
+    stream-json for a real worker (Phase 29 Item 3), the legacy '@status'
+    marker protocol for a demo worker or a plain-text fallback."""
 
-    def __init__(self, employee, task, command, env=None, budget=None):
+    def __init__(self, employee, task, command, env=None, budget=None, model=None):
         self.emp = employee
         self.task = task
         self.command = command
         self.env = env                # None -> inherit; set to guard the memory hook
-        self.budget = budget          # Item 3: wall-clock deadline (s); None -> unbounded
-        self.timed_out = False        # Item 3: killed by the deadline (vs natural exit)
+        self.budget = budget          # Item 3 (TOM-1): wall-clock deadline (s); None -> unbounded
+        self.model = model            # Item 1: the --model this worker actually runs (None for demo)
+        self.timed_out = False        # Item 3 (TOM-1): killed by the deadline (vs natural exit)
         self.status = Status.IDLE
         self.phase = ""
         self.last = ""
@@ -284,13 +428,73 @@ class Worker:
         return lines, False
 
     def consume_line(self, line):
+        """Classify one line of worker output. Order (Phase 29 Item 3):
+        1. the legacy bare '@status <word>' marker (demo workers; a real worker
+           in plain-text fallback mode) — fast path, unchanged from before.
+        2. a stream-json event (`line[:1] == '{'`): exactly one `json.loads`,
+           never a regex scrape (Elon's note) — malformed JSON falls through to
+           plain log text instead of crashing the loop.
+        3. anything else: a plain log line (`self.last`), same as always.
+        This is sniffed PER LINE, not decided once at spawn time, so demo mode
+        and the `SELF_COMPANY_AGENT_STREAM=0` plain-text fallback need zero
+        branching here — they simply never produce a line starting with '{'."""
         line = line.rstrip("\n")
         self.lines.append(line)
         if line.startswith("@status "):
             self.phase = line[len("@status "):].strip()
             self.status = Status.DONE if self.phase == "done" else Status.WORKING
-        elif line:
+            return
+        if line[:1] == "{" and self._consume_stream_json(line):
+            return
+        if line:
             self.last = line
+
+    def _consume_stream_json(self, line):
+        """Parse ONE stream-json event line. Returns True if it was consumed as
+        valid JSON (whether or not it carried a phase-bearing shape) — the
+        caller then does NOT also treat the raw JSON as a plain log line.
+        Returns False only for a JSON parse failure, so a malformed/truncated
+        line degrades to the ordinary log-text path instead of crashing the
+        select loop (Gibby's hostile-stream-json harness: giant lines, split
+        UTF-8, interleaved garbage, '@status' inside JSON strings)."""
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(event, dict):
+            return False
+        etype = event.get("type")
+        if etype == "assistant":
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    name = str(block.get("name") or "tool").strip().lower() or "tool"
+                    self.phase = name
+                    self.status = Status.WORKING
+                    self.last = f"tool: {name}"
+                elif btype == "text":
+                    text = str(block.get("text") or "")
+                    matches = _EMBEDDED_STATUS_RE.findall(text)
+                    if matches:
+                        word = matches[-1].strip()
+                        self.phase = word
+                        self.status = Status.DONE if word == "done" else Status.WORKING
+                    elif text.strip():
+                        if self.status not in (Status.DONE, Status.FAILED):
+                            self.status = Status.WORKING
+                        self.last = text.strip().splitlines()[0][:200]
+        elif etype == "result":
+            is_error = bool(event.get("is_error"))
+            self.phase = "failed" if is_error else "done"
+            self.status = Status.FAILED if is_error else Status.DONE
+        # else: "system" / "user" / any other recognized JSON shape — valid
+        # stream-json, no new phase information; consumed without touching
+        # self.last (raw JSON is never shown as the human-readable detail line).
+        return True
 
     def on_eof(self):
         rc = self.proc.wait() if self.proc else 0
@@ -396,10 +600,22 @@ class Supervisor:
 
     def _emit(self, worker, kind):
         if self.event_log is not None:
-            self.event_log.append({
+            event = {
                 "ts": datetime.now().replace(microsecond=0).isoformat(),
                 "emp": worker.emp.id, "kind": kind,
-                "status": worker.status.value, "phase": worker.phase})
+                "status": worker.status.value, "phase": worker.phase,
+                # Phase 29 Item 1 acceptance (e): the run record must show which
+                # model each worker actually ran — None for a demo worker (no
+                # --model on its argv at all).
+                "model": worker.model,
+            }
+            # Item 1: surface a degrade warning (invalid model: value) on the
+            # event log rather than only a code comment nobody sees — a finding,
+            # never a dispatch-blocking error.
+            warning = getattr(worker.emp, "last_model_warning", None)
+            if warning:
+                event["model_warning"] = warning
+            self.event_log.append(event)
 
     def dispatch(self, assignments, demo=False, demo_delay=0.3):
         """assignments: {emp_id: task}. Spawn matching workers, run to completion live."""
@@ -415,12 +631,14 @@ class Supervisor:
                 continue
             if demo:
                 cmd = emp.demo_command(task, demo_delay)
+                model = None
             else:
                 cmd = _wrap_timeout(emp.real_command(task), budget, kill_after)
+                model = _model_from_cmd(cmd)
             # Real workers get the double-injection guard env for shared_memory_read
             # employees (elon); demo workers just echo, so they inherit unchanged.
             env = None if demo else emp.worker_env()
-            w = Worker(emp, task, cmd, env=env, budget=budget)
+            w = Worker(emp, task, cmd, env=env, budget=budget, model=model)
             w.start()
             workers[emp_id] = w
             self._emit(w, "start")

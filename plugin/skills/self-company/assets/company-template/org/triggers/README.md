@@ -18,7 +18,7 @@ Fields:
 | `action` | what the dispatched agent should do (routed through Phoebe) |
 | `cooldown` | guard: no re-fire within this window (`30m`, `1h`, `45s`) |
 | `dedupe` | guard: skip a payload identical to the last fired (default `true`) |
-| `budget` | advisory token cap handed to the agent |
+| `budget` | advisory token figure carried in the decision JSON (`trigger_engine.py`'s daily/weekly accounting) — since Phase 29 it is NOT echoed into the dispatched agent's prompt (a CLI worker has no usage counter to pace a token figure against); the prompt instead states the REAL wall-clock timeout (`SELF_COMPANY_TRIGGER_TIMEOUT`, default 600s) via the shared `prompt_builder.py` |
 | `max_fires_per_day` | guard: hard daily cap (token breaker; default 24) |
 | `source_trust` | `trusted` (Chairman-approved direct dispatch) or `untrusted` (default; fail-closed) — an untrusted payload goes through a tool-less STAGE-1 parse + schema validation before any agent ever sees it (privilege separation) |
 | `require_confirm` | `true`/`false` (default `false`), applies to **any** trigger regardless of `source_trust`. **Currently means hold-for-manual, nothing more:** a qualifying event HOLDS (logged `held: require_confirm — held for manual dispatch; approval workflow planned`), consumes no state (no cap/cooldown/dedupe touched), and writes no file. There is **no auto-dispatch and no recovery flag today** — an approval-queue workflow (list/approve/deny + a real override) is planned but not yet built; to act on a held event, run the intended work by hand |

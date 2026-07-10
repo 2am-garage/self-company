@@ -3,7 +3,7 @@ name: Bob
 role: Build Engineer
 manager: Phoebe                 # dispatch source, spec/plan, progress tracking
 people_lead: July               # performance assessment, persona/prompt tuning
-model: haiku → sonnet          # start cheap (Haiku), upgrade when needed (Sonnet)
+model: haiku                    # Phase 29 Item 1: executor — cheap+fast; unset/invalid -> DEFAULT (see references/employee-model-table.md)
 memory: flat                   # Phase 18b: flat executor — keeps log.md; NO per-employee RAG recall/index (override with rag)
 reads:
   - org/employees/bob/         # own desk: persona.md, scratchpad.md, log.md

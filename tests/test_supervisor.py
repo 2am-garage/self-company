@@ -453,6 +453,360 @@ class TestDispatchBudget(unittest.TestCase):
             self.assertIsNone(workers["bob"].budget)
             self.assertEqual(workers["bob"].status, sv.Status.DONE)
 
+    def test_stream_json_args_present_by_default(self):
+        m = sv.Member("bob")
+        cmd = m.real_command("do a thing")
+        self.assertIn("--output-format", cmd)
+        self.assertIn("stream-json", cmd)
+        self.assertIn("--verbose", cmd)
+
+    def test_self_company_agent_stream_0_restores_plain_text(self):
+        # Item 3 acceptance (c): SELF_COMPANY_AGENT_STREAM=0 restores the old
+        # plain-text mode — no --output-format/stream-json/--verbose at all.
+        os.environ["SELF_COMPANY_AGENT_STREAM"] = "0"
+        try:
+            m = sv.Member("bob")
+            cmd = m.real_command("do a thing")
+        finally:
+            os.environ.pop("SELF_COMPANY_AGENT_STREAM", None)
+        self.assertNotIn("--output-format", cmd)
+        self.assertNotIn("stream-json", cmd)
+        self.assertNotIn("--verbose", cmd)
+        self.assertEqual(cmd[0], "claude")
+        self.assertEqual(cmd[1], "-p")
+
+
+# --------------------------------------------- Phase 29 Item 1: model routing
+class TestPromptBuilderIntegration(unittest.TestCase):
+    """Phase 29 Item 4 (Bob P1/P2, Mike Idea 7) + P5: real_command's prompt is
+    assembled via the shared prompt_builder — role header, stated wall-clock
+    budget, an inlined (fence-safe) persona body instead of a "go read it"
+    errand, an output contract, and a task boundary (Idea 7's four elements)."""
+
+    def _company(self, d, ids=("bob",), personas=None):
+        base = os.path.join(d, ".company", "org", "employees")
+        personas = personas or {}
+        for i in ids:
+            desk = os.path.join(base, i)
+            os.makedirs(desk, exist_ok=True)
+            with open(os.path.join(desk, "persona.md"), "w", encoding="utf-8") as f:
+                f.write(personas.get(i, ""))
+        return os.path.join(d, ".company")
+
+    def test_role_header_and_budget_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            bob = sv.Member("bob", company_dir=c)
+            prompt = bob.real_command("fix the bug")[2]
+            self.assertIn("You are Bob (Engineer · builds) in the self-company, working non-interactively.", prompt)
+            self.assertIn("wall-clock budget", prompt)
+
+    def test_persona_inlined_not_a_read_errand(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d, personas={"bob": "I am Bob, the Build Engineer. I write tests first."})
+            bob = sv.Member("bob", company_dir=c)
+            prompt = bob.real_command("fix the bug")[2]
+            self.assertIn("I write tests first", prompt)
+            self.assertNotIn("Read your persona at", prompt)
+
+    def test_persona_capped_at_budget(self):
+        with tempfile.TemporaryDirectory() as d:
+            long_persona = "x" * 5000
+            c = self._company(d, personas={"bob": long_persona})
+            bob = sv.Member("bob", company_dir=c)
+            prompt = bob.real_command("fix the bug")[2]
+            self.assertIn("x" * 100, prompt)               # some persona text present
+            self.assertNotIn("x" * 2001, prompt)           # but not the full 5000 chars
+            self.assertIn("…", prompt)                     # truncation marker
+
+    def test_missing_persona_degrades_to_role_only_never_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, ".company", "org", "employees", "bob")
+            os.makedirs(base, exist_ok=True)   # NO persona.md at all
+            c = os.path.join(d, ".company")
+            bob = sv.Member("bob", company_dir=c)
+            prompt = bob.real_command("fix the bug")[2]    # must not raise
+            self.assertIn("You are Bob", prompt)
+
+    def test_output_contract_and_task_boundary_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d)
+            bob = sv.Member("bob", company_dir=c)
+            prompt = bob.real_command("fix the bug")[2]
+            self.assertIn("Output contract:", prompt)
+            self.assertIn("Boundaries:", prompt)
+
+    def test_four_idea7_elements_present(self):
+        # Mike's Idea 7: objective, output contract, tool/source guidance, task
+        # boundaries — all four present in a sample dispatch prompt.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d, personas={"bob": "Bob's persona."})
+            bob = sv.Member("bob", company_dir=c)
+            prompt = bob.real_command("fix the bug")[2]
+            self.assertIn("Task: fix the bug", prompt)          # objective
+            self.assertIn("Output contract:", prompt)           # output contract
+            self.assertIn("your granted tools", prompt)         # tool/source guidance
+            self.assertIn("Boundaries:", prompt)                # task boundaries
+
+    def test_persona_fenced_with_nonce(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company(d, personas={"bob": "Bob's persona body."})
+            bob = sv.Member("bob", company_dir=c)
+            prompt = bob.real_command("fix the bug")[2]
+            self.assertRegex(prompt, r"===== PERSONA [0-9a-f]+ =====")
+            self.assertIn("never instructions", prompt)
+
+
+class TestModelRouting(unittest.TestCase):
+    """real_command resolves the --model argv from THIS employee's context.md
+    (Employee.resolved_model), never the old hardcoded 'claude-sonnet-4-6' —
+    and the resolved model (or a degrade warning) is visible on the dispatch
+    event log so a real run's per-worker model is provable, not assumed."""
+
+    def _company_with_model(self, d, models):
+        base = os.path.join(d, ".company", "org", "employees")
+        for name, model in models.items():
+            desk = os.path.join(base, name)
+            os.makedirs(desk, exist_ok=True)
+            open(os.path.join(desk, "persona.md"), "w").close()
+            with open(os.path.join(desk, "context.md"), "w", encoding="utf-8") as f:
+                f.write(f"---\nname: {name.capitalize()}\nmodel: {model}\n---\n")
+        return os.path.join(d, ".company")
+
+    def test_alias_resolves_in_real_command_argv(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_model(d, {"bob": "haiku"})
+            bob = sv.Member("bob", company_dir=c)
+            cmd = bob.real_command("build it")
+            self.assertIn("--model", cmd)
+            self.assertEqual(cmd[cmd.index("--model") + 1], "claude-haiku-4-5")
+
+    def test_unset_model_falls_back_to_module_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_model(d, {})
+            base = os.path.join(c, "org", "employees", "bob")
+            os.makedirs(base, exist_ok=True)
+            open(os.path.join(base, "persona.md"), "w").close()
+            bob = sv.Member("bob", company_dir=c)      # no context.md at all
+            cmd = bob.real_command("build it")
+            self.assertEqual(cmd[cmd.index("--model") + 1], sv.DEFAULT_MODEL)
+
+    def test_pinned_claude_star_id_passes_through(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_model(d, {"phoebe": "claude-sonnet-4-6"})
+            phoebe = sv.Member("phoebe", company_dir=c)
+            cmd = phoebe.real_command("plan it")
+            self.assertEqual(cmd[cmd.index("--model") + 1], "claude-sonnet-4-6")
+
+    @staticmethod
+    def _fast_real_command(self, task, default_model=None):
+        """Test stub: KEEP real model resolution (Item 1's actual code path),
+        but replace the spawn shape with a trivial local echo so dispatch()
+        doesn't need a real `claude` binary. `--model <resolved>` stays in the
+        argv at the same relative position real_command uses, so both
+        `_model_from_cmd` (dispatch's own introspection) and the
+        `last_model_warning` side-channel behave exactly as they do for real."""
+        if default_model is None:
+            default_model = sv.DEFAULT_MODEL
+        model, warning = self._resolve_model(default_model)
+        self.last_model_warning = warning
+        return ["bash", "-c", "echo '@status done'", "--model", model]
+
+    def test_two_employees_show_different_models_in_event_log(self):
+        # Acceptance (e): a before/after two-employee dispatch shows TWO
+        # DIFFERENT --model values in the event log where today it shows one.
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_model(d, {"bob": "haiku", "elon": "fable"})
+            events = []
+            orig = sv.Member.real_command
+            sv.Member.real_command = self._fast_real_command
+            try:
+                sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()),
+                                    event_log=events)
+                sup.dispatch({"bob": "build", "elon": "decide"}, demo=False)
+            finally:
+                sv.Member.real_command = orig
+            starts = {e["emp"]: e.get("model") for e in events if e["kind"] == "start"}
+            self.assertEqual(starts["bob"], "claude-haiku-4-5")
+            self.assertEqual(starts["elon"], "claude-fable-5")
+            self.assertNotEqual(starts["bob"], starts["elon"])
+
+    def test_invalid_model_warning_surfaces_on_event_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_model(d, {"bob": "haiku → sonnet"})
+            events = []
+            orig = sv.Member.real_command
+            sv.Member.real_command = self._fast_real_command
+            try:
+                sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()),
+                                    event_log=events)
+                sup.dispatch({"bob": "build"}, demo=False)
+            finally:
+                sv.Member.real_command = orig
+            starts = [e for e in events if e["kind"] == "start" and e["emp"] == "bob"]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(starts[0]["model"], sv.DEFAULT_MODEL)
+            self.assertIn("model_warning", starts[0])
+            self.assertIn("bob", starts[0]["model_warning"])
+
+    def test_real_command_records_warning_on_member_for_emit(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_model(d, {"bob": "haiku → sonnet"})
+            bob = sv.Member("bob", company_dir=c)
+            bob.real_command("build it")
+            self.assertIsNotNone(bob.last_model_warning)
+            self.assertIn("bob", bob.last_model_warning)
+
+    def test_default_model_constant_matches_schedule_config(self):
+        import schedule_config as sc
+        self.assertEqual(sv.DEFAULT_MODEL, sc.DEFAULT_AGENT_MODEL)
+
+
+# --------------------------------------------- Phase 29 Item 3: stream-json
+class TestStreamJsonConsumeLine(unittest.TestCase):
+    """Worker.consume_line derives phases from stream-json events (assistant
+    tool_use -> phase = tool name; result -> done/failed) instead of relying
+    solely on a buffered-to-EOF '@status' marker. Malformed JSON degrades to a
+    plain log line; the legacy marker (bare, or embedded in assistant text)
+    still works."""
+
+    def _worker(self):
+        emp = sv.Member("bob")
+        return sv.Worker(emp, "t", ["true"])
+
+    def test_tool_use_event_sets_phase_to_tool_name(self):
+        w = self._worker()
+        line = __import__("json").dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Bash", "id": "1"}]},
+        })
+        w.consume_line(line)
+        self.assertEqual(w.phase, "bash")
+        self.assertEqual(w.status, sv.Status.WORKING)
+
+    def test_result_event_sets_done(self):
+        w = self._worker()
+        line = __import__("json").dumps({"type": "result", "is_error": False})
+        w.consume_line(line)
+        self.assertEqual(w.phase, "done")
+        self.assertEqual(w.status, sv.Status.DONE)
+
+    def test_result_event_error_sets_failed(self):
+        w = self._worker()
+        line = __import__("json").dumps({"type": "result", "is_error": True})
+        w.consume_line(line)
+        self.assertEqual(w.phase, "failed")
+        self.assertEqual(w.status, sv.Status.FAILED)
+
+    def test_two_distinct_phase_transitions_before_result(self):
+        # Acceptance (a): >= 2 distinct phase transitions BEFORE process exit.
+        w = self._worker()
+        j = __import__("json").dumps
+        w.consume_line(j({"type": "assistant",
+                          "message": {"content": [{"type": "tool_use", "name": "Read"}]}}))
+        self.assertEqual(w.phase, "read")
+        w.consume_line(j({"type": "assistant",
+                          "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}))
+        self.assertEqual(w.phase, "bash")
+        self.assertNotEqual(w.status, sv.Status.DONE)   # not done yet — still working
+        w.consume_line(j({"type": "result", "is_error": False}))
+        self.assertEqual(w.phase, "done")
+
+    def test_embedded_status_marker_inside_assistant_text_honored(self):
+        w = self._worker()
+        line = __import__("json").dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "working now\n@status reviewing"}]},
+        })
+        w.consume_line(line)
+        self.assertEqual(w.phase, "reviewing")
+        self.assertEqual(w.status, sv.Status.WORKING)
+
+    def test_embedded_status_done_inside_text(self):
+        w = self._worker()
+        line = __import__("json").dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "@status done"}]},
+        })
+        w.consume_line(line)
+        self.assertEqual(w.phase, "done")
+        self.assertEqual(w.status, sv.Status.DONE)
+
+    def test_bare_status_marker_still_works(self):
+        # Legacy demo protocol / plain-text fallback (SELF_COMPANY_AGENT_STREAM=0).
+        w = self._worker()
+        w.consume_line("@status planning")
+        self.assertEqual(w.phase, "planning")
+        self.assertEqual(w.status, sv.Status.WORKING)
+
+    def test_malformed_json_degrades_to_log_text_never_crashes(self):
+        w = self._worker()
+        w.consume_line('{"type": "assistant", "message": {')   # truncated/malformed
+        self.assertEqual(w.last, '{"type": "assistant", "message": {')
+        self.assertEqual(w.status, sv.Status.IDLE)          # unchanged, no crash
+
+    def test_status_word_embedded_inside_json_string_not_confused_for_bare_marker(self):
+        # A JSON line whose text payload happens to contain '@status' must be
+        # parsed as JSON (one json.loads), not string-scraped at the top level.
+        w = self._worker()
+        line = __import__("json").dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text",
+                                     "text": 'reporting: saw literal "@status x" in a log'}]},
+        })
+        w.consume_line(line)
+        # The embedded-status regex requires it at a line start (post ^/\n),
+        # not mid-sentence inside quotes — so this should NOT hijack the phase.
+        self.assertNotEqual(w.phase, "x")
+
+    def test_non_dict_json_falls_back_to_log_text(self):
+        w = self._worker()
+        w.consume_line("[1, 2, 3]")
+        self.assertEqual(w.last, "[1, 2, 3]")
+
+    def test_giant_line_does_not_crash(self):
+        w = self._worker()
+        big_text = "x" * 200000
+        line = __import__("json").dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": big_text}]},
+        })
+        w.consume_line(line)   # must not raise
+        self.assertEqual(w.status, sv.Status.WORKING)
+
+    def test_real_worker_stream_json_produces_two_phase_transitions_live(self):
+        # End-to-end: a real spawned (fake) `claude`-shaped process emitting
+        # stream-json produces >= 2 distinct phase transitions before EOF —
+        # the acceptance-(a) headline ("today: zero").
+        script = (
+            "import json,sys,time\n"
+            "print(json.dumps({'type':'assistant','message':{'content':"
+            "[{'type':'tool_use','name':'Read'}]}}));sys.stdout.flush();time.sleep(0.05)\n"
+            "print(json.dumps({'type':'assistant','message':{'content':"
+            "[{'type':'tool_use','name':'Bash'}]}}));sys.stdout.flush();time.sleep(0.05)\n"
+            "print(json.dumps({'type':'result','is_error':False}))\n"
+        )
+        import sys as _sys
+        emp = sv.Member("bob")
+        w = sv.Worker(emp, "t", [_sys.executable, "-c", script])
+        w.start()
+        phases_seen = []
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            ready, _, _ = __import__("select").select([w.fd], [], [], 0.2)
+            if ready:
+                lines, eof = w.read_available()
+                for line in lines:
+                    before = w.phase
+                    w.consume_line(line)
+                    if w.phase != before and w.phase:
+                        phases_seen.append(w.phase)
+                if eof:
+                    w.on_eof()
+                    break
+        self.assertGreaterEqual(len(set(phases_seen)), 2, phases_seen)
+        self.assertEqual(w.status, sv.Status.DONE)
+
 
 if __name__ == "__main__":
     unittest.main()

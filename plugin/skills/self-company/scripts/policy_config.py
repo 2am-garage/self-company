@@ -23,7 +23,9 @@ Pure stdlib (re, pathlib). No third-party deps — matches the company's
 stdlib-only constraint and ships dormant-safe.
 """
 
+import argparse
 import re
+import sys
 from pathlib import Path
 
 # Constants we know how to read, and the type each should be cast to.
@@ -169,3 +171,39 @@ def resolve(defaults, policy_path):
             values[name] = dv
             sources[name] = "default"
     return values, sources
+
+
+# ================================================================ CLI (D8b)
+# Phase 29 fold-in D8b: a plain `--get KEY [--default V]` CLI kills the
+# bash->python heredocs that re-imported `load_policy_constants` inline
+# (daily-run.sh's BACKUP_KEEP + DAILY_RUNS_PER_DAY reads, fleet-run.sh's
+# FLEET_AGENT_BUDGET read) — one seam instead of three near-identical
+# `python3 -c "..." 2>/dev/null || echo N` heredocs. Byte-identical resolved
+# values; the caller's own `[[ "$X" =~ ^[0-9]+$ ]] || X=N` guard stays as the
+# shell-side belt-and-suspenders it always was.
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Resolve ONE tunable constant from a policy.md (D8b CLI seam).")
+    ap.add_argument("--policy", required=True, help="path to org/policy.md")
+    ap.add_argument("--get", required=True, metavar="KEY",
+                    help="constant name, e.g. BACKUP_KEEP, DAILY_RUNS_PER_DAY")
+    ap.add_argument("--default", default=None,
+                    help="printed (and exit 0) when KEY is absent/unparseable; "
+                         "omitting --default means an absent KEY exits 1")
+    a = ap.parse_args(argv)
+
+    try:
+        parsed = load_policy_constants(a.policy)
+    except Exception:
+        parsed = {}
+    if a.get in parsed:
+        print(parsed[a.get])
+        return 0
+    if a.default is not None:
+        print(a.default)
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

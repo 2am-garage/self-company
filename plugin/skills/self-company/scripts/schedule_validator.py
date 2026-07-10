@@ -179,6 +179,27 @@ def validate(raw, parse_error=None):
     return v
 
 
+# ---------------------------------------------------------- Phase 29 Item 1
+def model_warnings(company):
+    """Surface a non-empty `context.md` `model:` value that doesn't resolve
+    through the alias map / a valid `claude-*` id — one WARN string per bad
+    employee, naming the employee and the value. A FINDING, not a violation:
+    unlike `validate()`'s R1-R6 (which REJECT the config and exit 3), these
+    never affect the exit code — the dispatch path (Employee.resolved_model)
+    already degrades safely on its own. Never raises; a company with no
+    employee desks at all (e.g. a bare temp dir in tests) yields []."""
+    warnings = []
+    for name in emp.EMPLOYEES:
+        try:
+            e = emp.Employee.load(name, company)
+            _, warning = e.resolved_model(sc.DEFAULT_AGENT_MODEL)
+        except Exception:
+            continue
+        if warning:
+            warnings.append(f"WARN: {warning}")
+    return warnings
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--company", required=True)
@@ -188,13 +209,20 @@ def main():
 
     raw, err = _load(a.company, a.config)
     violations = validate(raw, err)
+    # Model-table WARN findings never affect the exit code — printed alongside
+    # violations/"ok" but computed and reported independently of them.
+    warns = model_warnings(a.company)
     if violations:
         if not a.quiet:
             for line in violations:
                 print(line)
+            for line in warns:
+                print(line)
         sys.exit(3)
     if not a.quiet:
         print("ok")
+        for line in warns:
+            print(line)
     sys.exit(0)
 
 

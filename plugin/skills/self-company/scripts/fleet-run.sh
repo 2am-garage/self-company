@@ -76,12 +76,9 @@ PARENT_POLICY="$PARENT_COMPANY/org/policy.md"
 if [[ -n "${SELF_COMPANY_FLEET_AGENT_BUDGET:-}" ]]; then
   BUDGET="$SELF_COMPANY_FLEET_AGENT_BUDGET"
 else
-  BUDGET="$(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
-try:
-    from policy_config import load_policy_constants as L
-    print(int(L('$PARENT_POLICY').get('FLEET_AGENT_BUDGET', 3)))
-except Exception:
-    print(3)" 2>/dev/null || echo 3)"
+  # Phase 29 fold-in D8b: shared policy_config.py --get CLI, not an inline heredoc.
+  BUDGET="$(python3 "$SCRIPTS/policy_config.py" --policy "$PARENT_POLICY" \
+    --get FLEET_AGENT_BUDGET --default 3 2>/dev/null || echo 3)"
 fi
 DUP_THRESHOLD="${SELF_COMPANY_FLEET_DUP_THRESHOLD:-5}"
 [[ "$BUDGET" =~ ^[0-9]+$ ]] || BUDGET=3
