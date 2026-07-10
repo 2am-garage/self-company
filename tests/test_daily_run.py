@@ -10,6 +10,7 @@ hermetic and token-free).
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -183,19 +184,22 @@ def _fake_rag_venv(company, script_body):
 def _fake_rag_venv_multi(company, index_json, argfile):
     """Plant a fake .company/.rag-venv/bin/python that handles BOTH RAG-venv
     callers in the deterministic core: it records rag_index.py's argv + emits a
-    canned index JSON, emits a trivial reinforce JSON, and passes EVERYTHING ELSE
-    (e.g. entropy.py's re-exec) through to the real interpreter (SC_RAG_REEXEC is
-    already set on that re-exec, so no loop)."""
+    canned index JSON (Phase 28 Item 2c: wrapped as the batch `{"pairs": [...]}`
+    contract, company pair first — `index_json` is that one pair's report),
+    emits a trivial reinforce JSON, and passes EVERYTHING ELSE (e.g. entropy.py's
+    re-exec) through to the real interpreter (SC_RAG_REEXEC is already set on
+    that re-exec, so no loop)."""
     bindir = os.path.join(company, ".rag-venv", "bin")
     os.makedirs(bindir, exist_ok=True)
     py = os.path.join(bindir, "python")
+    pairs_json = json.dumps({"pairs": [json.loads(index_json)]})
     with open(py, "w") as f:
         f.write(
             "#!/usr/bin/env bash\n"
             'case "${1:-}" in\n'
             "  *rag_index.py)\n"
             f'    printf \'%s \' "$@" > "{argfile}"\n'
-            f"    echo '{index_json}'\n"
+            f"    echo '{pairs_json}'\n"
             "    ;;\n"
             "  *reinforce_memory.py)\n"
             '    echo \'{"applied": true, "threshold": 0.85, "reinforcements": [],'
@@ -241,8 +245,9 @@ class TestDailyRunRagIndex(unittest.TestCase):
             with open(argfile) as f:
                 args = f.read()
             self.assertIn("rag_index.py", args)
-            self.assertIn("--memory-dir", args)
-            self.assertIn("--index-dir", args)
+            # Phase 28 Item 2c: batch mode — the company store is ONE --pair
+            # (no separate --memory-dir/--index-dir flags in this call shape).
+            self.assertIn("--pair", args)
             self.assertNotIn("--rebuild", args)       # incremental (idempotent) — never full rebuild
             self.assertNotIn("--include-l0", args)     # D-A: L1/L2 only, no L0
             # index refresh runs AFTER decay (post-consolidation truth)
@@ -1277,6 +1282,83 @@ class TestItem4CoreStepTimeout(unittest.TestCase):
             subprocess.run(["rm", "-rf", d2])
 
 
+def _instrument_call_counter(d, script_name, counter_path):
+    """Insert a one-line side effect right after script_name's shebang that
+    appends one char to counter_path every time the script is executed as
+    __main__ — proves invocation COUNT without touching the script's real
+    behaviour (the rest of the file, and every line number after the insert,
+    is untouched; decay.py/verify_memory.py have no venv re-exec, so this
+    counts true process invocations 1:1)."""
+    path = os.path.join(d, "scripts", script_name)
+    with open(path) as f:
+        lines = f.readlines()
+    insert_at = 1 if lines and lines[0].startswith("#!") else 0
+    lines.insert(insert_at,
+                 "with open(%r, 'a') as _cc_f: _cc_f.write('x')\n" % counter_path)
+    with open(path, "w") as f:
+        f.writelines(lines)
+
+
+class TestItem1SurveyFedNoDoubleRun(unittest.TestCase):
+    """Phase 28 Item 1 (Tony C1): daily-run.sh feeds elon_survey the core's own
+    $EOUT/$DOUT/$VOUT (--no-recompute) instead of letting the survey re-invoke
+    decay/verify as fresh subprocesses minutes later. Net: each runs exactly
+    ONCE per tick, not twice."""
+
+    def test_decay_and_verify_invoked_exactly_once_per_tick(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            counters = {}
+            for name in ("decay.py", "verify_memory.py"):
+                cp = os.path.join(d, name + ".count")
+                open(cp, "w").close()
+                _instrument_call_counter(d, name, cp)
+                counters[name] = cp
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name, cp in counters.items():
+                with open(cp) as f:
+                    n = len(f.read())
+                self.assertEqual(n, 1, "%s invoked %d time(s), want exactly 1" % (name, n))
+            # The survey still reports real numbers from THIS tick's core output
+            # (not "no output" / an empty fed set) — the fed JSON actually fed it.
+            text = _read_log(company)
+            self.assertIn("- elon survey:", text)
+            self.assertNotIn("- elon survey: no output", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_gated_survey_step_still_never_recomputes(self):
+        # elon.survey gated off for this tick -> the survey block doesn't even
+        # run, so decay/verify (the CORE's own calls) still run exactly once
+        # each — never a fed-mode recompute sneaking in through the gate.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            org = os.path.join(company, "org")
+            os.makedirs(org, exist_ok=True)
+            with open(os.path.join(org, "schedule.yaml"), "w") as f:
+                f.write("elon: { cadence: on-trigger }\n")
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            counters = {}
+            for name in ("decay.py", "verify_memory.py"):
+                cp = os.path.join(d, name + ".count")
+                open(cp, "w").close()
+                _instrument_call_counter(d, name, cp)
+                counters[name] = cp
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name, cp in counters.items():
+                with open(cp) as f:
+                    n = len(f.read())
+                self.assertEqual(n, 1, "%s invoked %d time(s), want exactly 1" % (name, n))
+            self.assertIn("gated off elon.survey", _read_log(company))
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
 class TestItem5Prune(unittest.TestCase):
     """Phase 27 Item 5: age-prune wired into daily-run.sh's end-of-run."""
 
@@ -1400,6 +1482,182 @@ class TestSkeletonGuard(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             r = _bash([self.SH, d], env={"SELF_COMPANY_ALLOW_SKELETON": "1"})
             self.assertEqual(r.returncode, 0)
+
+
+def _counting_python3(d, real_python, counter_path):
+    """Plant a fake `python3` that appends one char to counter_path for every
+    invocation whose argv mentions schedule_config.py, then execs the REAL
+    interpreter (by absolute path, captured BEFORE this fakebin dir is
+    prepended to PATH) so daily-run.sh's actual python calls still work."""
+    bindir = os.path.join(d, "fakepybin")
+    os.makedirs(bindir, exist_ok=True)
+    path = os.path.join(bindir, "python3")
+    with open(path, "w") as f:
+        f.write(
+            '#!/usr/bin/env bash\n'
+            'case "$*" in\n'
+            f'  *schedule_config.py*) printf x >> "{counter_path}" ;;\n'
+            'esac\n'
+            f'exec "{real_python}" "$@"\n'
+        )
+    os.chmod(path, 0o755)
+    return bindir
+
+
+class TestPlanTickSpawnCount(unittest.TestCase):
+    """Phase 28 Item 3: daily-run.sh sources ONE schedule_config.py --plan-tick
+    call (plus the pre-existing, unrelated --roster call) instead of spawning
+    schedule_config.py per gate/knob question."""
+
+    def _run_counted(self, d, company, write_yaml=True):
+        org = os.path.join(company, "org")
+        os.makedirs(org, exist_ok=True)
+        yaml_path = os.path.join(org, "schedule.yaml")
+        if write_yaml:
+            with open(yaml_path, "w") as f:
+                f.write("cadence: every 6h\n")
+        elif os.path.exists(yaml_path):
+            # init_company.sh ships an all-comments schedule.yaml template
+            # (schedule_config.py itself treats that as absent-equivalent, but
+            # the FILE existing is what today's `_should_run` guard — and this
+            # phase's plan-tick guard — actually checks). Remove it so this
+            # case is genuinely no-file, not just no-content.
+            os.remove(yaml_path)
+        _write_mem(company, "obs-a", last_reinforced=_today())
+        counter = os.path.join(d, "sc_calls.txt")
+        open(counter, "w").close()
+        bindir = _counting_python3(d, sys.executable, counter)
+        env = {"PATH": bindir + os.pathsep + os.environ["PATH"]}
+        r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"], env=env)
+        with open(counter) as f:
+            calls = f.read()
+        return r, calls
+
+    def test_tick_with_yaml_spawns_at_most_twice(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            r, calls = self._run_counted(d, company, write_yaml=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # ONE --plan-tick call + the pre-existing, unrelated --roster call
+            # (Item 3 explicitly leaves --roster alone: "renders a file, not a
+            # gate"). Net: ~14 -> 2.
+            self.assertLessEqual(len(calls), 2, calls)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_no_yaml_only_the_roster_spawn_remains(self):
+        # Item 3 acceptance (c): "no schedule.yaml -> zero [gating] spawns" —
+        # the ~13 --should-run/--agent spawns collapse to zero; the ONE
+        # unrelated --roster call (never gated on schedule.yaml, renders
+        # today's defaults either way) is untouched by this item.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            r, calls = self._run_counted(d, company, write_yaml=False)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(len(calls), 1, calls)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+class TestPlanTickFailOpen(unittest.TestCase):
+    """Phase 28 Item 3 acceptance (d): a --plan-tick call that crashes or
+    returns garbage must fail OPEN — every step still runs, byte-identical to
+    today's per-call fail-open — never silently suppress maintenance."""
+
+    def test_garbage_plan_tick_output_fails_open(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            org = os.path.join(company, "org")
+            os.makedirs(org, exist_ok=True)
+            # This yaml would gate decay OFF if the plan were trusted (tony's
+            # duties omit decay).
+            with open(os.path.join(org, "schedule.yaml"), "w") as f:
+                f.write("tony: { duties: [reinforce] }\n")
+            # Replace this fixture's OWN scripts/schedule_config.py copy with a
+            # stub that returns non-JSON garbage for --plan-tick (exit 0 — an
+            # exit-code lie) and fails everything else (--roster degrades
+            # separately/harmlessly, already-tolerated).
+            sc_path = os.path.join(d, "scripts", "schedule_config.py")
+            with open(sc_path, "w") as f:
+                f.write(
+                    "#!/usr/bin/env python3\n"
+                    "import sys\n"
+                    'if "--plan-tick" in sys.argv:\n'
+                    '    print("not { json")\n'
+                    "    sys.exit(0)\n"
+                    "sys.exit(1)\n"
+                )
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertNotIn("gated off tony.decay", text)
+            self.assertIn("- decay --apply:", text)   # decay actually ran
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+class TestRagBatchSpawnCount(unittest.TestCase):
+    """Phase 28 Item 2c: ONE rag_index.py process refreshes the company store
+    AND every rag employee's store, regardless of employee count (was
+    1 + N_rag_employees processes before)."""
+
+    _INDEX_JSON = ('{"embedded": 0, "skipped_unchanged": 0, "deleted_stale": 0,'
+                   ' "table_rows": 0, "l1_l2_count": 0, "warnings": []}')
+
+    def _write_emp_mem(self, company, emp):
+        emp_mem = os.path.join(company, "org", "employees", emp, "memory")
+        os.makedirs(emp_mem, exist_ok=True)
+        with open(os.path.join(emp_mem, "note.md"), "w") as f:
+            f.write(
+                "---\nid: note-%s\ntier: L1\nowner: %s\nsources: [\"[s#1]\"]\n"
+                "created: 2026-06-01\nlast_reinforced: %s\n"
+                "reinforce_count: 1\ndecay_score: 1.0\nstatus: active\n---\nbody\n"
+                % (emp, emp, _today()))
+
+    def test_one_process_for_company_plus_two_rag_employees(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            counter = os.path.join(d, "rag_calls.txt")
+            open(counter, "w").close()
+            bindir = os.path.join(company, ".rag-venv", "bin")
+            os.makedirs(bindir, exist_ok=True)
+            py = os.path.join(bindir, "python")
+            with open(py, "w") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    'case "${1:-}" in\n'
+                    "  *rag_index.py)\n"
+                    f'    printf x >> "{counter}"\n'
+                    f"    echo '{{\"pairs\": [{self._INDEX_JSON}]}}'\n"
+                    "    ;;\n"
+                    "  *reinforce_memory.py)\n"
+                    '    echo \'{"applied": true, "threshold": 0.85, "reinforcements": [],'
+                    ' "skipped_l2": [], "scanned": 0}\'\n'
+                    "    ;;\n"
+                    "  *)\n"
+                    '    exec python3 "$@"\n'
+                    "    ;;\n"
+                    "esac\n")
+            os.chmod(py, 0o755)
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            # tony and mike are rag-mode by default (employee.MEMORY_MODE_DEFAULTS).
+            self._write_emp_mem(company, "tony")
+            self._write_emp_mem(company, "mike")
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(counter) as f:
+                calls = f.read()
+            self.assertEqual(len(calls), 1,
+                             "expected exactly ONE rag_index.py process, got %d" % len(calls))
+            text = _read_log(company)
+            self.assertIn("refreshed 2 rag-employee store(s)", text)
+        finally:
+            subprocess.run(["rm", "-rf", d])
 
 
 if __name__ == "__main__":

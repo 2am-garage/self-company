@@ -266,8 +266,10 @@ Load these on demand — none is needed to ACT until you're doing the specific t
 **Scripts** (stdlib only; canonical in `scripts/`, run in place — never copied into `.company/`)
 - `decay.py` / `entropy.py` — the decay disposal pass and the entropy KPI pass (`--memory-dir .company/memory`, JSON; decay `--apply` mutates).
 - `frontmatter.py` / `tombstone.py` / `charter_ids.py` / `policy_config.py` — shared single-source libraries hard-imported across the scanners/hooks (frontmatter delimiter contract: `line.strip() == '---'`, opening fence on line 0).
-- `rag_index.py` / `rag_query.py` / `rag_embed.py` / `rag_rerank.py` — the RAG index build / semantic query (hybrid + cross-encoder rerank) / local-embed / reranker layer (see rag.md).
-- `daily-run.sh` / `schedule.sh` — the maintenance + cron-scheduling runtime; `fleet.py` / `fleet-run.sh` — the **optional** holding-company layer.
+- `corpus.py` — the shared memory-corpus walk + parse + id/tombstone-gate + body-extraction primitive (Phase 28) six loaders (decay/entropy/verify/reinforce/rag_index/elon_survey) now share instead of independently re-implementing.
+- `schedule_config.py` — the schedule/duty reader; `--plan-tick --hour H --dow D` (Phase 28) is the one-JSON seam `daily-run.sh` sources instead of ~13 separate `--should-run`/`--agent` spawns.
+- `rag_index.py` / `rag_query.py` / `rag_embed.py` / `rag_rerank.py` — the RAG index build / semantic query (hybrid + cross-encoder rerank) / local-embed / reranker layer (see rag.md). `rag_index.py --pair MEM_DIR INDEX_DIR` (repeatable, Phase 28) refreshes multiple stores in one process.
+- `daily-run.sh` / `schedule.sh` — the maintenance + cron-scheduling runtime; `fleet.py` / `fleet-run.sh` — the **optional** holding-company layer; `agent_spawn.sh` — the shared bash lib (Phase 28) for CLAUDE_BIN resolution, the kill-after timeout probe, the auth pre-flight probe, and the scripts-dir precedence, sourced by all six.
 
 - **Company folder** (`./.company/`, git-ignored) — `org/` (policy, triggers, personas/context) · `memory/` (L0/L1/L2) · `ops/` (logs/plans/schedule) · `reports/`.
 

@@ -25,6 +25,12 @@ set -uo pipefail
 
 PROJECT_DIR="${SELF_COMPANY_PROJECT_DIR:-$PWD}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Phase 28 Item 4b (D1): the claude-spawn scaffolding (CLAUDE_BIN resolution,
+# the kill-after timeout probe, the CAPTURE_ACTIVE + `claude -p` wrapper) is
+# the ONE shared lib (agent_spawn.sh, same dir) — see its header for why every
+# caller keeps this exact bootstrap instead of the lib resolving its own dir.
+# shellcheck source=agent_spawn.sh
+source "$SCRIPT_DIR/agent_spawn.sh"
 
 TASK=""; DEMO=false; COMPANY=""
 for a in "$@"; do
@@ -44,13 +50,9 @@ if [[ -z "$COMPANY" ]]; then
   elif [[ "$(basename "$(dirname "$SCRIPT_DIR")")" == ".company" ]]; then COMPANY="$(dirname "$SCRIPT_DIR")"
   else COMPANY="$PROJECT_DIR/.company"; fi
 fi
-# Run the CANONICAL scripts: plugin root -> own dir -> legacy .company/scripts fallback.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
-  SCRIPTS_RT="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
-else
-  SCRIPTS_RT="$SCRIPT_DIR"
-fi
-[[ -f "$SCRIPTS_RT/supervisor.py" ]] || SCRIPTS_RT="$COMPANY/scripts"   # legacy fallback (B1)
+# Run the CANONICAL scripts: plugin root -> own dir -> legacy .company/scripts
+# fallback (Phase 28 Item 4b D6: the shared precedence in agent_spawn.sh).
+SCRIPTS_RT="$(sc_resolve_scripts_dir "$SCRIPT_DIR" "$COMPANY" "supervisor.py")"
 
 if [[ -z "$TASK" ]]; then
   echo "usage: company-run.sh \"<task>\" [--demo] [--company DIR]" >&2
@@ -64,8 +66,7 @@ TS="$(date +%FT%T)"
 # --- 1. PLAN (Phoebe) ------------------------------------------------------
 plan_json=""
 if ! $DEMO; then
-  CLAUDE_BIN="$(command -v claude || true)"
-  [[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
+  CLAUDE_BIN="$(sc_resolve_claude_bin)"
   if [[ -n "$CLAUDE_BIN" ]]; then
     roster="$(python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --list 2>/dev/null)"
     read -r -d '' PPROMPT <<EOF || true
@@ -78,10 +79,9 @@ EOF
     # that ignores SIGTERM is SIGKILLed <grace>s past budget, no orphan. `-k` is
     # GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
     KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
-    _tmo=(timeout)
-    timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
-    raw="$(SELF_COMPANY_CAPTURE_ACTIVE=1 "${_tmo[@]}" 180 "$CLAUDE_BIN" -p "$PPROMPT" \
-           --model "${SELF_COMPANY_PLAN_MODEL:-claude-sonnet-4-6}" 2>/dev/null || true)"
+    sc_spawn_capture "$KILL_AFTER" 180 "$CLAUDE_BIN" "$PPROMPT" \
+      "${SELF_COMPANY_PLAN_MODEL:-claude-sonnet-4-6}"
+    raw="$("${SC_SPAWN_CMD[@]}" 2>/dev/null || true)"
     plan_json="$(printf '%s' "$raw" | python3 -c "import sys,re,json
 t=sys.stdin.read()
 m=re.findall(r'\{[^{}]*\}', t, re.S)

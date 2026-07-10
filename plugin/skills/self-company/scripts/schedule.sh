@@ -117,21 +117,27 @@ CRON_EXPR="$CRON_MIN */6 * * *"          # 4× a day, every 6h, staggered minute
 # Weekly external research scan (Mike) — Sunday, off-peak, staggered minute.
 RESEARCH_EXPR="${SELF_COMPANY_RESEARCH_CRON:-$DEFAULT_RESEARCH_MIN 3 * * 0}"
 
-CLAUDE_BIN="$(command -v claude || echo "$HOME/.local/bin/claude")"
+# Phase 28 Item 4b (D1/D6): CLAUDE_BIN resolution + scripts-dir precedence are
+# the ONE shared lib (agent_spawn.sh, same dir) — see its header for why every
+# caller keeps this exact bootstrap instead of the lib resolving its own dir.
+# schedule.sh keeps its OWN explicit fallback ON TOP of the shared resolver
+# (below) so its *output* is unchanged: this CLAUDE_BIN is only ever used to
+# compute CLAUDE_DIR for the cron PATH prefix, never to invoke claude directly,
+# so (unlike the other 5 call sites) it does not need the shared resolver's
+# `-x` executability check — falling back to a guessed path even if it isn't
+# executable is harmless here and was schedule.sh's pre-Phase-28 behavior.
+_SC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=agent_spawn.sh
+source "$_SC_LIB_DIR/agent_spawn.sh"
+CLAUDE_BIN="$(sc_resolve_claude_bin)"
+[[ -z "$CLAUDE_BIN" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
 CLAUDE_DIR="$(dirname "$CLAUDE_BIN")"
 LOGFILE="$PROJECT_DIR/.company/ops/logs/cron.log"
 
 # Resolve the CANONICAL scripts dir (code/data separation). Precedence: plugin root
 # -> own dir -> legacy .company/scripts. A1: cron carries an ABSOLUTE snapshot of the
 # script path, so a skill/plugin update requires re-running `schedule.sh install`.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
-  SCRIPTS_DIR="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
-else
-  SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-if [[ ! -f "$SCRIPTS_DIR/daily-run.sh" && -f "$PROJECT_DIR/.company/scripts/daily-run.sh" ]]; then
-  SCRIPTS_DIR="$PROJECT_DIR/.company/scripts"
-fi
+SCRIPTS_DIR="$(sc_resolve_scripts_dir "$_SC_LIB_DIR" "$PROJECT_DIR/.company")"
 
 # --- Phase 12: per-company tick/research from org/schedule.yaml ---------------
 # A company may declare its own tick + research cadence as DATA. Consult the

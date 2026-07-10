@@ -19,6 +19,15 @@
 ###############################################################################
 set -uo pipefail
 
+# Phase 28 Item 4b (D1): the claude-spawn scaffolding (CLAUDE_BIN resolution,
+# the kill-after timeout probe, the CAPTURE_ACTIVE + `claude -p` wrapper) is
+# the ONE shared lib (agent_spawn.sh, same dir) — see its header for why every
+# caller keeps this exact 3-line bootstrap instead of the lib resolving its
+# own directory.
+_SC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=agent_spawn.sh
+source "$_SC_LIB_DIR/agent_spawn.sh"
+
 PROJECT_DIR="${SELF_COMPANY_PROJECT_DIR:-${1:-$PWD}}"
 COMPANY="$PROJECT_DIR/.company"
 if [[ ! -d "$COMPANY" ]]; then
@@ -30,8 +39,7 @@ mkdir -p "$LOGDIR" "$PLANS" "$RESEARCH"
 LOG="$LOGDIR/research-$DATE.log"
 CRONLOG_LINE="$COMPANY/ops/logs/daily-$DATE.md"
 
-CLAUDE_BIN="$(command -v claude || true)"
-[[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
+CLAUDE_BIN="$(sc_resolve_claude_bin)"
 if [[ -z "$CLAUDE_BIN" ]]; then
   echo "[research-scan] claude CLI not found — skipped"; exit 0
 fi
@@ -87,11 +95,9 @@ printf '\n===== research-scan %s =====\n' "$TS" >> "$LOG"
 # <grace>s after budget so no orphan survives into the next scheduled scan.
 # `-k` is GNU coreutils; degrade to a plain SIGTERM timeout where unsupported.
 KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
-_tmo=(timeout)
-timeout -k 1 1 true 2>/dev/null && _tmo=(timeout -k "$KILL_AFTER")
-SELF_COMPANY_CAPTURE_ACTIVE=1 "${_tmo[@]}" "${SELF_COMPANY_RESEARCH_TIMEOUT:-900}" \
-  "$CLAUDE_BIN" -p "$PROMPT" --model "${SELF_COMPANY_RESEARCH_MODEL:-claude-sonnet-4-6}" \
-  >>"$LOG" 2>&1
+sc_spawn_capture "$KILL_AFTER" "${SELF_COMPANY_RESEARCH_TIMEOUT:-900}" "$CLAUDE_BIN" \
+  "$PROMPT" "${SELF_COMPANY_RESEARCH_MODEL:-claude-sonnet-4-6}"
+"${SC_SPAWN_CMD[@]}" >>"$LOG" 2>&1
 rc=$?
 if (( rc == 0 )); then
   echo "- research-scan: ok — brief in ops/research/research-$DATE.md, proposals in ops/plans/proposals-$DATE.md" >> "$CRONLOG_LINE" 2>/dev/null || true

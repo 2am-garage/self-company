@@ -40,18 +40,20 @@ done
 [[ "${SELF_COMPANY_CRON:-}" == "1" ]] && IS_CRON=1
 
 COMPANY="$PROJECT_DIR/.company"
+# Phase 28 Item 4b (D6): scripts-dir precedence is the ONE shared lib
+# (agent_spawn.sh, same dir) — see its header for why every caller keeps this
+# exact bootstrap instead of the lib resolving its own dir. daily-run.sh
+# adopts ONLY bin-resolution/auth/scripts-dir from this lib (below); its own
+# setsid+watchdog+lock-fd headless-agent spawn topology is P25-hardened and
+# does NOT move here (Elon's explicit instruction).
+_SC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=agent_spawn.sh
+source "$_SC_LIB_DIR/agent_spawn.sh"
 # Resolve the scripts dir (code/data separation): run the CANONICAL scripts, not a
 # .company/scripts copy. Precedence: plugin root -> own dir -> legacy .company/scripts.
 # The legacy fallback (B1 safety net) only kicks in if a needed sibling isn't beside
 # us but an old .company/scripts copy still has it — so existing installs never break.
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts" ]]; then
-  SCRIPTS="${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts"
-else
-  SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-if [[ ! -f "$SCRIPTS/decay.py" && -f "$COMPANY/scripts/decay.py" ]]; then
-  SCRIPTS="$COMPANY/scripts"
-fi
+SCRIPTS="$(sc_resolve_scripts_dir "$_SC_LIB_DIR" "$COMPANY" "decay.py")"
 POLICY="$COMPANY/org/policy.md"
 MEM="$COMPANY/memory"
 LOGDIR="$COMPANY/ops/logs"
@@ -149,25 +151,80 @@ if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'pass' >/dev/null 2>&1; 
   printf -- '- **python3 UNAVAILABLE** — deterministic core could not run (see stderr); this is NOT a healthy run\n' >> "$LOG"
 fi
 
+# --- Phase 28 Item 3: ONE schedule_config.py --plan-tick call ----------------
+# Replaces daily-run.sh's ~13 separate schedule_config.py spawns (10 gate
+# --should-run calls + 3 --agent knob reads) with ONE process that returns every
+# gate decision + agent knob from a single effective()/should_run() load (the
+# SAME table should_run() itself consults — no second list to drift). Same
+# fail-open contract as before, just decided once: absent schedule.yaml, no
+# python3, no script, or ANY error (crash, non-JSON stdout, wrong schema, exit-
+# code lies) => every step runs + agent knobs stay unset here (each knob's own
+# call site below falls back to its pre-existing default) — byte-identical to
+# today's per-call fail-open.
+_PLAN_backup=1; _PLAN_reinforce=1; _PLAN_decay=1; _PLAN_verify=1; _PLAN_entropy=1
+_PLAN_rag_index=1; _PLAN_survey=1; _PLAN_july_audit=1; _PLAN_report=1; _PLAN_agent=1
+_PLAN_agent_model=""; _PLAN_agent_timeout=""; _PLAN_agent_daily_cap=""
+if [[ -f "$COMPANY/org/schedule.yaml" && -f "$SCRIPTS/schedule_config.py" ]] \
+    && command -v python3 >/dev/null 2>&1; then
+  _PLAN_JSON="$(python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" \
+      --plan-tick --hour "$(date +%H)" --dow "$(date +%w)" 2>/dev/null)"
+  if [[ -n "$_PLAN_JSON" ]]; then
+    # Parse the ONE JSON blob into bash var-assignment lines and eval them.
+    # Values are shlex-quoted by the parser, so an attacker-controlled
+    # schedule.yaml agent.model/timeout/daily_cap can never inject shell code
+    # here. Any parse failure (bad JSON, wrong schema, missing dict keys)
+    # prints nothing -> _plan_vars stays empty -> the fail-open defaults above
+    # are untouched.
+    #
+    # `_PLAN_JSON` is passed as an ARGV string, not piped via stdin: `python3 -
+    # <<'PY'` already uses stdin to deliver the SCRIPT ITSELF (the heredoc), so
+    # a stdin pipe would never reach `sys.stdin` inside it — the same pattern
+    # every OTHER `python3 - ARGS <<'PY'` call in this file uses (they pass a
+    # PATH in argv and open() it themselves; this one is small enough to pass
+    # the JSON text directly).
+    _plan_vars="$(python3 - "$_PLAN_JSON" <<'PY' 2>/dev/null
+import json, shlex, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict) or d.get("schema") != 1:
+    sys.exit(1)
+steps = d.get("steps") if isinstance(d.get("steps"), dict) else {}
+agent = d.get("agent") if isinstance(d.get("agent"), dict) else {}
+for k in ("backup", "reinforce", "decay", "verify", "entropy", "rag_index",
+          "survey", "july_audit", "report", "agent"):
+    print(f"_PLAN_{k}={1 if steps.get(k, True) else 0}")
+print("_PLAN_agent_model=" + shlex.quote(str(agent.get("model", ""))))
+print("_PLAN_agent_timeout=" + shlex.quote(str(agent.get("timeout", ""))))
+print("_PLAN_agent_daily_cap=" + shlex.quote(str(agent.get("daily_cap", ""))))
+PY
+)"
+    [[ -n "$_plan_vars" ]] && eval "$_plan_vars"
+  fi
+fi
+
 # --- Phase 12: per-employee duty gating (fail-OPEN) --------------------------
-# Each optional step asks schedule_config.py whether its owning employee's
-# sub-cadence matches THIS tick. FAIL-OPEN by contract: absent schedule.yaml, no
-# python3, or ANY error => run the step (return 0), so defaults are reproduced
-# byte-for-byte and maintenance is never silently suppressed. ONLY the explicit
-# skip signal (exit 1) skips. When there is no schedule.yaml we don't even shell
-# out — today's behaviour is untouched.
+# _should_run is now a pure-bash lookup into the plan sourced above (Phase 28
+# Item 3) — zero per-step subprocess. A step name outside the plan's schema
+# (should never happen; STEP_OWNER IS the schema) fail-opens to run, matching
+# should_run()'s own owner=None -> True fallback.
 _should_run() {  # $1 = step name; return 0 = run, 1 = skip
-  local step="$1" rc
-  [[ -f "$COMPANY/org/schedule.yaml" ]] || return 0   # no config => defaults sacred
-  [[ -f "$SCRIPTS/schedule_config.py" ]] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" \
-      --should-run "$step" --hour "$(date +%H)" --dow "$(date +%w)" >/dev/null 2>&1
-  rc=$?
-  case "$rc" in
-    1) return 1 ;;   # config gated this step off for this tick
-    *) return 0 ;;   # 0 = run; any other code = error => fail-open (run)
+  local step="$1" v
+  case "$step" in
+    backup)      v=$_PLAN_backup ;;
+    reinforce)   v=$_PLAN_reinforce ;;
+    decay)       v=$_PLAN_decay ;;
+    verify)      v=$_PLAN_verify ;;
+    entropy)     v=$_PLAN_entropy ;;
+    rag_index)   v=$_PLAN_rag_index ;;
+    survey)      v=$_PLAN_survey ;;
+    july_audit)  v=$_PLAN_july_audit ;;
+    report)      v=$_PLAN_report ;;
+    agent)       v=$_PLAN_agent ;;
+    *)           v=1 ;;
   esac
+  [[ "$v" == "1" ]]
 }
 
 # Resolve the per-step gating decisions for the deterministic core up front so the
@@ -676,7 +733,8 @@ with open(log, "a") as f:
     f.write("\n".join(lines) + "\n")
 PY
 
-# --- Phase 13 Item A.1/A.2: incremental RAG index refresh + activation surface ---
+# --- Phase 13 Item A.1/A.2 + Phase 28 Item 2c: ONE process refreshes EVERY ---
+# index store (company + every rag-mode employee) -----------------------------
 # Placed AFTER reinforce+decay+verify+entropy so the LanceDB index reflects
 # post-consolidation truth (absorbed L0s gone, decay's tier promotions applied).
 # INCREMENTAL by default (no --rebuild): unchanged bodies are skipped via
@@ -688,8 +746,21 @@ PY
 # counts active L1+L2 and, when that crosses RAG_ENABLE_THRESHOLD while the venv
 # is NOT installed, surfaces an "activate RAG" upgrade candidate (replaces the
 # aspirational weekly-Tony prose in references/rag.md §4).
+#
+# Phase 28 Item 2c: rag_index.py's repeatable `--pair MEM_DIR INDEX_DIR` lets
+# ONE process refresh the company store AND every rag-mode employee's own
+# store — one fastembed model load (zero if every store is unchanged) instead
+# of one process per store (1 + N_rag_employees before). Company pair FIRST
+# (the "- rag-index:" line below always reads pairs[0] unambiguously), then
+# each employee — Phase 18/18b: RAG-mode employees only (Employee.
+# rag_memory_enabled, context.md-driven — FLAT employees get no index at all,
+# and this is config, not a hardcoded name list).
 RAGIDX_STATE="missing"   # missing | gated | novenv | ran | timeout
 RAG_OVER=1               # 1 = under threshold (default); 0 = at/over (deps-free check)
+EMP_ROOT="$COMPANY/org/employees"
+_emp_root_present=0
+_emp_refreshed=0
+_emp_skipped_flat=0
 if (( ! _run_rag_index )); then
   RAGIDX_STATE="gated"
 elif [[ -f "$SCRIPTS/rag_index.py" ]]; then
@@ -700,11 +771,61 @@ elif [[ -f "$SCRIPTS/rag_index.py" ]]; then
       --memory-dir "$MEM" >/dev/null 2>>"$SERR"
     RAG_OVER=$?
   fi
-  # A.1 — incremental index refresh (needs the RAG venv). Item 4: timeout-wrapped.
+  # A.1 — incremental index refresh (needs the RAG venv). Item 4: timeout-wrapped
+  # (now wrapping the WHOLE batch, company + every employee pair, in one bound).
+  #
+  # Phase 28 Item 2c — shared-budget resilience (Gibby SHOULD-CHECK 3): the
+  # batch runs the pairs SEQUENTIALLY in one process under ONE `timeout -k
+  # GRACE $CORE_STEP_TIMEOUT` (900s default). Three properties keep that safe:
+  #   1. COMPANY pair is ALWAYS first, so the shared index (the one this log
+  #      line reports and the interactive hook reads) refreshes to completion
+  #      BEFORE any employee pair is attempted — a slow/broken employee can
+  #      never starve or delay it.
+  #   2. Per-pair EXCEPTION isolation (rag_index.py's batch loop): a pair that
+  #      raises is recorded as its own error; the rest still run.
+  #   3. Each pair's LanceDB upsert commits synchronously before the next pair
+  #      starts, so a mid-batch SIGKILL (whole-batch timeout) only loses the
+  #      currently-running + not-yet-started pairs — every completed pair is
+  #      persisted, and incremental content-hash skip makes the retry next tick
+  #      near-free. This is STRICTLY better-bounded than base, where the
+  #      per-employee refreshes had NO timeout at all (a hung one could hang
+  #      the whole daily-run forever). 900s comfortably covers a cold model
+  #      load + N incremental refreshes; only a full stamp-mismatch rebuild is
+  #      heavy, and that is a one-tick self-heal.
   if [[ -x "$RAG_PY" ]]; then
+    PAIR_ARGS=(--pair "$MEM" "$MEM/index")
+    if [[ -d "$EMP_ROOT" ]]; then
+      _emp_root_present=1
+      # Resolve the RAG-mode employees ONCE (context.md-driven, via employee.py).
+      # Space-padded so a `*" $name "*` membership test can't partial-match. On
+      # any error the set is empty -> no per-employee index this tick (fail-
+      # safe: lighter, never breaks the core; capture still writes, recall
+      # degrades to []).
+      _RAG_EMPS=" $(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
+try:
+    from employee import Employee
+    print(' '.join(n for n in Employee.roster()
+                    if Employee.load(n, '$COMPANY').rag_memory_enabled))
+except Exception:
+    pass" 2>>"$SERR") "
+      for _emp_mem in "$EMP_ROOT"/*/memory; do
+        [[ -d "$_emp_mem" ]] || continue
+        _emp_name="$(basename "$(dirname "$_emp_mem")")"
+        # Phase 18b: skip FLAT employees — no per-employee RAG index for them.
+        if [[ "$_RAG_EMPS" != *" $_emp_name "* ]]; then
+          _emp_skipped_flat=$((_emp_skipped_flat + 1))
+          continue
+        fi
+        # Only employees that actually have at least one memory file (skip the
+        # index/ subdir itself). No memories -> nothing to embed, no churn.
+        compgen -G "$_emp_mem/*.md" >/dev/null 2>&1 || continue
+        PAIR_ARGS+=(--pair "$_emp_mem" "$_emp_mem/index")
+        _emp_refreshed=$((_emp_refreshed + 1))
+      done
+    fi
     _run timeout -k "$CORE_STEP_KILL_GRACE" "$CORE_STEP_TIMEOUT" \
       env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
-      --memory-dir "$MEM" --index-dir "$MEM/index" >"$IOUT" 2>>"$SERR"
+      "${PAIR_ARGS[@]}" >"$IOUT" 2>>"$SERR"
     _ragidx_rc=$?
     if (( _ragidx_rc == 124 || _ragidx_rc == 137 )); then
       RAGIDX_STATE="timeout"
@@ -729,9 +850,15 @@ case "$RAGIDX_STATE" in
     python3 - "$IOUT" >> "$LOG" <<'PY' || echo "- rag-index: ran (log-parse error) — core unaffected" >> "$LOG"
 import sys, json
 try:
-    r = json.load(open(sys.argv[1]))
+    d = json.load(open(sys.argv[1]))
 except Exception:
+    d = None
+pairs = d.get("pairs") if isinstance(d, dict) else None
+if not pairs or not isinstance(pairs, list):
     print("- rag-index: no output (errored) — core unaffected"); sys.exit(0)
+r = pairs[0] if isinstance(pairs[0], dict) else {}
+if r.get("error"):
+    print(f"- rag-index: no-op — {r['error']}"); sys.exit(0)
 # A backend-absent/degraded report (e.g. LanceDB missing) carries only warnings.
 if r.get("warnings") and not r.get("table_rows") and not r.get("embedded"):
     print(f"- rag-index: no-op — {r['warnings'][0]}"); sys.exit(0)
@@ -746,6 +873,12 @@ print("- rag-index: embedded {e} | skipped {s} | deleted-stale {d} | rows {t} "
 for w in (r.get("warnings") or []):
     if "stamp mismatch" in w:
         print(f"- rag-index: {w}")
+# Phase 28 Item 2c: per-employee pairs' own errors (a single isolated failure
+# in the batch) surface too — same visibility today's per-employee `|| true`
+# gave up (silence), now with the actual error instead.
+for p in pairs[1:]:
+    if isinstance(p, dict) and p.get("error"):
+        print(f"- emp-memory-index: {p.get('memory_dir', '?')}: {p['error']}")
 PY
     ;;
 esac
@@ -757,60 +890,20 @@ if (( _run_rag_index )) && (( RAG_OVER == 0 )) && [[ ! -x "$RAG_PY" ]]; then
   echo "- rag-index: RAG activation candidate — active L1+L2 >= RAG_ENABLE_THRESHOLD but the RAG stack is not installed; run 'bash .company/scripts/rag_setup.sh install' to enable semantic memory search (Tony -> Elon)" >> "$LOG"
 fi
 
-# --- Phase 18/18b: per-employee memory index refresh (RAG employees only) -----
-# Each RAG-mode employee grows their OWN "experience recall" store (org/employees/
-# <name>/memory/*.md, captured via Employee.remember). Refresh each one's OWN
-# LanceDB index by pointing the SAME reused rag_index.py per-employee — the index
-# is physically the employee's own (Chairman's isolation choice), never a shared
-# owner-filtered one. INCREMENTAL: content_hash skips unchanged files, so an
-# untouched store is ~free (a re-embed only on real change). Gated under Tony's
-# existing `rag_index` step (this is the same index-infra duty — NO new Layer-B
-# step owner, so the topology/validator is untouched). Venv absent -> one-line
-# skip. `|| true` on every refresh so a bad store can NEVER abort the already-
-# completed core. FLAT: capture->index->recall only; no per-employee
-# decay/verify/entropy.
-#
-# Phase 18b — only RAG-mode employees (Employee.rag_memory_enabled) get an index.
-# FLAT employees (bob/gibby/tom by default; config-overridable via each desk's
-# context.md `memory:` field) are SKIPPED entirely: no index, fewer refreshes,
-# lighter. The rag/flat split is read from employee.py (context.md-driven), so it
-# is config, not a name hardcoded here.
-EMP_ROOT="$COMPANY/org/employees"
+# --- Phase 18/18b: per-employee memory index refresh summary (RAG employees) --
+# Each RAG-mode employee grows their OWN "experience recall" store (org/
+# employees/<name>/memory/*.md, captured via Employee.remember). Phase 28 Item
+# 2c: the actual refresh happened ABOVE, batched into the SAME process as the
+# company index — this block only renders the summary line from the counts
+# collected during that one pass. FLAT: capture->index->recall only; no
+# per-employee decay/verify/entropy.
 if (( ! _run_rag_index )); then
   :   # gated off above; the rag-index skip line already explains it
 elif [[ ! -f "$SCRIPTS/rag_index.py" ]]; then
   :   # missing script already reported by the company block
 elif [[ ! -x "$RAG_PY" ]]; then
   echo "- emp-memory-index: skipped — RAG venv absent (.company/.rag-venv) — per-employee recall deferred; capture (remember) still writes, core unaffected" >> "$LOG"
-elif [[ -d "$EMP_ROOT" ]]; then
-  # Resolve the RAG-mode employees ONCE (context.md-driven, via employee.py).
-  # Space-padded so a `*" $name "*` membership test can't partial-match. On any
-  # error the set is empty -> no per-employee index this tick (fail-safe: lighter,
-  # never breaks the core; capture still writes, recall degrades to []).
-  _RAG_EMPS=" $(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
-try:
-    from employee import Employee
-    print(' '.join(n for n in Employee.roster()
-                    if Employee.load(n, '$COMPANY').rag_memory_enabled))
-except Exception:
-    pass" 2>>"$SERR") "
-  _emp_refreshed=0
-  _emp_skipped_flat=0
-  for _emp_mem in "$EMP_ROOT"/*/memory; do
-    [[ -d "$_emp_mem" ]] || continue
-    _emp_name="$(basename "$(dirname "$_emp_mem")")"
-    # Phase 18b: skip FLAT employees — no per-employee RAG index for them.
-    if [[ "$_RAG_EMPS" != *" $_emp_name "* ]]; then
-      _emp_skipped_flat=$((_emp_skipped_flat + 1))
-      continue
-    fi
-    # Only employees that actually have at least one memory file (skip the index/
-    # subdir itself). No memories -> nothing to embed, no churn.
-    compgen -G "$_emp_mem/*.md" >/dev/null 2>&1 || continue
-    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
-      --memory-dir "$_emp_mem" --index-dir "$_emp_mem/index" >/dev/null 2>>"$SERR" || true
-    _emp_refreshed=$((_emp_refreshed + 1))
-  done
+elif (( _emp_root_present )); then
   _flat_note=""
   (( _emp_skipped_flat > 0 )) && _flat_note=" ($_emp_skipped_flat flat employee(s) skipped — no index)"
   if (( _emp_refreshed > 0 )); then
@@ -826,16 +919,26 @@ fi
 # do NOT spend disk writing a new plan file either — the abort itself is what
 # needs surfacing, not a fresh todo. (The ledger below still runs: it is how
 # the abort becomes visible in report.py's ledger.)
-# Phase 27 MUST-FIX 3: capture the survey JSON to a temp file so we can BOTH
-# render the human line AND, if any core re-invocation timed out, set a JSONL
-# `survey` step outcome (never silently absorb a hung decay/verify/entropy).
+# Phase 27 MUST-FIX 3 / Phase 28 Item 1: capture the survey JSON to a temp
+# file so we can BOTH render the human line AND set a JSONL `survey` step
+# outcome (never silently absorb a hung/timed-out core step). Phase 28 Item 1
+# (Tony C1): feed the survey THIS tick's own $EOUT/$DOUT/$VOUT — the core's
+# temp files, still on disk (the EXIT trap at the top of this script hasn't
+# fired yet) — instead of letting it re-invoke entropy/decay/verify as fresh
+# subprocesses minutes later. `--no-recompute` makes that a hard contract:
+# entropy/decay/verify are invoked ZERO times by the survey. A step that was
+# gated off / timed out this tick left its $EOUT/$DOUT/$VOUT empty, which
+# elon_survey's fed-mode loader treats as `None` — degrades exactly like a
+# timed-out standalone recompute did, without ever spawning anything.
 SURVEY_STATE="skipped"   # skipped | ran | timeout — drives the JSONL survey step
 if (( CORE_ABORT )) && [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   echo "- elon survey: skipped — CORE ABORTED (no new plan file written to a low-disk filesystem)" >> "$LOG"
 elif [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   if _should_run survey; then
     SVOUT="$(mktemp)"
-    _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" >"$SVOUT" 2>>"$SERR" || true
+    _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" \
+        --entropy-json "$EOUT" --decay-json "$DOUT" --verify-json "$VOUT" \
+        --no-recompute >"$SVOUT" 2>>"$SERR" || true
     python3 - "$SVOUT" "$DATE" >> "$LOG" <<'PY' || echo "- elon survey: no output" >> "$LOG"
 import sys, json
 try:
@@ -964,35 +1067,17 @@ _write_fail_marker() {                      # $1=count  $2=reason(auth|agent)
     printf 'reason=%s\n' "$2"
   } > "$FAIL_MARKER"
 }
-# Resolve the claude CLI up front (C2): _auth_logged_in() below references
-# $CLAUDE_BIN, so it must be assigned before the function is *called*. Defining it
-# here (not inside the RUN_AGENT block) keeps the function robust under
-# `set -u` regardless of call order. May be empty if the CLI isn't installed;
-# the RUN_AGENT block guards on `-n "$CLAUDE_BIN"` before using it.
-CLAUDE_BIN="$(command -v claude || true)"
-[[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
-
-# Auth pre-flight probe. `claude auth status --json` is a LOCAL credential check
-# (no model call, ~0.2s, zero tokens) that prints {"loggedIn": true|false,...}.
-# We treat ONLY a positive not-logged-in signal as auth-fail; an inconclusive
-# probe (old CLI lacking the subcommand, unexpected output) returns "unknown" and
-# falls through to attempting the agent, so we never suppress a working agent on a
-# false negative. SELF_COMPANY_FORCE_AUTH_FAIL=1 forces the not-logged-in branch
-# for tests; SELF_COMPANY_SKIP_AUTH_PROBE=1 disables the probe entirely.
-_auth_logged_in() {                         # echo: yes | no | unknown
-  [[ "${SELF_COMPANY_FORCE_AUTH_FAIL:-}" == "1" ]] && { echo no; return; }
-  [[ "${SELF_COMPANY_SKIP_AUTH_PROBE:-}" == "1" ]] && { echo unknown; return; }
-  local out
-  out="$(timeout "${SELF_COMPANY_AUTH_PROBE_TIMEOUT:-20}" \
-         "$CLAUDE_BIN" auth status --json 2>/dev/null)" || true
-  if printf '%s' "$out" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-    echo yes
-  elif printf '%s' "$out" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*false'; then
-    echo no
-  else
-    echo unknown
-  fi
-}
+# Resolve the claude CLI up front (C2): sc_auth_logged_in() (agent_spawn.sh,
+# sourced above) references $CLAUDE_BIN, so it must be assigned before it is
+# *called*. Defining it here (not inside the RUN_AGENT block) keeps the
+# function robust under `set -u` regardless of call order. May be empty if
+# the CLI isn't installed; the RUN_AGENT block guards on `-n "$CLAUDE_BIN"`
+# before using it.
+# Phase 28 Item 4b (D1/D2): CLAUDE_BIN resolution + the auth pre-flight probe
+# are the ONE shared lib (agent_spawn.sh) — see its header for the env
+# contracts (SELF_COMPANY_FORCE_AUTH_FAIL / SKIP_AUTH_PROBE /
+# AUTH_PROBE_TIMEOUT) preserved exactly.
+CLAUDE_BIN="$(sc_resolve_claude_bin)"
 
 # Phase 25 Item 1: the agent step ALSO mutates memory (via Edit/tombstone), so
 # it is part of "the mutating core" for safety-floor purposes even though it
@@ -1034,14 +1119,16 @@ try:
     print(int(L('$POLICY').get('DAILY_RUNS_PER_DAY', 4)))
 except Exception:
     print(4)" 2>/dev/null || echo 4)"
-  if [[ -f "$COMPANY/org/schedule.yaml" && -f "$SCRIPTS/schedule_config.py" ]]; then
-    _cfg_cap="$(python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --agent daily_cap 2>/dev/null)"
-    [[ "$_cfg_cap" =~ ^[0-9]+$ ]] && CAP="$_cfg_cap"
-  fi
+  # Phase 28 Item 3: read from the plan sourced once above instead of a fresh
+  # schedule_config.py --agent daily_cap spawn. _PLAN_agent_daily_cap is only
+  # ever numeric-nonempty when schedule.yaml+script+python3 all succeeded above
+  # (the same conditions this guard used to check per-call).
+  _cfg_cap="$_PLAN_agent_daily_cap"
+  [[ "$_cfg_cap" =~ ^[0-9]+$ ]] && CAP="$_cfg_cap"
   COUNTER="$LOGDIR/.agent_runs_$DATE"
   RUNS="$(cat "$COUNTER" 2>/dev/null || echo 0)"
   [[ "$RUNS" =~ ^[0-9]+$ ]] || RUNS=0
-  # CLAUDE_BIN resolved above (C2), before _auth_logged_in()'s definition.
+  # CLAUDE_BIN resolved above (C2), before sc_auth_logged_in()'s definition.
   if (( RUNS >= CAP )); then
     echo "- agent: skipped — daily agent-run cap reached ($RUNS/$CAP, token breaker)" >> "$LOG"
     AGENT_OUTCOME="skipped:cap"; AGENT_RUNS_TODAY="$RUNS"; AGENT_CAP="$CAP"
@@ -1050,7 +1137,7 @@ except Exception:
     # agent. Not-logged-in => skip the agent, record a distinct AUTH_FAIL signal,
     # and let the already-run deterministic maintenance stand — don't burn the cron
     # cycle pretending to work. The run-cap counter is untouched (no tokens spent).
-    AUTH="$(_auth_logged_in)"
+    AUTH="$(sc_auth_logged_in)"
     if [[ "$AUTH" == "no" ]]; then
       fc="$(_read_fail_count)"; fc=$((fc + 1))
       _write_fail_marker "$fc" auth
@@ -1063,7 +1150,8 @@ except Exception:
     # when the budget is never stated) and echoed in the TIMEOUT log line.
     # Env wins; else schedule.yaml's agent.timeout; else today's 600. (Phase 12:
     # schedule_config returns 600 when config is absent => byte-for-byte today.)
-    _cfg_timeout="$(python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --agent timeout 2>/dev/null)"
+    # Phase 28 Item 3: read from the plan sourced once above.
+    _cfg_timeout="$_PLAN_agent_timeout"
     [[ "$_cfg_timeout" =~ ^[0-9]+$ ]] || _cfg_timeout=600
     AGENT_TIMEOUT="${SELF_COMPANY_DAILY_TIMEOUT:-$_cfg_timeout}"
     # P4 Item 4 — aim the agent at the MEASURED backlog. The deterministic core
@@ -1189,7 +1277,8 @@ EOF
     [[ "${SELF_COMPANY_AGENT_STREAM:-1}" == "0" ]] && STREAM_ARGS=()
     # Model: env wins; else schedule.yaml's agent.model; else today's default.
     # (Phase 12: schedule_config returns claude-sonnet-4-6 absent config => today.)
-    _cfg_model="$(python3 "$SCRIPTS/schedule_config.py" --company "$COMPANY" --agent model 2>/dev/null)"
+    # Phase 28 Item 3: read from the plan sourced once above.
+    _cfg_model="$_PLAN_agent_model"
     [[ -n "$_cfg_model" ]] || _cfg_model="claude-sonnet-4-6"
     AGENT_MODEL="${SELF_COMPANY_DAILY_MODEL:-$_cfg_model}"
     printf '\n===== agent run %s =====\n' "$ts" >> "$AGENT_LOG"

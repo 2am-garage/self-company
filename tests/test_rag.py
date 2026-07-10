@@ -473,5 +473,147 @@ class TestStampMismatchSelfHeal(unittest.TestCase):
             self.assertEqual(rep["embedded"], 1)
 
 
+@unittest.skipUnless(_find_rag_venv_python(),
+                     "RAG venv not available (integration test)")
+class TestPairBatchMode(unittest.TestCase):
+    """Phase 28 Item 2c: rag_index.py --pair MEM_DIR INDEX_DIR (repeatable) lets
+    ONE process refresh multiple index stores — the batch mode daily-run.sh now
+    uses for company + every rag employee instead of one process per store."""
+
+    SCRIPT = os.path.join(_helpers.SCRIPTS_DIR, "rag_index.py")
+
+    def setUp(self):
+        self.venv = _find_rag_venv_python()
+
+    def _run_pairs(self, *pairs):
+        args = [self.venv, self.SCRIPT]
+        for memdir, indexdir in pairs:
+            args += ["--pair", memdir, indexdir]
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              env={**os.environ, "SC_RAG_REEXEC": "1"})
+        _skip_if_runtime_crash(self, proc)
+        self.assertEqual(proc.returncode, 0,
+                         f"batch index failed: out={proc.stdout} err={proc.stderr}")
+        return json.loads(proc.stdout)
+
+    def test_two_pairs_both_refreshed_in_one_process(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem_a = os.path.join(d, "company", "memory")
+            idx_a = os.path.join(mem_a, "index")
+            mem_b = os.path.join(d, "emp", "memory")
+            idx_b = os.path.join(mem_b, "index")
+            _helpers.write_memory(os.path.join(mem_a, "L1-warm", "a1.md"), id="a1",
+                                  tier="L1", body="company memory about weekly reports")
+            _helpers.write_memory(os.path.join(mem_b, "L1-warm", "b1.md"), id="b1",
+                                  tier="L1", body="employee memory about weekly reports")
+            report = self._run_pairs((mem_a, idx_a), (mem_b, idx_b))
+            self.assertIn("pairs", report)
+            self.assertEqual(len(report["pairs"]), 2)
+            p0, p1 = report["pairs"]
+            # Company pair FIRST (daily-run.sh's log-parse reads pairs[0]
+            # unambiguously for the "- rag-index:" line).
+            self.assertEqual(p0["memory_dir"], mem_a)
+            self.assertEqual(p0["embedded"], 1)
+            self.assertEqual(p1["memory_dir"], mem_b)
+            self.assertEqual(p1["embedded"], 1)
+            self.assertTrue(os.path.isdir(idx_a))
+            self.assertTrue(os.path.isdir(idx_b))
+
+    def _rows_in(self, indexdir, mid):
+        prog = (
+            "import sys, lancedb\n"
+            "db = lancedb.connect(sys.argv[1])\n"
+            "t = db.open_table('memory')\n"
+            "print(sum(1 for r in t.search().to_list() if r['id'] == sys.argv[2]))\n")
+        proc = subprocess.run([self.venv, "-c", prog, indexdir, mid],
+                              capture_output=True, text=True,
+                              env={**os.environ, "SC_RAG_REEXEC": "1"})
+        return int((proc.stdout or "0").strip() or "0")
+
+    def test_one_bad_pair_does_not_abort_the_others(self):
+        # Phase 28 Item 2 (Gibby SHOULD-CHECK 3): per-pair failure isolation
+        # PROVEN durable — a pair whose index_memory() raises (here: index_dir
+        # collides with an existing FILE, so mkdir raises) is recorded as its
+        # OWN error, and the healthy pair (which ran FIRST) is not just
+        # reported-embedded but its LanceDB table is actually WRITTEN and
+        # QUERYABLE on disk (a SIGKILL/exception on a LATER pair cannot roll
+        # back an already-committed earlier pair — partial success, not
+        # all-or-nothing).
+        with tempfile.TemporaryDirectory() as d:
+            mem_good = os.path.join(d, "good", "memory")
+            idx_good = os.path.join(mem_good, "index")
+            _helpers.write_memory(os.path.join(mem_good, "L1-warm", "g1.md"), id="g1",
+                                  tier="L1", body="a perfectly healthy memory store")
+
+            mem_bad = os.path.join(d, "bad", "memory")
+            idx_bad = os.path.join(mem_bad, "index")
+            os.makedirs(mem_bad, exist_ok=True)
+            os.makedirs(os.path.dirname(idx_bad), exist_ok=True)
+            with open(idx_bad, "w") as f:
+                f.write("a plain file where a directory is expected")
+
+            report = self._run_pairs((mem_good, idx_good), (mem_bad, idx_bad))
+            self.assertEqual(len(report["pairs"]), 2)
+            self.assertEqual(report["pairs"][0]["embedded"], 1)
+            self.assertTrue(os.path.isdir(idx_good))
+            self.assertIn("error", report["pairs"][1])
+            # Durability: the good (earlier) pair's row is really persisted +
+            # queryable, unaffected by the later pair's failure.
+            self.assertEqual(self._rows_in(idx_good, "g1"), 1)
+
+    def test_company_pair_first_is_never_starved_by_a_bad_employee(self):
+        # daily-run.sh always puts the COMPANY store as pairs[0], then each
+        # rag-employee. Gibby SHOULD-CHECK 3: a broken/slow EMPLOYEE pair
+        # (here, second, a raise) must not prevent the company (first) index
+        # from fully refreshing — it runs to completion BEFORE any employee
+        # pair is even attempted. Mirrors the real daily-run ordering.
+        with tempfile.TemporaryDirectory() as d:
+            company_mem = os.path.join(d, "company", "memory")
+            company_idx = os.path.join(company_mem, "index")
+            _helpers.write_memory(os.path.join(company_mem, "L1-warm", "c1.md"),
+                                  id="c1", tier="L1", body="the shared company index")
+
+            emp_mem = os.path.join(d, "emp", "memory")
+            emp_idx = os.path.join(emp_mem, "index")
+            os.makedirs(emp_mem, exist_ok=True)
+            os.makedirs(os.path.dirname(emp_idx), exist_ok=True)
+            with open(emp_idx, "w") as f:
+                f.write("broken employee index target (a file, not a dir)")
+
+            report = self._run_pairs((company_mem, company_idx), (emp_mem, emp_idx))
+            self.assertEqual(report["pairs"][0]["memory_dir"], company_mem)
+            self.assertEqual(report["pairs"][0]["embedded"], 1)
+            self.assertNotIn("error", report["pairs"][0])
+            self.assertIn("error", report["pairs"][1])   # employee isolated
+            self.assertEqual(self._rows_in(company_idx, "c1"), 1)  # company durable
+
+    def test_single_pair_batch_mode_matches_single_store_mode(self):
+        # Equality proof: --pair with exactly one pair produces the SAME
+        # report index_memory() itself would for that store (batch mode is a
+        # pure loop over the single-store path, not a different code path).
+        with tempfile.TemporaryDirectory() as d:
+            memdir = os.path.join(d, "memory")
+            indexdir_single = os.path.join(d, "idx_single")
+            indexdir_batch = os.path.join(d, "idx_batch")
+            _helpers.write_memory(os.path.join(memdir, "L1-warm", "m1.md"), id="m1",
+                                  tier="L1", body="a memory embedded both ways")
+
+            single_proc = subprocess.run(
+                [self.venv, self.SCRIPT, "--memory-dir", memdir,
+                 "--index-dir", indexdir_single],
+                capture_output=True, text=True,
+                env={**os.environ, "SC_RAG_REEXEC": "1"})
+            _skip_if_runtime_crash(self, single_proc)
+            self.assertEqual(single_proc.returncode, 0, single_proc.stderr)
+            single_report = json.loads(single_proc.stdout)
+
+            batch_report = self._run_pairs((memdir, indexdir_batch))
+            pair_report = batch_report["pairs"][0]
+
+            for key in ("embedded", "skipped_unchanged", "deleted_stale",
+                       "table_rows", "l1_l2_count", "mode"):
+                self.assertEqual(single_report[key], pair_report[key], key)
+
+
 if __name__ == "__main__":
     unittest.main()

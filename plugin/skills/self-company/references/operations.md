@@ -200,8 +200,16 @@ expression's charset AND per-field semantics; `schedule.sh` trusts that verdict)
   runtime inside `daily-run.sh`** (one tick, gate duties as data) — NOT N separate
   cron lines (that would multiply token/process cost). Gating is **fail-open**: any
   doubt (no config, missing python, error) runs the step, so maintenance is never
-  silently suppressed. `schedule_config.py --should-run STEP --hour H --dow D` is
-  the seam.
+  silently suppressed. `schedule_config.py --should-run STEP --hour H --dow D` and
+  `--agent KEY` remain the per-question CLI seam (other callers, tests); but
+  **daily-run.sh itself sources ONE `schedule_config.py --plan-tick --hour H --dow D`
+  call up front** (Phase 28 Item 3) — a single JSON with every gate decision (from
+  the same `STEP_OWNER` table `should_run()` consults, so there is no second list to
+  drift) plus the three agent knobs — instead of spawning schedule_config.py once
+  per question (~14 python startups/tick before, ≤2 now: the plan-tick call plus the
+  unrelated `--roster` render). Same fail-open contract, decided once: no
+  schedule.yaml / no script / no python3 / any parse error → every step runs, knobs
+  stay at their existing defaults.
 - **Invariant validator (Layer B enforcement).** `schedule_validator.py` refuses
   any config that would break the red/blue competition — **rules R1–R6** (attacker≠
   builder, attack surface must stay covered, sign-off gate/ledger/role fields are

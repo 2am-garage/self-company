@@ -78,6 +78,12 @@ from frontmatter import (split as _fm_split, parse as _fm_parse,
                          SOURCE_ITEM_RE, tokenize_sources,
                          _atomic_write)
 
+# Phase 28 Item 4a (D4): the file WALK is now the shared corpus.py primitive —
+# one enumeration instead of six independently re-implemented rglob loops.
+# verify keeps its own id-then-tombstone gating ORDER (and "missing id"
+# warning text) unchanged; only the walk moves.
+import corpus
+
 
 def is_charter_claim(fm):
     """True if the frontmatter SELF-DECLARES charter provenance (via
@@ -163,7 +169,7 @@ def verify_dir(memory_dir, transcripts_dir, today, apply):
     mem_root = Path(memory_dir)
     if not mem_root.exists():
         return report
-    for path in sorted(mem_root.rglob("*.md")):
+    for path in corpus.iter_memory_paths(memory_dir):
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:

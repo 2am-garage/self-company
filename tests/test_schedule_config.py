@@ -16,6 +16,7 @@ Covers:
   * the stdlib fallback parser (scalars / one-line maps / lists / block maps)
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -318,6 +319,62 @@ class TestGibbyEmptyDutiesReader(Base):
     def test_explicit_empty_gibby_skips_verify(self):
         c = self.company("gibby: { duties: [] }\n")
         self.assertEqual(self.should(c, "verify", 3, 2), 1)
+
+
+class TestPlanTick(Base):
+    """Phase 28 Item 3: --plan-tick collapses ~13 spawns into one JSON. The
+    acceptance bar is EQUIVALENCE: plan-tick's per-step booleans and agent
+    knobs must match what the individual --should-run / --agent calls return
+    for the SAME (company, hour, dow) — one source, machine-checked."""
+
+    STEPS = ("backup", "reinforce", "decay", "verify", "entropy", "rag_index",
+              "survey", "july_audit", "report", "agent")
+
+    FIXTURES = [
+        None,  # absent schedule.yaml
+        "",    # present but empty
+        "tony: { duties: [decay] }\n",
+        "gibby: { duties: [] }\n",
+        "elon: { cadence: daily }\nmike: { cadence: weekly }\n",
+        "tony: { cadence: every-2 }\nagent: { model: opus, timeout: 300, daily_cap: 2 }\n",
+        "elon: { enabled: false }\njuly: { cadence: weekly }\n",
+    ]
+    HOUR_DOW = [(0, 0), (3, 2), (6, 0), (12, 4), (18, 6), (23, 1)]
+
+    def plan(self, company, hour, dow):
+        rc, out, err = run_script("schedule_config.py", "--company", company,
+                                  "--plan-tick", "--hour", str(hour), "--dow", str(dow))
+        self.assertEqual(rc, 0, err)
+        return json.loads(out)
+
+    def test_matrix_matches_individual_calls(self):
+        for body in self.FIXTURES:
+            c = self.company(body)
+            for hour, dow in self.HOUR_DOW:
+                plan = self.plan(c, hour, dow)
+                self.assertEqual(plan["schema"], 1)
+                for step in self.STEPS:
+                    want_run = self.should(c, step, hour, dow) == 0
+                    self.assertEqual(plan["steps"][step], want_run,
+                                     (body, hour, dow, step))
+                for key in ("model", "timeout", "daily_cap"):
+                    rc, out, _ = run_script("schedule_config.py", "--company", c,
+                                            "--agent", key)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(str(plan["agent"][key]), out.strip(),
+                                     (body, key))
+
+    def test_no_yaml_all_true_and_default_agent(self):
+        plan = self.plan(self.company(), 3, 2)
+        self.assertTrue(all(plan["steps"].values()))
+        self.assertEqual(plan["agent"],
+                         {"model": "claude-sonnet-4-6", "timeout": 600, "daily_cap": 4})
+
+    def test_step_set_matches_step_owner_table(self):
+        # No second list to drift from should_run's own routing table.
+        import employee
+        plan = self.plan(self.company(), 3, 2)
+        self.assertEqual(set(plan["steps"].keys()), set(employee.STEP_OWNER.keys()))
 
 
 class TestFallbackParser(unittest.TestCase):

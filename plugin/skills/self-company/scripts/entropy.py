@@ -176,6 +176,13 @@ from frontmatter import (split as _fm_split, parse as _fm_parse,
                          serialize as _fm_serialize,
                          SOURCE_ITEM_RE, tokenize_sources)
 
+# Phase 28 Item 4a (D4): the file WALK is now the shared corpus.py primitive
+# (same directory, same best-effort-import discipline) — one implementation
+# instead of six independently re-implemented rglob loops (the audit's
+# "phantom dedup / silent skip" drift class: a memory visible to one stage's
+# walk and invisible to another).
+import corpus
+
 # Decay thresholds (must match decay.py)
 HL_BASE = 7.0
 HL_GROWTH = 0.5
@@ -329,12 +336,20 @@ def load_memories(memory_dir, include_archived=False):
     Returns: list of (path, id, frontmatter, body) tuples.
     """
     memories = []
-    memory_path = Path(memory_dir)
 
-    if not memory_path.exists():
-        return memories
-
-    for md_file in memory_path.rglob('*.md'):
+    # Phase 28 Item 4a: the walk is corpus.iter_memory_paths (shared with
+    # decay/reinforce/rag_index) instead of entropy's own rglob — one file
+    # enumeration everyone agrees on. entropy keeps its OWN parse_frontmatter
+    # (sources-as-list, defunct->archived, 6-key defaults) and gating ORDER
+    # (tombstone check, then id check) exactly as before; only the walk moves.
+    # `sort=False` (behaviour-preservation, Phase 28): entropy's legacy walk
+    # was a BARE UNSORTED `rglob`, and compute_dup_rate's i<j pairwise scan
+    # makes that raw order load-bearing for the ORDER of duplicate_pairs /
+    # review_candidates it emits (positional consumers: elon_survey dups[:4],
+    # daily-run's duplicate-candidates line + agent backlog pairs[:15]).
+    # Sorting would change today's byte output — the other five callers already
+    # sorted, so only entropy takes the raw path.
+    for md_file in corpus.iter_memory_paths(memory_dir, sort=False):
         try:
             with open(md_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -350,12 +365,16 @@ def load_memories(memory_dir, include_archived=False):
             if not include_archived and is_tombstoned(fm):
                 continue
 
-            # Extract body (after closing ---)
-            body_start = content.find('---', 3)
-            if body_start != -1:
-                body = content[body_start+3:].strip()
-            else:
-                body = content
+            # Extract body (everything after the closing fence, via the SAME
+            # shared split every other consumer uses now — Phase 28 Item 4a).
+            # This replaces a substring `content.find('---', 3)` search that
+            # could truncate early if a frontmatter VALUE happened to contain
+            # the literal text "---" before the real closing fence line; the
+            # line-based fence detection cannot mis-fire that way, and aligning
+            # this body value with reinforce/rag_index's is the Item 2
+            # embedding-cache hit-rate prerequisite (same body -> same hash).
+            _, body_raw = _fm_parse(content)
+            body = body_raw.strip() if isinstance(body_raw, str) else content.strip()
 
             # Require an explicit id, mirroring decay.py (which warns + skips on
             # missing id). Keeping the two scanners on the same memory set means

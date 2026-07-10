@@ -37,6 +37,12 @@ from tombstone import TOMBSTONE_STATUSES, is_tombstoned
 from frontmatter import split as _fm_split
 import urllib.error
 
+# Phase 28 Item 4a (D4): the file WALK is now the shared corpus.py primitive —
+# one enumeration instead of six independently re-implemented rglob loops. rag
+# keeps its own tier-then-tombstone-then-id gating ORDER (and warning text)
+# unchanged; only the walk moves.
+import corpus
+
 # ============================================================================
 # RE-EXEC INTO THE RAG VENV (created by rag_setup.sh) if deps aren't here
 # ============================================================================
@@ -431,8 +437,8 @@ def index_memory(memory_dir: Path, index_dir: Path, model: str, rebuild: bool = 
         report["warnings"].append(f"Memory dir not found: {memory_dir}")
         return report
 
-    # Scan for L1/L2 active files
-    md_files = sorted(memory_dir.rglob("*.md"))
+    # Scan for L1/L2 active files (Phase 28 Item 4a: shared corpus walk).
+    md_files = corpus.iter_memory_paths(memory_dir)
     candidates = []
     live_ids = set()
 
@@ -681,6 +687,19 @@ def main():
         "--now",
         help="Reference date (YYYY-MM-DD). Default: today."
     )
+    parser.add_argument(
+        "--pair", nargs=2, action="append", metavar=("MEM_DIR", "INDEX_DIR"),
+        help="Phase 28 Item 2c: repeatable MEM_DIR INDEX_DIR pair to refresh in "
+             "THIS process — one process (one fastembed model load, zero if "
+             "every store is unchanged) refreshes company + every rag "
+             "employee's index instead of one process per store. When any "
+             "--pair is given, --memory-dir/--index-dir/--rebuild/--include-l0 "
+             "apply identically to EVERY pair (no per-pair overrides); a single "
+             "pair's failure is isolated (recorded as that pair's own error) so "
+             "the rest still refresh — same tolerance as today's per-store "
+             "`|| true` loop. Prints one combined "
+             '`{"pairs": [<index_memory report>, ...]}` JSON.'
+    )
 
     args = parser.parse_args()
 
@@ -740,6 +759,25 @@ def main():
             file=sys.stderr
         )
         sys.exit(2)
+
+    # Phase 28 Item 2c: batch mode — one process refreshes every --pair. Each
+    # pair gets the SAME index_memory() call today's single-store mode makes;
+    # only the PROCESS (and therefore the fastembed model load) is shared. A
+    # pair whose index_memory() raises is isolated to its own error entry —
+    # the rest still refresh, matching today's per-store `|| true` tolerance.
+    if args.pair:
+        results = []
+        for mem_dir_s, index_dir_s in args.pair:
+            try:
+                rep = index_memory(Path(mem_dir_s), Path(index_dir_s), model,
+                                   rebuild=args.rebuild, now=now,
+                                   include_l0=args.include_l0)
+            except Exception as e:
+                rep = {"memory_dir": str(mem_dir_s), "index_dir": str(index_dir_s),
+                       "error": str(e)}
+            results.append(rep)
+        print(json.dumps({"pairs": results}, ensure_ascii=False))
+        return 0
 
     memory_dir = Path(args.memory_dir)
     index_dir = Path(args.index_dir)
