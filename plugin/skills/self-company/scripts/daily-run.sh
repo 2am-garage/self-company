@@ -76,6 +76,13 @@ LOG="$LOGDIR/daily-$DATE.md"
 # stays the human render (unchanged); the JSONL is the data interface every
 # consumer reads through daily_log.py — never a fifth private parser.
 JSONL="$LOGDIR/daily-$DATE.jsonl"
+# Phase 27 MUST-FIX 1: a UNIQUE per-run id, carried in BOTH the start and end
+# JSONL events so the reader pairs on it, not on the second-resolution ts
+# string (two ticks that start in the same wall-clock second — e.g. four
+# lock-skipped cron ticks — must stay four distinct rows, never collapse
+# last-write-wins). pid is unique among live processes; epoch-seconds + two
+# $RANDOM draws make a reused pid across seconds astronomically safe too.
+RUN_ID="$$-$(date +%s)-${RANDOM}${RANDOM}"
 MODE="manual"; (( IS_CRON )) && MODE="cron"
 # Item 4: generous core-step budget (a first-install fastembed model download
 # on a slow link can legitimately need most of this) — see the `timeout -k`
@@ -124,8 +131,9 @@ _dry_flag=0; $DRY_RUN && _dry_flag=1
 _start_json="$(python3 -c "
 import json, sys
 print(json.dumps({'event': 'start', 'ts': sys.argv[1], 'mode': sys.argv[2],
-                   'dry_run': sys.argv[3] == '1', 'pid': int(sys.argv[4]), 'schema': 1}))
-" "$ts" "$MODE" "$_dry_flag" "$$" 2>/dev/null)"
+                   'dry_run': sys.argv[3] == '1', 'pid': int(sys.argv[4]),
+                   'run_id': sys.argv[5], 'schema': 1}))
+" "$ts" "$MODE" "$_dry_flag" "$$" "$RUN_ID" 2>/dev/null)"
 _jsonl_append "$_start_json"
 
 # TOM-PATH (Phase 22): the deterministic core is ALL `python3 …` calls, each ended
@@ -206,8 +214,10 @@ _jsonl_end_skip() {  # $1 = lock value: "skipped" | "stale-holder" | "wait-timeo
   local end_ts streak
   end_ts="$(date +%FT%T)"
   streak="$(_lock_skip_streak_read)"
-  printf '{"event":"end","ts":"%s","start_ts":"%s","schema":1,"lock":"%s","lock_skip_streak":%s,"core_aborted":false,"abort_reason":null,"steps":{},"agent":null,"dry_run":false}' \
-    "$end_ts" "$ts" "$1" "$streak" | python3 "$SCRIPTS/daily_log.py" append --path "$JSONL" >/dev/null 2>&1 || true
+  # MUST-FIX 1: carry run_id so the reader pairs THIS skip-tick's end to its
+  # own start — four same-second lock-skips stay four rows, not one.
+  printf '{"event":"end","ts":"%s","start_ts":"%s","run_id":"%s","schema":1,"lock":"%s","lock_skip_streak":%s,"core_aborted":false,"abort_reason":null,"steps":{},"agent":null,"dry_run":false}' \
+    "$end_ts" "$ts" "$RUN_ID" "$1" "$streak" | python3 "$SCRIPTS/daily_log.py" append --path "$JSONL" >/dev/null 2>&1 || true
 }
 if ! $DRY_RUN; then
   if command -v flock >/dev/null 2>&1 && [[ "${SELF_COMPANY_NO_FLOCK:-}" != "1" ]]; then
@@ -816,17 +826,38 @@ fi
 # do NOT spend disk writing a new plan file either — the abort itself is what
 # needs surfacing, not a fresh todo. (The ledger below still runs: it is how
 # the abort becomes visible in report.py's ledger.)
+# Phase 27 MUST-FIX 3: capture the survey JSON to a temp file so we can BOTH
+# render the human line AND, if any core re-invocation timed out, set a JSONL
+# `survey` step outcome (never silently absorb a hung decay/verify/entropy).
+SURVEY_STATE="skipped"   # skipped | ran | timeout — drives the JSONL survey step
 if (( CORE_ABORT )) && [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   echo "- elon survey: skipped — CORE ABORTED (no new plan file written to a low-disk filesystem)" >> "$LOG"
 elif [[ -f "$SCRIPTS/elon_survey.py" ]]; then
   if _should_run survey; then
-    _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" 2>>"$SERR" \
-      | python3 -c "import sys, json
+    SVOUT="$(mktemp)"
+    _run python3 "$SCRIPTS/elon_survey.py" --company "$COMPANY" >"$SVOUT" 2>>"$SERR" || true
+    python3 - "$SVOUT" "$DATE" >> "$LOG" <<'PY' || echo "- elon survey: no output" >> "$LOG"
+import sys, json
 try:
-    d = json.load(sys.stdin)
-    print(f\"- elon survey: {d.get('todos','?')} todo(s) -> ops/plans/todo-${DATE}.md\")
+    d = json.load(open(sys.argv[1]))
 except Exception:
-    print('- elon survey: no output')" >> "$LOG" || true
+    print("- elon survey: no output"); sys.exit(0)
+date = sys.argv[2]
+to = d.get("timed_out") or []
+if to:
+    # Never silently absorbed: a hung core step is LOUD, and report.py/
+    # notify-status.py see the survey step's `timeout` JSONL outcome.
+    print(f"- elon survey: core-step TIMED OUT ({', '.join(to)}) — survey numbers "
+          f"may be partial; {d.get('todos','?')} todo(s) -> ops/plans/todo-{date}.md")
+else:
+    print(f"- elon survey: {d.get('todos','?')} todo(s) -> ops/plans/todo-{date}.md")
+PY
+    if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if (d.get("timed_out") or []) else 1)' "$SVOUT" 2>/dev/null; then
+      SURVEY_STATE="timeout"
+    else
+      SURVEY_STATE="ran"
+    fi
+    rm -f "$SVOUT"
   else
     echo "- elon survey: skipped — schedule.yaml gated off elon.survey for this tick" >> "$LOG"
   fi
@@ -1283,6 +1314,7 @@ python3 - "$SCRIPTS" "$JSONL" "$DOUT" "$EOUT" "$VOUT" "$IOUT" "$ROUT" \
   "$CORE_ABORT" "$_core_abort_reason_file" "$_dry_flag" \
   "$REINF_STATE" "$DECAY_STATE" "$VERIFY_STATE" "$RAGIDX_STATE" \
   "$_run_entropy" "$ENTROPY_TIMEDOUT" "$AGENT_OUTCOME" "$AGENT_RC" "$AGENT_RUNS_TODAY" "$AGENT_CAP" "$AGENT_FAIL_STREAK" \
+  "$RUN_ID" "$SURVEY_STATE" \
   <<'PY' 2>/dev/null || true
 import json, sys
 
@@ -1290,7 +1322,8 @@ import json, sys
  end_ts, start_ts, lock_status, lock_skip_streak,
  core_abort, abort_reason_file, dry_flag,
  rstate, dstate, vstate, ragstate,
- entropy_ran, entropy_timedout, agent_outcome, agent_rc, agent_runs_today, agent_cap, agent_fail_streak) = sys.argv[1:26]
+ entropy_ran, entropy_timedout, agent_outcome, agent_rc, agent_runs_today, agent_cap, agent_fail_streak,
+ run_id, survey_state) = sys.argv[1:28]
 
 sys.path.insert(0, scripts_dir)
 import daily_log
@@ -1366,6 +1399,13 @@ if isinstance(e, dict):
 steps["rag_index"] = {"outcome": daily_log._normalize_step_outcome(ragstate),
                        "warnings": 0, "warning_samples": []}
 
+# MUST-FIX 3: the survey step (Elon's CEO survey) re-invokes core scripts; a
+# timeout there is now a FIRST-CLASS step outcome, never silently absorbed.
+if survey_state == "timeout":
+    steps["survey"] = {"outcome": "timeout", "warnings": 0, "warning_samples": []}
+elif survey_state == "ran":
+    steps["survey"] = {"outcome": "ok", "warnings": 0, "warning_samples": []}
+
 agent = None
 if agent_outcome:
     agent = {"outcome": agent_outcome, "rc": opt_int(agent_rc),
@@ -1373,7 +1413,7 @@ if agent_outcome:
               "fail_streak": opt_int(agent_fail_streak)}
 
 event = {
-    "event": "end", "ts": end_ts, "start_ts": start_ts, "schema": 1,
+    "event": "end", "ts": end_ts, "start_ts": start_ts, "run_id": run_id, "schema": 1,
     "lock": lock_status or None,
     "lock_skip_streak": opt_int(lock_skip_streak),
     "core_aborted": core_abort == "1",

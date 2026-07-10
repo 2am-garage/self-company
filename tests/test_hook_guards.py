@@ -512,6 +512,40 @@ class TestMemoryGuardRedirectTruncation(_CompanyRepo):
     def test_nested_bash_c_redirect_outside_store_allowed(self):
         self._allow('bash -c "echo hi > /tmp/log"')
 
+    # MUST-FIX 2: the `&>` / `>&` both-streams truncating forms the first C2
+    # pass missed — Gibby live-fired `echo X &> …/foo.md` and it truncated the
+    # file undetected. They truncate exactly like `>`, so DENY into the store;
+    # the `&>>` append form and out-of-store / fd-dup uses stay ALLOWED.
+    def test_amp_redirect_into_memory_denied(self):
+        self._deny("echo X &> .company/memory/L0-working/foo.md")
+
+    def test_redirect_amp_into_memory_denied(self):
+        self._deny("echo X >& .company/memory/L0-working/foo.md")
+
+    def test_bare_colon_amp_truncate_into_memory_denied(self):
+        self._deny(": &> .company/memory/foo")
+
+    def test_amp_append_into_memory_allowed(self):
+        self._allow("echo X &>> .company/memory/L0-working/foo.md")
+
+    def test_amp_redirect_outside_store_allowed(self):
+        self._allow("echo X &> /tmp/other.md")
+
+    def test_redirect_amp_outside_store_allowed(self):
+        self._allow("echo X >& /tmp/other.md")
+
+    def test_fd_dup_not_treated_as_store_truncation(self):
+        self._allow("ls .company/memory 2>&1")
+
+    def test_cd_then_relative_amp_redirect_into_memory_denied(self):
+        self._deny("cd .company/memory/L0-working && echo X &> foo.md")
+
+    def test_nested_bash_c_amp_redirect_into_memory_denied(self):
+        self._deny('bash -c "echo X &> .company/memory/L0-working/foo.md"')
+
+    def test_nested_bash_c_amp_append_into_memory_allowed(self):
+        self._allow('bash -c "echo X &>> .company/memory/L0-working/foo.md"')
+
 
 class TestMemoryLint(_CompanyRepo):
     def _rel(self, name):

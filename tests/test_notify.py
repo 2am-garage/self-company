@@ -346,6 +346,29 @@ class TestStalenessAlarm(unittest.TestCase):
                 esc = ns.staleness_escalation_line(c, now=ns._parse_ts("2026-07-10T07:00:00"))
             self.assertIn("never ran", esc)   # the dry-run doesn't count as a real run
 
+    def test_f_symlinked_project_dir_still_matches_cron_line(self):
+        # MUST-FIX 4: schedule.sh records path= via bash logical pwd
+        # (symlink-preserving); a genuinely-dark company reached through a
+        # symlinked project dir must still fire the alarm, not go silent.
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "real")
+            os.makedirs(os.path.join(real, ".company", "ops", "logs"))
+            link = os.path.join(d, "link")
+            os.symlink(real, link)
+            c_link = os.path.join(link, ".company")
+            self._write_run(c_link, "2026-07-09", "2026-07-09T18:00:00")  # 13h stale
+            # crontab records the LOGICAL (symlinked) path
+            cf = self._crontab_file(d, link)
+            with unittest.mock.patch.dict(os.environ, {"SELF_COMPANY_CRONTAB_FILE": cf}):
+                esc_link = ns.staleness_escalation_line(
+                    c_link, now=ns._parse_ts("2026-07-10T07:00:00"))
+                # the same alarm must also fire when the caller hands the
+                # PHYSICAL company path (the two forms must both match).
+                esc_phys = ns.staleness_escalation_line(
+                    os.path.join(real, ".company"), now=ns._parse_ts("2026-07-10T07:00:00"))
+            self.assertIn("STALE", esc_link)
+            self.assertIn("STALE", esc_phys)
+
     def test_emit_hook_installed_never_ran_still_escalates_when_all_runs_empty(self):
         with tempfile.TemporaryDirectory() as d:
             c = self._company_dir(d)

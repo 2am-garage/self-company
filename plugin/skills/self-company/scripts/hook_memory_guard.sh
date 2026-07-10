@@ -6,8 +6,8 @@
 # Denies any Bash command that would PHYSICALLY delete or move-away a path under
 # .company/memory/ — OR the .company store ROOT (rm -rf .company wipes memory too)
 # — via rm / unlink / shred / rmdir / truncate / `find <mem> -delete` / `mv
-# <memory-path> elsewhere` / a truncating shell redirect (`>`, `>|`) / bare
-# `tee` (no `-a`).
+# <memory-path> elsewhere` / a truncating shell redirect (`>`, `>|`, `&>`, `>&`)
+# / bare `tee` (no `-a`).
 # Physical deletion of memory is the deterministic decay reap's job (Phase 6);
 # agents must TOMBSTONE (status: archived) instead. Skill-owned, host-independent
 # enforcement of the no-rm rule — defense in depth beside the tar floor.
@@ -15,11 +15,13 @@
 # Phase 27 C2 (GIB R3 backlog) — `>` truncation is a deletion primitive the
 # guard didn't see. `echo x > .company/memory/foo.md` (or `: >`, `>|`, `tee`
 # without `-a`) truncates a memory file to nothing and used to sail straight
-# through: _normalize() collapsed EVERY punctuation run — `>`/`>>`/`>|`
-# included — into one generic ';' separator before any deleter check ever
+# through: _normalize() collapsed EVERY punctuation run — `>`/`>>`/`>|`/`&>`/
+# `>&` included — into one generic ';' separator before any deleter check ever
 # ran, throwing away the truncate-vs-append-vs-separator distinction. Fix:
-# `>`/`>>`/`>|` are now preserved as their own distinct tokens; a bare `>`/`>|`
-# (never `>>` — append is not deletion) or a `tee` invocation without `-a`/
+# every redirect operator is now preserved as its own distinct token; a bare
+# `>`/`>|`/`&>`/`>&` (never the `>>`/`&>>` append forms — MUST-FIX 2 added the
+# `&>`/`>&` both-streams truncating forms the first pass missed) or a `tee`
+# invocation without `-a`/
 # `--append` whose target resolves into the store — same fail-closed
 # resolution as every deleter above (cd-tracked CWD stack, is_mem_literal
 # textual backstop, in_store realpath check) — is DENIED. The nested-shell
@@ -139,14 +141,20 @@ TRANSPARENT_PREFIX = {"command", "builtin", "time", "exec", "nohup", "nice", "en
 NESTED_INDICATORS = SHELL_INTERPRETERS | {"eval", "xargs", "source"}
 AMBIG_CHARS = set("$`*?[]")
 PUNCT = set("();<>|&")                          # shell control punctuation
-# Phase 27 C2 (GIB R3 backlog) — `>`/`>|` truncate their target to zero bytes
-# ON OPEN, before anything is written: that IS deletion of the prior
-# contents, not merely "not rm". `>>` (append) is excluded on purpose — append
-# is not deletion. These are shell OPERATORS (recognized by token identity),
-# never program names, so they never go through the head/DELETERS dispatch —
-# they're checked directly wherever they appear in a simple command.
-REDIR_TRUNC = {">", ">|"}
-REDIR_OPS = REDIR_TRUNC | {">>"}                # all three preserved through _normalize
+# Phase 27 C2 (GIB R3 backlog) + MUST-FIX 2 — `>`/`>|`/`&>`/`>&` truncate their
+# target to zero bytes ON OPEN, before anything is written: that IS deletion of
+# the prior contents, not merely "not rm". `&>`/`>&` are the both-stdout+stderr
+# truncating forms (`echo x &> f` / `echo x >& f` both truncate `f`), which the
+# original C2 pass missed — Gibby live-fired `echo X &> .company/memory/…` and
+# it truncated the file undetected. The APPEND forms `>>`/`&>>` are excluded on
+# purpose (append is not deletion). All are shell OPERATORS (recognized by
+# token identity), never program names, so they never go through the
+# head/DELETERS dispatch — they're checked directly wherever they appear in a
+# simple command. (`2>&1`-style fd dups tokenize with a NUMERIC target, which
+# is never a store path, so they stay allowed by the target-aware check.)
+REDIR_TRUNC = {">", ">|", "&>", ">&"}
+REDIR_APPEND = {">>", "&>>"}                    # append — allowed, but preserved as tokens
+REDIR_OPS = REDIR_TRUNC | REDIR_APPEND          # all preserved through _normalize
 
 
 def allow():
@@ -238,15 +246,22 @@ def tok_is_deleter(a):
 # store-shaped target counts as a hit. `>>` is excluded (never a hit); `tee
 # -a`/`--append` anywhere in the same tee invocation's tail is treated as
 # non-truncating for that invocation.
-_TRUNC_TARGET_RE = re.compile(r"(?<!>)>\|?(?!>)\s*([^\s;&|()<>]+)")
+# MUST-FIX 2: every redirect operator (append + truncating), longest-first so
+# `&>>`/`>>` win over `&>`/`>`, each captured with the token that follows it.
+# We classify in code (append forms skipped) rather than one clever lookaround —
+# the alternation ordering is what makes `&>>` not read as `&>` + `>`.
+_REDIR_OP_RE = re.compile(r"(&>>|>>|&>|>&|>\||>)\s*([^\s;&|()<>]*)")
 _TEE_INVOCATION_RE = re.compile(r"\btee\b([^;&|()]*)")
 
 
 def text_has_store_redirect(s):
     if not isinstance(s, str) or not s:
         return False
-    for m in _TRUNC_TARGET_RE.finditer(s):
-        if is_mem_literal(m.group(1)):
+    for m in _REDIR_OP_RE.finditer(s):
+        op, target = m.group(1), m.group(2)
+        if op in (">>", "&>>"):
+            continue                    # append is not deletion
+        if target and is_mem_literal(target):
             return True
     for m in _TEE_INVOCATION_RE.finditer(s):
         tail = m.group(1).split()
@@ -482,11 +497,12 @@ def _strip_prefix_opts(head, rest):
 def check_command(toks, cwd):
     """Analyze one simple command. Returns the (persistently) updated cwd; may
     deny() and never return."""
-    # Phase 27 C2 — a truncating redirect (`>`/`>|`, never `>>`) attaches to
-    # THIS simple command regardless of where in it the operator appears
-    # (bash allows leading/interspersed redirects, e.g. `> file cmd args`)
-    # and regardless of which program is invoked: the shell opens/truncates
-    # the target before the program ever runs. Same fail-closed resolution
+    # Phase 27 C2 + MUST-FIX 2 — a truncating redirect (`>`/`>|`/`&>`/`>&`,
+    # never the `>>`/`&>>` append forms) attaches to THIS simple command
+    # regardless of where in it the operator appears (bash allows
+    # leading/interspersed redirects, e.g. `> file cmd args`) and regardless
+    # of which program is invoked: the shell opens/truncates the target before
+    # the program ever runs. Same fail-closed resolution
     # (cd-tracked cwd, is_mem_literal backstop, in_store realpath check) as
     # every deleter target below.
     redir_targets = [toks[j + 1] for j, t in enumerate(toks)

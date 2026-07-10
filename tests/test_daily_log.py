@@ -93,6 +93,72 @@ class TestAppendEvent(unittest.TestCase):
             self.assertEqual(seen, set(range(200)))
 
 
+class TestSameSecondRuns(unittest.TestCase):
+    """MUST-FIX 1: runs that start in the SAME wall-clock second must NOT
+    collapse — the reader pairs on the unique run_id, not the ts string."""
+
+    def test_four_same_second_lock_skips_render_as_four_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            open(os.path.join(logdir, "daily-2026-07-10.md"), "w").close()
+            events = []
+            for streak in range(1, 5):
+                rid = f"999{streak}-1783-abcd{streak}"
+                events.append({"event": "start", "ts": "2026-07-10T06:00:00",
+                               "mode": "cron", "dry_run": False, "pid": 9990 + streak,
+                               "run_id": rid, "schema": 1})
+                events.append({"event": "end", "ts": "2026-07-10T06:00:00",
+                               "start_ts": "2026-07-10T06:00:00", "run_id": rid,
+                               "schema": 1, "lock": "skipped", "lock_skip_streak": streak,
+                               "core_aborted": False, "abort_reason": None, "steps": {},
+                               "agent": None, "dry_run": False})
+            _write_jsonl(logdir, "2026-07-10", events)
+            runs = dl.read_runs(os.path.join(d, ".company"), window_days=None,
+                                 now=datetime(2026, 7, 10, 7))
+            self.assertEqual(len(runs), 4)                       # never collapsed
+            self.assertEqual([r["lock"] for r in runs], ["skipped"] * 4)
+            self.assertEqual(sorted(r["lock_skip_streak"] for r in runs), [1, 2, 3, 4])
+
+    def test_jsonl_only_day_visible_without_a_sibling_md(self):
+        # MUST-FIX 1: a day where the .md write failed but the JSONL append
+        # succeeded must still surface — read_runs enumerates .jsonl directly.
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            _write_jsonl(logdir, "2026-07-10", [
+                {"event": "start", "ts": "2026-07-10T06:00:00", "mode": "cron",
+                 "dry_run": False, "pid": 1, "run_id": "r1", "schema": 1},
+                {"event": "end", "ts": "2026-07-10T06:00:01", "start_ts": "2026-07-10T06:00:00",
+                 "run_id": "r1", "schema": 1, "lock": "acquired", "lock_skip_streak": 0,
+                 "core_aborted": False, "abort_reason": None, "steps": {}, "agent": None,
+                 "dry_run": False},
+            ])
+            # NO daily-2026-07-10.md exists at all.
+            self.assertFalse(os.path.exists(os.path.join(logdir, "daily-2026-07-10.md")))
+            runs = dl.read_runs(os.path.join(d, ".company"), window_days=None,
+                                 now=datetime(2026, 7, 10, 7))
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["lock"], "acquired")
+            self.assertEqual(runs[0]["md_block"], "")           # no md, but still a row
+
+    def test_legacy_events_without_run_id_still_pair_by_ts(self):
+        # Backward-compat: a distinct-second start/end WITHOUT run_id (old data
+        # / hand-written fixtures) still pairs via the ts fallback.
+        with tempfile.TemporaryDirectory() as d:
+            logdir = _logs(d)
+            open(os.path.join(logdir, "daily-2026-07-10.md"), "w").close()
+            _write_jsonl(logdir, "2026-07-10", [
+                {"event": "start", "ts": "2026-07-10T06:00:00", "mode": "cron",
+                 "dry_run": False, "pid": 1, "schema": 1},
+                {"event": "end", "ts": "2026-07-10T06:00:02", "start_ts": "2026-07-10T06:00:00",
+                 "schema": 1, "lock": "acquired", "lock_skip_streak": 0, "core_aborted": False,
+                 "abort_reason": None, "steps": {}, "agent": None, "dry_run": False},
+            ])
+            runs = dl.read_runs(os.path.join(d, ".company"), window_days=None,
+                                 now=datetime(2026, 7, 10, 7))
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["run_state"], "complete")   # end paired, not crashed
+
+
 class TestJsonlRuns(unittest.TestCase):
     def test_complete_run_pairs_start_and_end(self):
         with tempfile.TemporaryDirectory() as d:

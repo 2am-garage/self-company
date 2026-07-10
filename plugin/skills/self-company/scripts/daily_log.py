@@ -19,10 +19,12 @@ the constant below, marked legacy.
 JSONL EVENT SCHEMA (schema: 1)
 --------------------------------------------------------------------------------
 start:
-  {"event":"start","ts":ISO,"mode":"cron"|"manual","dry_run":bool,"pid":int,"schema":1}
+  {"event":"start","ts":ISO,"mode":"cron"|"manual","dry_run":bool,"pid":int,
+   "run_id":str,"schema":1}
 
-end (paired to a start via start_ts):
-  {"event":"end","ts":ISO,"start_ts":ISO,"schema":1,
+end (paired to a start via run_id — see _pair_events; start_ts is a human
+     cross-reference, not the pairing key):
+  {"event":"end","ts":ISO,"start_ts":ISO,"run_id":str,"schema":1,
    "lock":"acquired"|"skipped"|"stale-holder"|"unserialized"|"wait-timeout"|null,
    "lock_skip_streak": int|null,
    "core_aborted": bool, "abort_reason": str|null,
@@ -36,7 +38,7 @@ end (paired to a start via start_ts):
    "dry_run": bool}
 
 Two events per run, always — no streaming/partial step events (Phase-28
-territory if ever). A `start` with no matching `end`: within
+territory if ever), paired by `run_id`. A `start` with no matching `end`: within
 SELF_COMPANY_INFLIGHT_WINDOW (default 300s) of now => `in-flight`; older =>
 `crashed`. This classification is computed from timestamps ONLY — zero mtime
 probing — which is what kills the Phase-19-C2 race class by construction
@@ -160,19 +162,42 @@ def _read_jsonl_events(path):
 
 
 def _pair_events(events):
+    """Pair start/end events into runs.
+
+    MUST-FIX 1: key on the UNIQUE `run_id` daily-run.sh writes into BOTH the
+    start and end event — NOT the second-resolution `ts` string. Four cron
+    ticks that lose the flock in the same wall-clock second carry four
+    distinct run_ids, so they stay four rows instead of collapsing
+    last-write-wins. Pre-run_id legacy events (hand-written fixtures, or the
+    brief transition window) fall back to the old ts-based key — for those the
+    same-second collision is an irreducible limitation of data that never
+    carried a unique id, but it can never affect a real emitted run again.
+    """
+    def _start_key(e):
+        rid = e.get("run_id")
+        return rid if isinstance(rid, str) and rid else e.get("ts")
+
+    def _end_key(e):
+        rid = e.get("run_id")
+        if isinstance(rid, str) and rid:
+            return rid
+        return e.get("start_ts") or e.get("ts")
+
     starts, ends, order = {}, {}, []
     for e in events:
-        if e.get("event") == "start" and isinstance(e.get("ts"), str):
-            key = e["ts"]
+        if e.get("event") == "start":
+            key = _start_key(e)
+            if not isinstance(key, str):
+                continue
             if key not in starts:
                 order.append(key)
             starts[key] = e
         elif e.get("event") == "end":
-            key = e.get("start_ts") or e.get("ts")
+            key = _end_key(e)
             if isinstance(key, str):
                 ends[key] = e
     # unmatched ends (no start line at all — corrupted/truncated file) still
-    # surface as a run, keyed by their own ts, appended after paired ones.
+    # surface as a run, keyed by their own key, appended after paired ones.
     for key in ends:
         if key not in starts and key not in order:
             order.append(key)
@@ -406,16 +431,25 @@ def read_runs(company, window_days=DEFAULT_WINDOW_DAYS, now=None):
     now = now or datetime.now()
     logdir = _logs_dir(company)
     runs = []
+    # MUST-FIX 1: the JSONL is the source of truth, so enumerate the .jsonl
+    # files DIRECTLY (a day where the .md write failed but the JSONL append
+    # succeeded was previously invisible — read_runs only globbed .md and
+    # checked for a sibling). Collect every date that has EITHER artifact; a
+    # date with a .jsonl reads through it (md_block is a best-effort extra from
+    # the .md if present), and a .md-only date falls back to the legacy parser.
     try:
-        md_files = sorted(logdir.glob("daily-*.md"))
+        jsonl_files = list(logdir.glob("daily-*.jsonl"))
+        md_files = list(logdir.glob("daily-*.md"))
     except OSError:
-        md_files = []
-    for md in md_files:
-        date_str = md.stem[len("daily-"):]
+        jsonl_files, md_files = [], []
+    jsonl_dates = {p.stem[len("daily-"):] for p in jsonl_files}
+    md_dates = {p.stem[len("daily-"):] for p in md_files}
+    for date_str in sorted(jsonl_dates | md_dates):
         jsonl = logdir / f"daily-{date_str}.jsonl"
-        if jsonl.exists():
+        md = logdir / f"daily-{date_str}.md"
+        if date_str in jsonl_dates:
             pairs = _pair_events(_read_jsonl_events(jsonl))
-            md_blocks = _split_md_blocks(_safe_read(md))
+            md_blocks = _split_md_blocks(_safe_read(md)) if date_str in md_dates else {}
             for start, end in pairs:
                 r = _run_from_jsonl(start, end, now)
                 if r is None:

@@ -271,23 +271,41 @@ def _read_crontab():
         return ""
 
 
+def _path_forms(p):
+    """MUST-FIX 4: both the LOGICAL (symlink-preserving) and PHYSICAL
+    (realpath) forms of a path. schedule.sh records the cron `path=` via bash
+    `pwd` (logical, symlink-preserving); a naive `Path.resolve()` on the
+    notify side is physical — through a symlinked project dir the two differ,
+    so a genuinely-dark company would look like 'no cron installed' and go
+    permanently silent. Comparing BOTH forms on BOTH sides matches regardless
+    of which form each side happens to hold (and a legacy line recorded the
+    other way)."""
+    forms = set()
+    if not p:
+        return forms
+    forms.add(os.path.normpath(os.path.abspath(p)))   # logical (no symlink resolution)
+    try:
+        forms.add(os.path.realpath(p))                # physical
+    except OSError:
+        pass
+    return forms
+
+
 def _find_daily_cron_line(project_dir):
     """The `# self-company-daily ... path=<project_dir>` line for THIS
     project, or None if no such entry is installed (schedule.sh's mark
-    scheme, schedule.sh:19 — path= is always the line's last field)."""
+    scheme, schedule.sh:19 — path= is always the line's last field).
+    Matches the recorded path against project_dir in BOTH logical and
+    physical form (MUST-FIX 4)."""
     text = _read_crontab()
     if not text:
         return None
-    candidates = {os.path.normpath(os.path.abspath(project_dir))}
-    try:
-        candidates.add(os.path.realpath(project_dir))
-    except OSError:
-        pass
+    want = _path_forms(project_dir)
     for line in text.splitlines():
         if "# self-company-daily" not in line:
             continue
         m = re.search(r"path=(\S+)\s*$", line.strip())
-        if m and m.group(1) in candidates:
+        if m and (_path_forms(m.group(1)) & want):
             return line
     return None
 
@@ -315,7 +333,12 @@ def staleness_escalation_line(company, now=None):
     `all_runs`) — a scheduler dead for longer than the parse window must
     still report its true gap, not misclassify as "never ran"."""
     now = now or datetime.now()
-    project_dir = str(Path(company).resolve().parent)
+    # MUST-FIX 4: use the LOGICAL parent (os.path.dirname/abspath preserves the
+    # symlink) — _find_daily_cron_line normalizes BOTH forms on both sides, so
+    # a symlinked project dir no longer silently defeats the alarm. (The old
+    # `Path(company).resolve().parent` forced the physical form only, which
+    # never matched schedule.sh's logical `path=`.)
+    project_dir = os.path.dirname(os.path.abspath(company))
     line = _find_daily_cron_line(project_dir)
     if line is None:
         return ""
