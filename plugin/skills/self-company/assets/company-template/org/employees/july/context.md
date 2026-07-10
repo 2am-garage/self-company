@@ -3,7 +3,7 @@ name: July
 role: HR / People Lead
 manager: Phoebe                  # task dispatch / progress tracking (performance information reporting to Elon, not dispatch)
 people_lead: null
-model: sonnet
+model: sonnet                   # Phase 29 Item 1: analyst — alias resolves to the current DEFAULT (schedule_config.DEFAULT_AGENT_MODEL)
 memory: rag                    # Phase 18b: rag analyst — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   - org/employees/july/

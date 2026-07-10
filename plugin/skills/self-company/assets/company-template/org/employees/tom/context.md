@@ -3,7 +3,7 @@ name: Tom
 role: IT / Ops Engineer
 manager: Phoebe
 people_lead: July
-model: sonnet
+model: haiku                    # Phase 29 Item 1: executor — cheap+fast; unset/invalid -> DEFAULT
 memory: flat                   # Phase 18b: flat executor — keeps log.md; NO per-employee RAG recall/index
 reads:
   - org/                              # Company org state (not memory)

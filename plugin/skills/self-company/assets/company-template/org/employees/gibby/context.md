@@ -3,7 +3,7 @@ name: Gibby
 role: QA Engineer
 manager: Phoebe
 people_lead: July
-model: sonnet
+model: haiku                    # Phase 29 Item 1: executor — cheap+fast; unset/invalid -> DEFAULT
 memory: flat                   # Phase 18b: flat executor — keeps log.md + red/blue ledger; NO per-employee RAG recall/index
 reads:
   - org/employees/gibby/

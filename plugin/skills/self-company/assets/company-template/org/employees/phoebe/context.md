@@ -3,7 +3,7 @@ name: Phoebe
 role: PM (Product Manager)
 manager: Elon
 people_lead: null
-model: sonnet
+model: claude-sonnet-4-6         # Phase 29: Chairman-PINNED — do NOT bump to the sonnet alias/DEFAULT; Phoebe stays on this exact id until told otherwise
 memory: rag                    # Phase 18b: rag planner — per-employee capture -> index -> recall (recall injected at dispatch)
 reads:
   - org/employees/phoebe/                     # own desk (persona / context / scratchpad / log)
