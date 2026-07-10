@@ -49,17 +49,20 @@ import re
 import sys
 from collections import namedtuple
 
+# Phase 27 Item 1: read run boundaries + entropy/memories through the shared
+# reader instead of a private run-header/entropy-line regex; only the
+# duplicate-candidates prose (not part of daily_log's Run schema — it's
+# entropy.py's own scored-pairs detail) is still scanned from the run's raw
+# block text.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import daily_log  # noqa: E402
+
 Sub = namedtuple("Sub", ["path", "weight", "enabled"])
 
 RegistryScan = namedtuple(
     "RegistryScan", ["live", "dead", "disabled", "duplicates", "warnings"]
 )
 
-# One daily-run block header, e.g. "## Daily run 2026-07-05T14:30:01 (dry-run)".
-_RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
-# The deterministic-core entropy line daily-run.sh writes to the daily log:
-#   "- entropy 0.25 (dup 1.0 | contra 0.0 | stale 0.0 | unverified 0.0) over 4 memories"
-_ENTROPY_RE = re.compile(r"- entropy ([0-9.]+)\b.*?over (\d+) memories")
 # The duplicate-candidates line (only present when there ARE scored dup pairs):
 #   "  - duplicate candidates: [['a', 'b'], ['c', 'd']]"
 _DUPLINE_RE = re.compile(r"- duplicate candidates:\s*(\[.*\])\s*$")
@@ -202,54 +205,31 @@ def write_state(parent_dir, state):
 
 def read_sub_entropy(sub_path):
     """
-    Parse the sub's newest ops/logs/daily-*.md, return the LAST run block's
-    entropy + scored-dup backlog. This reads the sub's own OUTPUT artifact, not
-    its memory/ or personas/.
+    Read the sub's newest recorded run — entropy + memories via daily_log.py
+    (Item 1's shared reader), scored-dup backlog via the run's own raw block
+    text (a detail entropy.py prints that isn't part of the Run schema). This
+    reads the sub's own OUTPUT artifact, not its memory/ or personas/.
 
-    Returns {"entropy": float, "dup_backlog": int, "memories": int} or None if no
-    parseable entropy line is found.
+    Returns {"entropy": float, "dup_backlog": int, "memories": int} or None if
+    the sub has no run with a parseable entropy value.
     """
-    logdir = os.path.join(sub_path, ".company", "ops", "logs")
-    try:
-        logs = sorted(
-            f for f in os.listdir(logdir)
-            if f.startswith("daily-") and f.endswith(".md")
-        )
-    except OSError:
+    company = os.path.join(sub_path, ".company")
+    runs = [r for r in daily_log.read_runs(company, window_days=None)
+            if r.get("entropy") is not None]
+    if not runs:
         return None
-    if not logs:
-        return None
-    newest = os.path.join(logdir, logs[-1])
-    try:
-        with open(newest, "r", encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return None
-
-    # Walk to the LAST run block, then scan it for the entropy + dup lines.
-    starts = [i for i, ln in enumerate(lines) if _RUN_RE.match(ln)]
-    if not starts:
-        return None
-    block = lines[starts[-1]:]
-    entropy = None
-    memories = None
+    last = runs[-1]
     dup_backlog = 0
-    for ln in block:
-        em = _ENTROPY_RE.search(ln)
-        if em:
-            entropy = float(em.group(1))
-            memories = int(em.group(2))
-        dm = _DUPLINE_RE.search(ln)
-        if dm:
-            try:
-                import ast
-                pairs = ast.literal_eval(dm.group(1))
-                dup_backlog = len(pairs) if isinstance(pairs, list) else 0
-            except (ValueError, SyntaxError):
-                dup_backlog = 0
-    if entropy is None:
-        return None
-    return {"entropy": entropy, "dup_backlog": dup_backlog, "memories": memories}
+    dm = _DUPLINE_RE.search(last.get("md_block") or "")
+    if dm:
+        try:
+            import ast
+            pairs = ast.literal_eval(dm.group(1))
+            dup_backlog = len(pairs) if isinstance(pairs, list) else 0
+        except (ValueError, SyntaxError):
+            dup_backlog = 0
+    return {"entropy": last["entropy"], "dup_backlog": dup_backlog,
+            "memories": last["memories"]}
 
 
 # ---------------------------------------------------------------------------

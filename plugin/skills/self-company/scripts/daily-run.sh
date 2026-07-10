@@ -72,6 +72,20 @@ CORE_ABORT_MARKER="$COMPANY/ops/core-abort.marker"
 MIN_FREE_MB="${SELF_COMPANY_MIN_FREE_MB:-256}"
 DATE="$(date +%F)"
 LOG="$LOGDIR/daily-$DATE.md"
+# Phase 27 Item 1 (spine): the machine-readable per-run twin of $LOG. The .md
+# stays the human render (unchanged); the JSONL is the data interface every
+# consumer reads through daily_log.py — never a fifth private parser.
+JSONL="$LOGDIR/daily-$DATE.jsonl"
+MODE="manual"; (( IS_CRON )) && MODE="cron"
+# Item 4: generous core-step budget (a first-install fastembed model download
+# on a slow link can legitimately need most of this) — see the `timeout -k`
+# wraps on the deterministic core below.
+CORE_STEP_TIMEOUT="${SELF_COMPANY_CORE_STEP_TIMEOUT:-900}"
+CORE_STEP_KILL_GRACE=30
+# Item 3: skip-streak marker — daily-run.sh is its ONLY writer (the flock-skip
+# path increments it; any lock-ACQUIRED run resets it to 0). notify-status.py
+# only READS it to decide escalation.
+LOCK_SKIP_STREAK_MARKER="$COMPANY/ops/.lock-skip.streak"
 
 if [[ ! -d "$COMPANY" ]]; then
   echo "[daily-run] no .company at $COMPANY — nothing to do"
@@ -79,8 +93,40 @@ if [[ ! -d "$COMPANY" ]]; then
 fi
 mkdir -p "$LOGDIR"
 
+# Phase 27 Item 1: append one compact JSON event line to $JSONL. A single
+# os.write() to an O_APPEND fd is one write(2) syscall — POSIX guarantees no
+# interleaving across concurrent processes for writes under PIPE_BUF, so two
+# overlapping daily-run.sh invocations can never torn-write into each other's
+# event. Best-effort: python3/daily_log.py trouble never fails the run.
+_jsonl_append() {  # $1 = one compact JSON object (already assembled)
+  [[ -z "${1:-}" ]] && return 0
+  printf '%s' "$1" | python3 "$SCRIPTS/daily_log.py" append --path "$JSONL" >/dev/null 2>&1 || true
+}
+
+# Item 3: read/write the lock-skip streak. Corrupt/non-numeric -> treated as 0
+# (never crashes the run) — mirrors the fail-marker hardening (daily-run.sh:58).
+_lock_skip_streak_read() {
+  local c=0
+  if [[ -f "$LOCK_SKIP_STREAK_MARKER" ]]; then
+    c="$(tr -d '[:space:]' < "$LOCK_SKIP_STREAK_MARKER" 2>/dev/null)"
+    [[ "$c" =~ ^[0-9]+$ ]] || c=0
+  fi
+  echo "$c"
+}
+_lock_skip_streak_write() {  # $1 = new count
+  mkdir -p "$(dirname "$LOCK_SKIP_STREAK_MARKER")" 2>/dev/null || true
+  printf '%s\n' "$1" > "$LOCK_SKIP_STREAK_MARKER" 2>/dev/null || true
+}
+
 ts="$(date +%FT%T)"
 printf '\n## Daily run %s%s\n' "$ts" "$($DRY_RUN && echo ' (dry-run)')" >> "$LOG"
+_dry_flag=0; $DRY_RUN && _dry_flag=1
+_start_json="$(python3 -c "
+import json, sys
+print(json.dumps({'event': 'start', 'ts': sys.argv[1], 'mode': sys.argv[2],
+                   'dry_run': sys.argv[3] == '1', 'pid': int(sys.argv[4]), 'schema': 1}))
+" "$ts" "$MODE" "$_dry_flag" "$$" 2>/dev/null)"
+_jsonl_append "$_start_json"
 
 # TOM-PATH (Phase 22): the deterministic core is ALL `python3 …` calls, each ended
 # with `|| true` so a failing OPTIONAL step never aborts the cron. The cost of that
@@ -150,6 +196,19 @@ STALE_LOCK_SECS="${SELF_COMPANY_STALE_LOCK_SECS:-3600}"
 LOCK_HELD=0
 LOCKFILE="$COMPANY/ops/.daily.lock"
 LOCK_HOLDER_MARKER="$COMPANY/ops/.daily.lock.holder"
+# Phase 27 Item 1/3: the JSONL lock field for the FINAL end-event (a run that
+# proceeds sets this to "acquired" or "unserialized" below; the two early-exit
+# skip paths emit their OWN terminal end-event directly, since the core never
+# runs for them). Item 3's daily-run.sh:_jsonl_end_skip is the ONLY place a
+# skipped tick's end event is written.
+LOCK_STATUS=""
+_jsonl_end_skip() {  # $1 = lock value: "skipped" | "stale-holder" | "wait-timeout"
+  local end_ts streak
+  end_ts="$(date +%FT%T)"
+  streak="$(_lock_skip_streak_read)"
+  printf '{"event":"end","ts":"%s","start_ts":"%s","schema":1,"lock":"%s","lock_skip_streak":%s,"core_aborted":false,"abort_reason":null,"steps":{},"agent":null,"dry_run":false}' \
+    "$end_ts" "$ts" "$1" "$streak" | python3 "$SCRIPTS/daily_log.py" append --path "$JSONL" >/dev/null 2>&1 || true
+}
 if ! $DRY_RUN; then
   if command -v flock >/dev/null 2>&1 && [[ "${SELF_COMPANY_NO_FLOCK:-}" != "1" ]]; then
     mkdir -p "$COMPANY/ops" 2>/dev/null || true
@@ -184,8 +243,12 @@ if ! $DRY_RUN; then
           fi
           if [[ -n "$_holder_age" ]] && (( _holder_age > STALE_LOCK_SECS )); then
             echo "- LOCK STALE: .company/ops/.daily.lock has been held ${_holder_age}s (> ${STALE_LOCK_SECS}s) by a run started $_holder_started — NOT auto-broken; investigate a wedged/orphaned run (this tick SKIPPED)" >> "$LOG"
+            _lock_skip_streak_write "$(( $(_lock_skip_streak_read) + 1 ))"
+            _jsonl_end_skip "stale-holder"
           else
             echo "- lock: another daily-run holds .company/ops/.daily.lock — cron tick SKIPPED (no pile-up); the in-flight run applies this maintenance" >> "$LOG"
+            _lock_skip_streak_write "$(( $(_lock_skip_streak_read) + 1 ))"
+            _jsonl_end_skip "skipped"
           fi
           echo "[daily-run] skipped ($DATE) — mutating core locked by a concurrent run"
           exit 0
@@ -195,10 +258,13 @@ if ! $DRY_RUN; then
           LOCK_HELD=1
         else
           echo "[daily-run] ERROR: could not acquire .company/ops/.daily.lock within ${MANUAL_LOCK_WAIT}s (another run is in progress) — manual run aborted; see ops/logs for the in-flight run, or raise SELF_COMPANY_MANUAL_LOCK_WAIT" >&2
+          _jsonl_end_skip "wait-timeout"
           exit 1
         fi
       fi
       if (( LOCK_HELD )); then
+        LOCK_STATUS="acquired"
+        _lock_skip_streak_write 0   # Item 3: any lock-ACQUIRED run resets the streak
         # Item 4.3: stamp the holder marker (pid + start time) the MOMENT we
         # acquire — this is what a later contended cron tick reads to judge
         # staleness. Best-effort; marker trouble never fails the run.
@@ -207,6 +273,7 @@ if ! $DRY_RUN; then
       fi
     fi
   else
+    LOCK_STATUS="unserialized"
     echo "- lock: flock unavailable — mutating core runs UNSERIALIZED (concurrent runs could race .company/memory); install util-linux to enable mutual exclusion" >> "$LOG"
   fi
 fi
@@ -362,7 +429,15 @@ fi
 # which can miss under cron. Venv absent => one-line skip (logged below), NEVER a
 # failure. Threshold: the script's own conservative default — never lowered here.
 RAG_PY="$COMPANY/.rag-venv/bin/python"
-REINF_STATE="missing"   # missing | novenv | ran | gated | aborted — drives the reinforce log line
+# Item 4: each bare core-step invocation below is wrapped in
+# `timeout -k $CORE_STEP_KILL_GRACE $CORE_STEP_TIMEOUT` INSIDE `_run` (so the
+# lock-fd close still applies to whatever `timeout` execs, per Elon's note) —
+# a black-holed model download can no longer hold .daily.lock for hours. rc
+# 124 (SIGTERM at budget) / 137 (the `-k` grace SIGKILLed a holdout) both
+# classify the step "timeout": a distinct .md line + JSONL outcome, never
+# conflated with a generic error or silently absent. Downstream steps still
+# run (Elon's note: a step timeout does NOT abort the remaining core).
+REINF_STATE="missing"   # missing | novenv | ran | gated | aborted | timeout — drives the reinforce log line
 if (( CORE_ABORT )); then
   REINF_STATE="aborted"
 elif (( ! _run_reinforce )); then
@@ -371,9 +446,15 @@ elif [[ -f "$SCRIPTS/reinforce_memory.py" ]]; then
   if [[ -x "$RAG_PY" ]]; then
     reinf_args=(--memory-dir "$MEM")
     $DRY_RUN || reinf_args+=(--apply)
-    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/reinforce_memory.py" "${reinf_args[@]}" \
-      >"$ROUT" 2>>"$SERR" || true    # nonzero rc must not abort the core
-    REINF_STATE="ran"
+    _run timeout -k "$CORE_STEP_KILL_GRACE" "$CORE_STEP_TIMEOUT" \
+      env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/reinforce_memory.py" "${reinf_args[@]}" \
+      >"$ROUT" 2>>"$SERR"
+    _reinf_rc=$?    # nonzero rc must not abort the core
+    if (( _reinf_rc == 124 || _reinf_rc == 137 )); then
+      REINF_STATE="timeout"
+    else
+      REINF_STATE="ran"
+    fi
   else
     REINF_STATE="novenv"
   fi
@@ -382,7 +463,7 @@ fi
 # Phase 25 Item 1: DECAY_STATE/VERIFY_STATE mirror REINF_STATE's shape so a
 # CORE_ABORT (safety-floor failure) skips the mutating passes the SAME way a
 # schedule-gate skip does — just with a distinct, loud log line (below).
-DECAY_STATE="missing"   # missing | gated | aborted | ran
+DECAY_STATE="missing"   # missing | gated | aborted | ran | timeout
 if (( CORE_ABORT )); then
   DECAY_STATE="aborted"
 elif (( ! _run_decay )); then
@@ -390,13 +471,19 @@ elif (( ! _run_decay )); then
 elif [[ -f "$SCRIPTS/decay.py" ]]; then
   decay_args=(--memory-dir "$MEM" --config "$POLICY")
   $DRY_RUN || decay_args+=(--apply)
-  _run python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>>"$SERR" || true
-  DECAY_STATE="ran"
+  _run timeout -k "$CORE_STEP_KILL_GRACE" "$CORE_STEP_TIMEOUT" \
+    python3 "$SCRIPTS/decay.py" "${decay_args[@]}" >"$DOUT" 2>>"$SERR"
+  _decay_rc=$?
+  if (( _decay_rc == 124 || _decay_rc == 137 )); then
+    DECAY_STATE="timeout"
+  else
+    DECAY_STATE="ran"
+  fi
 fi
 # VERIFY: stamp verified_date on memories whose [session#line] sources trace to a
 # real transcript line (deterministic provenance gate). Before entropy so the KPI
 # reflects the new stamps this round.
-VERIFY_STATE="missing"   # missing | gated | aborted | ran
+VERIFY_STATE="missing"   # missing | gated | aborted | ran | timeout
 if (( CORE_ABORT )); then
   VERIFY_STATE="aborted"
 elif (( ! _run_verify )); then
@@ -404,9 +491,16 @@ elif (( ! _run_verify )); then
 elif [[ -f "$SCRIPTS/verify_memory.py" ]]; then
   verify_args=(--memory-dir "$MEM" --transcripts-dir "$HOME/.claude/projects")
   $DRY_RUN || verify_args+=(--apply)
-  _run python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>>"$SERR" || true
-  VERIFY_STATE="ran"
+  _run timeout -k "$CORE_STEP_KILL_GRACE" "$CORE_STEP_TIMEOUT" \
+    python3 "$SCRIPTS/verify_memory.py" "${verify_args[@]}" >"$VOUT" 2>>"$SERR"
+  _verify_rc=$?
+  if (( _verify_rc == 124 || _verify_rc == 137 )); then
+    VERIFY_STATE="timeout"
+  else
+    VERIFY_STATE="ran"
+  fi
 fi
+ENTROPY_TIMEDOUT=0
 if (( _run_entropy )) && [[ -f "$SCRIPTS/entropy.py" ]]; then
   # P13A-1: entropy MUST always produce its line — it degrades to a Jaccard-only
   # pass in base python when the RAG stack is unavailable. Invoke it the SAME way
@@ -425,7 +519,10 @@ if (( _run_entropy )) && [[ -f "$SCRIPTS/entropy.py" ]]; then
   # (SC_RAG_REEXEC=1, Jaccard) pass. A HEALTHY venv (valid JSON) is kept as-is —
   # no downgrade, no double-run.
   if [[ -x "$RAG_PY" ]]; then
-    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR" || true
+    _run timeout -k "$CORE_STEP_KILL_GRACE" "$CORE_STEP_TIMEOUT" \
+      env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/entropy.py" --memory-dir "$MEM" --config "$POLICY" >"$EOUT" 2>>"$SERR"
+    _ent_rc=$?
+    (( _ent_rc == 124 || _ent_rc == 137 )) && ENTROPY_TIMEDOUT=1
   fi
   if ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, dict) and "entropy" in d else 1)' "$EOUT" 2>/dev/null; then
     : > "$EOUT"   # drop the venv attempt's absent/garbage stdout, then degrade cleanly
@@ -435,13 +532,16 @@ fi
 
 DRY_FLAG="$($DRY_RUN && echo 1 || echo 0)"
 python3 - "$DOUT" "$EOUT" "$VOUT" "$LOG" "$DRY_FLAG" "$ROUT" "$REINF_STATE" \
-    "$DECAY_STATE" "$VERIFY_STATE" "$_run_entropy" <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
+    "$DECAY_STATE" "$VERIFY_STATE" "$_run_entropy" "$CORE_STEP_TIMEOUT" "$ENTROPY_TIMEDOUT" \
+    <<'PY' || echo "- deterministic core: log-parse error" >> "$LOG"
 import sys, json
 dpath, epath, vpath, log, dry = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"
 rpath, rstate = sys.argv[6], sys.argv[7]
-dstate = sys.argv[8]     # missing | gated | aborted | ran
-vstate = sys.argv[9]     # missing | gated | aborted | ran
+dstate = sys.argv[8]     # missing | gated | aborted | ran | timeout
+vstate = sys.argv[9]     # missing | gated | aborted | ran | timeout
 eskip = sys.argv[10] == "0"
+step_timeout = sys.argv[11]
+entropy_timedout = sys.argv[12] == "1"
 
 def load(p):
     try:
@@ -459,6 +559,10 @@ elif rstate == "novenv":
     lines.append("- reinforce: skipped — RAG venv absent (.company/.rag-venv) — decay/verify/entropy unaffected")
 elif rstate == "missing":
     lines.append("- reinforce: skipped — reinforce_memory.py not found beside decay.py")
+elif rstate == "timeout":
+    # Item 4: a distinct, never-silent line — report.py/notify-status.py must
+    # never conflate this with a generic error or an absent step.
+    lines.append(f"- reinforce: TIMED OUT after {step_timeout}s — step skipped this tick, will retry next run")
 else:
     r = load(rpath)
     if r and r.get("error"):
@@ -477,6 +581,8 @@ if dstate == "aborted":
     lines.append("- decay: skipped — CORE ABORTED (safety floor failed; see above)")
 elif dstate == "gated":
     lines.append("- decay: skipped — schedule.yaml gated off tony.decay for this tick")
+elif dstate == "timeout":
+    lines.append(f"- decay: TIMED OUT after {step_timeout}s — step skipped this tick, will retry next run")
 elif d:
     a = d["actions"]
     lines.append(
@@ -509,6 +615,8 @@ if vstate == "aborted":
     lines.append("- verify: skipped — CORE ABORTED (safety floor failed; see above)")
 elif vstate == "gated":
     lines.append("- verify: skipped — schedule.yaml gated off gibby.verify for this tick")
+elif vstate == "timeout":
+    lines.append(f"- verify: TIMED OUT after {step_timeout}s — step skipped this tick, will retry next run")
 elif v:
     lines.append(
         f"- verify{'' if dry else ' --apply'}: newly-verified {len(v['verified'])} | "
@@ -539,6 +647,15 @@ elif e:
         lines.append(f"  - contradiction candidates: {det['contradiction_pairs']}")
     if det["duplicate_pairs"]:
         lines.append(f"  - duplicate candidates: {det['duplicate_pairs']}")
+    # Item 4: the venv (embedding) attempt timed out but the base-python
+    # Jaccard-only retry still produced a valid line — note it, never mask it.
+    if entropy_timedout:
+        lines.append(f"  - NOTE: venv embedding pass TIMED OUT after {step_timeout}s — degraded to base-python Jaccard for this tick")
+elif entropy_timedout:
+    # Item 4: both the venv attempt AND the base-python retry failed to leave
+    # valid JSON, and the venv attempt specifically timed out — say so
+    # distinctly instead of the generic "errored" line (never silently absent).
+    lines.append(f"- entropy: TIMED OUT after {step_timeout}s (embedding pass) — no output this tick; core unaffected")
 else:
     # P13A-2 belt-and-suspenders: even if BOTH the venv attempt and the base-python
     # retry failed to leave valid entropy JSON, entropy is NEVER silently absent —
@@ -561,7 +678,7 @@ PY
 # counts active L1+L2 and, when that crosses RAG_ENABLE_THRESHOLD while the venv
 # is NOT installed, surfaces an "activate RAG" upgrade candidate (replaces the
 # aspirational weekly-Tony prose in references/rag.md §4).
-RAGIDX_STATE="missing"   # missing | gated | novenv | ran
+RAGIDX_STATE="missing"   # missing | gated | novenv | ran | timeout
 RAG_OVER=1               # 1 = under threshold (default); 0 = at/over (deps-free check)
 if (( ! _run_rag_index )); then
   RAGIDX_STATE="gated"
@@ -573,11 +690,17 @@ elif [[ -f "$SCRIPTS/rag_index.py" ]]; then
       --memory-dir "$MEM" >/dev/null 2>>"$SERR"
     RAG_OVER=$?
   fi
-  # A.1 — incremental index refresh (needs the RAG venv).
+  # A.1 — incremental index refresh (needs the RAG venv). Item 4: timeout-wrapped.
   if [[ -x "$RAG_PY" ]]; then
-    _run env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
-      --memory-dir "$MEM" --index-dir "$MEM/index" >"$IOUT" 2>>"$SERR" || true
-    RAGIDX_STATE="ran"
+    _run timeout -k "$CORE_STEP_KILL_GRACE" "$CORE_STEP_TIMEOUT" \
+      env SC_RAG_REEXEC=1 "$RAG_PY" "$SCRIPTS/rag_index.py" \
+      --memory-dir "$MEM" --index-dir "$MEM/index" >"$IOUT" 2>>"$SERR"
+    _ragidx_rc=$?
+    if (( _ragidx_rc == 124 || _ragidx_rc == 137 )); then
+      RAGIDX_STATE="timeout"
+    else
+      RAGIDX_STATE="ran"
+    fi
   else
     RAGIDX_STATE="novenv"
   fi
@@ -590,6 +713,8 @@ case "$RAGIDX_STATE" in
     echo "- rag-index: skipped — RAG venv absent (.company/.rag-venv) — index refresh deferred; decay/verify/entropy/capture unaffected" >> "$LOG" ;;
   missing)
     echo "- rag-index: skipped — rag_index.py not found beside decay.py" >> "$LOG" ;;
+  timeout)
+    echo "- rag-index: TIMED OUT after ${CORE_STEP_TIMEOUT}s — step skipped this tick, will retry next run" >> "$LOG" ;;
   ran)
     python3 - "$IOUT" >> "$LOG" <<'PY' || echo "- rag-index: ran (log-parse error) — core unaffected" >> "$LOG"
 import sys, json
@@ -843,9 +968,18 @@ _auth_logged_in() {                         # echo: yes | no | unknown
 # is not in the deterministic reinforce/decay/verify sequence. A CORE_ABORT
 # (safety floor failed) skips it too — no point spending tokens attempting
 # merges while corpus write-safety for this tick is unconfirmed.
+# Phase 27 Item 1: the agent block's JSONL outcome — "" (null) means the
+# agent step was never part of this run at all (--no-agent/--dry-run).
+AGENT_OUTCOME=""
+AGENT_RC=""
+AGENT_RUNS_TODAY=""
+AGENT_CAP=""
+AGENT_FAIL_STREAK=""
+
 if (( CORE_ABORT )) && $RUN_AGENT; then
   echo "- agent: skipped — CORE ABORTED (safety floor failed; no token spend while corpus write-safety is unconfirmed)" >> "$LOG"
   RUN_AGENT=false
+  AGENT_OUTCOME="skipped:core-abort"
 fi
 
 # Phase 12: the agent step is owned by Tony; a company may gate it off (or set its
@@ -853,6 +987,7 @@ fi
 if $RUN_AGENT && ! _should_run agent; then
   echo "- agent: skipped — schedule.yaml gated off tony.agent for this tick" >> "$LOG"
   RUN_AGENT=false
+  AGENT_OUTCOME="skipped:gated"
 fi
 
 # --- 3. optional headless agent (CONSOLIDATE / VERIFY judgment) -------------
@@ -878,6 +1013,7 @@ except Exception:
   # CLAUDE_BIN resolved above (C2), before _auth_logged_in()'s definition.
   if (( RUNS >= CAP )); then
     echo "- agent: skipped — daily agent-run cap reached ($RUNS/$CAP, token breaker)" >> "$LOG"
+    AGENT_OUTCOME="skipped:cap"; AGENT_RUNS_TODAY="$RUNS"; AGENT_CAP="$CAP"
   elif [[ -n "$CLAUDE_BIN" ]]; then
     # B3 (Item 4) AUTH PRE-FLIGHT: probe login BEFORE spawning the token-spending
     # agent. Not-logged-in => skip the agent, record a distinct AUTH_FAIL signal,
@@ -888,6 +1024,7 @@ except Exception:
       fc="$(_read_fail_count)"; fc=$((fc + 1))
       _write_fail_marker "$fc" auth
       echo "- agent: skipped — auth pre-flight: NOT logged in (AUTH_FAIL x$fc) — run /login; deterministic maintenance applied" >> "$LOG"
+      AGENT_OUTCOME="auth-fail"; AGENT_FAIL_STREAK="$fc"
     else
     AGENT_LOG="$LOGDIR/agent-$DATE.log"
     # B3 (Phase 5 Item 3): resolve the agent's REAL time budget up front so it
@@ -1102,9 +1239,11 @@ EOF
     fi
     rm -f "$_stage_file"
     echo "$((RUNS + 1))" > "$COUNTER"   # B1: count the run (it spent tokens) toward the cap
+    AGENT_RC="$rc"; AGENT_RUNS_TODAY="$((RUNS + 1))"; AGENT_CAP="$CAP"
     if (( rc == 0 )); then
       rm -f "$FAIL_MARKER"   # B3: success => auth healthy + streak recovered, reset
       echo "- agent (consolidate/verify): ok [run $((RUNS + 1))/$CAP; stdout in agent-$DATE.log]" >> "$LOG"
+      AGENT_OUTCOME="ok"
     elif (( rc == 124 || rc == 137 )); then
       # B3: explicit, machine-readable timeout trail — both in the audit log
       # (below the partial stream) and in the daily log (report.py keys on
@@ -1116,16 +1255,136 @@ EOF
       fc="$(_read_fail_count)"; fc=$((fc + 1))
       _write_fail_marker "$fc" agent
       echo "- agent: TIMEOUT after ${AGENT_TIMEOUT}s (rc $rc) [run $((RUNS + 1))/$CAP; streak $fc] — partial output in agent-$DATE.log; deterministic maintenance still applied" >> "$LOG"
+      AGENT_OUTCOME="timeout"; AGENT_FAIL_STREAK="$fc"
     else
       fc="$(_read_fail_count)"; fc=$((fc + 1))   # B3: an agent failure also grows the streak
       _write_fail_marker "$fc" agent
       echo "- agent: failed (rc $rc) [run $((RUNS + 1))/$CAP; streak $fc] — deterministic maintenance still applied" >> "$LOG"
+      AGENT_OUTCOME="failed"; AGENT_FAIL_STREAK="$fc"
     fi
     fi
   else
     echo "- agent: claude CLI not found — skipped (deterministic maintenance applied)" >> "$LOG"
+    AGENT_OUTCOME="skipped:no-cli"
   fi
 fi
+
+# --- Phase 27 Item 1: the JSONL end event — the ONE place this run's full
+# structured summary is assembled and appended (single write, see
+# daily_log.append_event). Read the still-on-disk temp JSONs ($DOUT/$EOUT/
+# $VOUT/$IOUT — the EXIT trap reaps them after this) directly: safer than
+# re-parsing the prose we just rendered above. Best-effort: any trouble here
+# never fails an already-completed run.
+_core_abort_reason_file="$(mktemp)"
+printf '%s' "$CORE_ABORT_REASON" > "$_core_abort_reason_file" 2>/dev/null || true
+_end_ts="$(date +%FT%T)"
+python3 - "$SCRIPTS" "$JSONL" "$DOUT" "$EOUT" "$VOUT" "$IOUT" "$ROUT" \
+  "$_end_ts" "$ts" "$LOCK_STATUS" "$(_lock_skip_streak_read)" \
+  "$CORE_ABORT" "$_core_abort_reason_file" "$_dry_flag" \
+  "$REINF_STATE" "$DECAY_STATE" "$VERIFY_STATE" "$RAGIDX_STATE" \
+  "$_run_entropy" "$ENTROPY_TIMEDOUT" "$AGENT_OUTCOME" "$AGENT_RC" "$AGENT_RUNS_TODAY" "$AGENT_CAP" "$AGENT_FAIL_STREAK" \
+  <<'PY' 2>/dev/null || true
+import json, sys
+
+(scripts_dir, jsonl_path, dpath, epath, vpath, ipath, rpath,
+ end_ts, start_ts, lock_status, lock_skip_streak,
+ core_abort, abort_reason_file, dry_flag,
+ rstate, dstate, vstate, ragstate,
+ entropy_ran, entropy_timedout, agent_outcome, agent_rc, agent_runs_today, agent_cap, agent_fail_streak) = sys.argv[1:26]
+
+sys.path.insert(0, scripts_dir)
+import daily_log
+
+
+def load(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return None
+
+
+def opt_int(s):
+    return int(s) if s not in (None, "") else None
+
+
+abort_reason = None
+try:
+    with open(abort_reason_file, encoding="utf-8") as f:
+        txt = f.read()
+    abort_reason = txt if txt else None
+except OSError:
+    pass
+
+steps = {}
+
+r = load(rpath)
+steps["reinforce"] = {
+    "outcome": daily_log._normalize_step_outcome(rstate),
+    "warnings": 0, "warning_samples": [],
+}
+if rstate == "ran" and isinstance(r, dict) and r.get("error"):
+    steps["reinforce"]["outcome"] = "error"
+
+d = load(dpath) if dstate == "ran" else None
+dwarn = (d.get("warnings") or []) if isinstance(d, dict) else []
+steps["decay"] = {
+    "outcome": daily_log._normalize_step_outcome(dstate),
+    "warnings": len(dwarn), "warning_samples": [str(w) for w in dwarn[:5]],
+}
+if isinstance(d, dict) and "actions" in d:
+    a = d["actions"]
+    steps["decay"]["drop"] = len(a.get("drop") or [])
+    steps["decay"]["demote"] = len(a.get("demote") or [])
+    steps["decay"]["archive"] = len(a.get("archive") or [])
+    steps["decay"]["upgrade"] = len(a.get("upgrade_candidates") or [])
+
+v = load(vpath) if vstate == "ran" else None
+vwarn = (v.get("warnings") or []) if isinstance(v, dict) else []
+steps["verify"] = {
+    "outcome": daily_log._normalize_step_outcome(vstate),
+    "warnings": len(vwarn), "warning_samples": [str(w) for w in vwarn[:5]],
+}
+if isinstance(v, dict):
+    steps["verify"]["verified"] = len(v.get("verified") or [])
+    steps["verify"]["unverifiable"] = len(v.get("unverifiable") or [])
+
+e = load(epath)
+if entropy_ran == "0":
+    ent_outcome = "skipped:gated"
+elif isinstance(e, dict):
+    ent_outcome = "ok"
+elif entropy_timedout == "1":
+    ent_outcome = "timeout"
+else:
+    ent_outcome = "error"
+steps["entropy"] = {"outcome": ent_outcome, "warnings": 0, "warning_samples": []}
+if isinstance(e, dict):
+    steps["entropy"]["value"] = e.get("entropy")
+    steps["entropy"]["dims"] = e.get("dimensions")
+    steps["entropy"]["memories"] = e.get("total_memories")
+
+steps["rag_index"] = {"outcome": daily_log._normalize_step_outcome(ragstate),
+                       "warnings": 0, "warning_samples": []}
+
+agent = None
+if agent_outcome:
+    agent = {"outcome": agent_outcome, "rc": opt_int(agent_rc),
+              "runs_today": opt_int(agent_runs_today), "cap": opt_int(agent_cap),
+              "fail_streak": opt_int(agent_fail_streak)}
+
+event = {
+    "event": "end", "ts": end_ts, "start_ts": start_ts, "schema": 1,
+    "lock": lock_status or None,
+    "lock_skip_streak": opt_int(lock_skip_streak),
+    "core_aborted": core_abort == "1",
+    "abort_reason": abort_reason,
+    "steps": steps,
+    "agent": agent,
+    "dry_run": dry_flag == "1",
+}
+daily_log.append_event(jsonl_path, event)
+PY
+rm -f "$_core_abort_reason_file"
 
 echo "[daily-run] done ($DATE) — see $LOG"
 exit 0

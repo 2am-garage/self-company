@@ -32,9 +32,13 @@ import json
 import os
 import re
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
+
+# Phase 27 Item 1: the ONE shared reader — no more private run-header regex /
+# mtime in-flight heuristic here; daily_log.py owns both, once, for every consumer.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import daily_log  # noqa: E402
 
 MARKER = "ops/.last_notified"          # stores ISO timestamp of last notification
 SHOWN_MARKER = "ops/.last_shown"       # P1: last time Elon surfaced a delta in-session
@@ -43,33 +47,6 @@ FAIL_MARKER = "ops/auth-fail.marker"   # B3 (Item 4): consecutive agent/auth fai
 # escalation, distinct from the routine ledger. NEW constant, default 2; env
 # override for tests. daily-run.sh writes the streak into FAIL_MARKER; we only READ.
 FAIL_STREAK_ESCALATE = int(os.environ.get("SELF_COMPANY_FAIL_STREAK_ESCALATE", "2"))
-# C2: a run whose agent-<date>.log was written within this many seconds is IN-FLIGHT
-# (the agent is still streaming) — kept in lockstep with report.py. Env-overridable.
-INFLIGHT_WINDOW = int(os.environ.get("SELF_COMPANY_INFLIGHT_WINDOW", "300"))
-RUN_RE = re.compile(r"^## Daily run (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(.*)$")
-
-
-def _agent_log_fresh(company, ts, now=None):
-    """C2: True if ops/logs/agent-<run-date>.log was modified within INFLIGHT_WINDOW.
-    Mirrors report.py::_agent_log_fresh (the copy keeps notify standalone-stdlib)."""
-    p = Path(company) / "ops" / "logs" / f"agent-{ts.strftime('%Y-%m-%d')}.log"
-    try:
-        mtime = p.stat().st_mtime
-    except OSError:
-        return False
-    now = time.time() if now is None else now
-    return (now - mtime) <= INFLIGHT_WINDOW
-
-
-def _mark_inflight(company, blocks):
-    """C2 (REPORT/TOM-5): the MOST-RECENT block only — a prompt-built-but-no-outcome
-    silent death that is still in-flight (fresh agent log) is `running`, not a false
-    `failed`. Applied to the GLOBAL latest block before any `since` filter."""
-    if not blocks:
-        return
-    last = blocks[-1]
-    if last.get("_silent_death") and _agent_log_fresh(company, last["ts"]):
-        last["agent"] = "running"
 
 
 def _parse_ts(s):
@@ -123,16 +100,16 @@ def escalation_line(company):
 
 
 def _classify_agent_line(ln):
-    """B3: classify one daily-log agent line into report.py's outcome classes.
+    """Classify one daily-log agent line into report.py's outcome classes.
 
-    MUST stay in lockstep with report.py::collect (a parity test in
-    tests/test_notify.py locks the two against drift; the copy exists so this
-    script stays standalone-stdlib even if report.py is absent). Returns one of
-    "prompt" (breadcrumb, not an outcome), "auth-fail", "timeout", "ok",
-    "skipped" (benign: cap reached / no CLI), "failed", or None when the line
-    is not an agent WRITER line at all — a CAPTURE entry for a memory slug
-    starting with "agent" ("- agent-model-… (L0) — pending_verify") is data,
-    never an outcome.
+    Kept as a small standalone pure function (no longer used by collect_runs,
+    which now reads through daily_log.py) purely so a bare agent-line shape
+    can still be sanity-checked in isolation. Returns one of "prompt"
+    (breadcrumb, not an outcome), "auth-fail", "timeout", "ok", "skipped"
+    (benign: cap reached / no CLI), "failed", or None when the line is not an
+    agent WRITER line at all — a CAPTURE entry for a memory slug starting
+    with "agent" ("- agent-model-… (L0) — pending_verify") is data, never an
+    outcome.
     """
     if not ln.startswith(("- agent:", "- agent (", "- agent prompt")):
         return None
@@ -149,75 +126,13 @@ def _classify_agent_line(ln):
     return "failed"
 
 
-def collect_runs(company, since):
-    """Return real (non-dry-run) daily-run blocks newer than `since`, parsed.
-
-    C2: ALL blocks are parsed first so the GLOBAL latest block can be
-    reclassified in-flight (running) before the `since` filter is applied — a
-    still-streaming latest run must never be summarized as a dead agent, even when
-    `since` would otherwise clip it in."""
-    logs = sorted((Path(company) / "ops" / "logs").glob("daily-*.md"))
-    runs = []
-    for f in logs:
-        try:
-            lines = f.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        i = 0
-        while i < len(lines):
-            m = RUN_RE.match(lines[i])
-            if not m:
-                i += 1
-                continue
-            ts, tail = _parse_ts(m.group(1)), m.group(2)
-            i += 1
-            if ts is None or "dry-run" in tail:
-                continue
-            block = {"ts": ts, "drop": 0, "memories": None, "entropy": None, "agent": None,
-                     # Phase 25 Item 1/3/4.3: safety-floor signals, computed
-                     # every run and previously invisible outside the log.
-                     "warnings": 0, "core_aborted": False, "abort_reason": None,
-                     "lock_stale": False}
-            # Extend the block until the NEXT "## Daily run" — not any "## " — so the
-            # agent's own "## Consolidation pass" sub-heading and the trailing
-            # "- agent ... ok" line stay inside this run's block.
-            while i < len(lines) and not RUN_RE.match(lines[i]):
-                ln = lines[i]
-                dm = re.search(r"drop (\d+).*upgrade-candidates", ln)
-                if dm:
-                    block["drop"] = int(dm.group(1))
-                em = re.search(r"entropy ([0-9.]+).*over (\d+) memories", ln)
-                if em:
-                    block["entropy"] = float(em.group(1))
-                    block["memories"] = int(em.group(2))
-                wm = re.match(r"^- warnings: (\d+)", ln)
-                if wm:
-                    block["warnings"] += int(wm.group(1))
-                if ln.startswith("- CORE ABORTED:"):
-                    block["core_aborted"] = True
-                    block["abort_reason"] = ln[len("- CORE ABORTED:"):].strip()
-                if ln.startswith("- LOCK STALE:"):
-                    block["lock_stale"] = True
-                # B3 (Item 3): honest outcome classes, aligned with report.py —
-                # the old `" ok" in ln` substring test rendered failed/timeout/
-                # AUTH_FAIL runs as benign "skipped" in the catch-up summary.
-                cls = _classify_agent_line(ln)
-                if cls == "prompt":
-                    block["_agent_attempted"] = True
-                elif cls is not None:
-                    block["agent"] = cls
-                i += 1
-            # prompt built but NO outcome line: the run died before recording
-            # one (silent death) — honest classification: failed (C2 may later
-            # reclassify the GLOBAL latest such block to `running` if in-flight).
-            if block.pop("_agent_attempted", False) and block["agent"] is None:
-                block["agent"] = "failed"
-                block["_silent_death"] = True
-            runs.append(block)                      # collect ALL, filter after in-flight mark
-    runs.sort(key=lambda b: b["ts"])
-    _mark_inflight(company, runs)                   # C2: latest silent-death + fresh log -> running
+def collect_runs(company, since, window_days=30):
+    """Real (non-dry-run) daily-runs newer than `since`, read through
+    daily_log.py (Phase 27 Item 1's shared reader — no private run-header regex, no
+    mtime-probing in-flight heuristic here anymore)."""
+    runs = daily_log.read_runs(company, window_days=window_days)
     if since is not None:
-        runs = [b for b in runs if b["ts"] > since]
+        runs = [r for r in runs if r["ts"] > since]
     return runs
 
 
