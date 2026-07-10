@@ -10,6 +10,7 @@ hermetic and token-free).
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1400,6 +1401,122 @@ class TestSkeletonGuard(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             r = _bash([self.SH, d], env={"SELF_COMPANY_ALLOW_SKELETON": "1"})
             self.assertEqual(r.returncode, 0)
+
+
+def _counting_python3(d, real_python, counter_path):
+    """Plant a fake `python3` that appends one char to counter_path for every
+    invocation whose argv mentions schedule_config.py, then execs the REAL
+    interpreter (by absolute path, captured BEFORE this fakebin dir is
+    prepended to PATH) so daily-run.sh's actual python calls still work."""
+    bindir = os.path.join(d, "fakepybin")
+    os.makedirs(bindir, exist_ok=True)
+    path = os.path.join(bindir, "python3")
+    with open(path, "w") as f:
+        f.write(
+            '#!/usr/bin/env bash\n'
+            'case "$*" in\n'
+            f'  *schedule_config.py*) printf x >> "{counter_path}" ;;\n'
+            'esac\n'
+            f'exec "{real_python}" "$@"\n'
+        )
+    os.chmod(path, 0o755)
+    return bindir
+
+
+class TestPlanTickSpawnCount(unittest.TestCase):
+    """Phase 28 Item 3: daily-run.sh sources ONE schedule_config.py --plan-tick
+    call (plus the pre-existing, unrelated --roster call) instead of spawning
+    schedule_config.py per gate/knob question."""
+
+    def _run_counted(self, d, company, write_yaml=True):
+        org = os.path.join(company, "org")
+        os.makedirs(org, exist_ok=True)
+        yaml_path = os.path.join(org, "schedule.yaml")
+        if write_yaml:
+            with open(yaml_path, "w") as f:
+                f.write("cadence: every 6h\n")
+        elif os.path.exists(yaml_path):
+            # init_company.sh ships an all-comments schedule.yaml template
+            # (schedule_config.py itself treats that as absent-equivalent, but
+            # the FILE existing is what today's `_should_run` guard — and this
+            # phase's plan-tick guard — actually checks). Remove it so this
+            # case is genuinely no-file, not just no-content.
+            os.remove(yaml_path)
+        _write_mem(company, "obs-a", last_reinforced=_today())
+        counter = os.path.join(d, "sc_calls.txt")
+        open(counter, "w").close()
+        bindir = _counting_python3(d, sys.executable, counter)
+        env = {"PATH": bindir + os.pathsep + os.environ["PATH"]}
+        r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"], env=env)
+        with open(counter) as f:
+            calls = f.read()
+        return r, calls
+
+    def test_tick_with_yaml_spawns_at_most_twice(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            r, calls = self._run_counted(d, company, write_yaml=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # ONE --plan-tick call + the pre-existing, unrelated --roster call
+            # (Item 3 explicitly leaves --roster alone: "renders a file, not a
+            # gate"). Net: ~14 -> 2.
+            self.assertLessEqual(len(calls), 2, calls)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+    def test_no_yaml_only_the_roster_spawn_remains(self):
+        # Item 3 acceptance (c): "no schedule.yaml -> zero [gating] spawns" —
+        # the ~13 --should-run/--agent spawns collapse to zero; the ONE
+        # unrelated --roster call (never gated on schedule.yaml, renders
+        # today's defaults either way) is untouched by this item.
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            r, calls = self._run_counted(d, company, write_yaml=False)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(len(calls), 1, calls)
+        finally:
+            subprocess.run(["rm", "-rf", d])
+
+
+class TestPlanTickFailOpen(unittest.TestCase):
+    """Phase 28 Item 3 acceptance (d): a --plan-tick call that crashes or
+    returns garbage must fail OPEN — every step still runs, byte-identical to
+    today's per-call fail-open — never silently suppress maintenance."""
+
+    def test_garbage_plan_tick_output_fails_open(self):
+        d = _fresh_project()
+        try:
+            company = os.path.join(d, ".company")
+            org = os.path.join(company, "org")
+            os.makedirs(org, exist_ok=True)
+            # This yaml would gate decay OFF if the plan were trusted (tony's
+            # duties omit decay).
+            with open(os.path.join(org, "schedule.yaml"), "w") as f:
+                f.write("tony: { duties: [reinforce] }\n")
+            # Replace this fixture's OWN scripts/schedule_config.py copy with a
+            # stub that returns non-JSON garbage for --plan-tick (exit 0 — an
+            # exit-code lie) and fails everything else (--roster degrades
+            # separately/harmlessly, already-tolerated).
+            sc_path = os.path.join(d, "scripts", "schedule_config.py")
+            with open(sc_path, "w") as f:
+                f.write(
+                    "#!/usr/bin/env python3\n"
+                    "import sys\n"
+                    'if "--plan-tick" in sys.argv:\n'
+                    '    print("not { json")\n'
+                    "    sys.exit(0)\n"
+                    "sys.exit(1)\n"
+                )
+            _write_mem(company, "obs-a", last_reinforced=_today())
+            r = _bash([os.path.join(d, "scripts", "daily-run.sh"), d, "--no-agent"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = _read_log(company)
+            self.assertNotIn("gated off tony.decay", text)
+            self.assertIn("- decay --apply:", text)   # decay actually ran
+        finally:
+            subprocess.run(["rm", "-rf", d])
 
 
 if __name__ == "__main__":

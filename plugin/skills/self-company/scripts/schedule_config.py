@@ -33,6 +33,10 @@ Usage (CLI seam for bash callers):
   schedule_config.py --company DIR --research-enabled           # exit 0 on / 1 off
   schedule_config.py --company DIR --roster                     # print roster.md body
   schedule_config.py --company DIR --explain                    # print effective config (JSON)
+  schedule_config.py --company DIR --plan-tick --hour H --dow D # Phase 28 Item 3:
+      ONE JSON with every gate decision + agent knob for this tick, from ONE
+      effective() load — replaces daily-run.sh's ~13 separate --should-run/
+      --agent spawns with one process. See plan_tick() below.
 """
 
 import argparse
@@ -386,6 +390,37 @@ def should_run(company, step, hour, dow):
     return Employee.load(owner, company).should_run(step, hour, dow)
 
 
+# ================================================================ plan-tick
+def plan_tick(company, hour, dow):
+    """Phase 28 Item 3: ONE JSON blob combining every gate decision + agent knob
+    daily-run.sh needs for a single tick, from ONE effective() load. Replaces the
+    ~13 separate schedule_config.py spawns (10 --should-run gates + 3 --agent knob
+    reads) daily-run.sh made per tick with one process.
+
+    The step set is STEP_OWNER's key set — the SAME table should_run() consults —
+    so there is no second list that can drift from should_run's routing
+    (modularize, don't special-case). Each boolean is should_run(company, step,
+    hour, dow) itself: byte-identical to what the individual --should-run call
+    would have returned for the same inputs. The agent knobs are effective()'s
+    already-defaulted agent dict, same as individual --agent KEY reads.
+
+    Never raises: should_run/effective are both already tolerant of a bad/absent
+    config; the CLI layer additionally wraps this in try/except so a JSON encode
+    failure or unexpected error still yields no output (caller fail-opens)."""
+    steps = {step: should_run(company, step, hour, dow) for step in STEP_OWNER}
+    eff = effective(company)
+    agent = eff["agent"]
+    return {
+        "schema": 1,
+        "steps": steps,
+        "agent": {
+            "model": agent.get("model", DEFAULT_AGENT["model"]),
+            "timeout": agent.get("timeout", DEFAULT_AGENT["timeout"]),
+            "daily_cap": agent.get("daily_cap", DEFAULT_AGENT["daily_cap"]),
+        },
+    }
+
+
 # ================================================================ roster
 def roster_md(company):
     """Render ops/schedule/roster.md from the effective config. Deterministic;
@@ -434,7 +469,18 @@ def main():
     ap.add_argument("--research-enabled", action="store_true")
     ap.add_argument("--roster", action="store_true")
     ap.add_argument("--explain", action="store_true")
+    ap.add_argument("--plan-tick", action="store_true")
     a = ap.parse_args()
+
+    if a.plan_tick:
+        # Fail-closed AT THE CLI LAYER only: any unexpected error prints nothing
+        # and exits 1, so a bash caller's fail-open (all steps run, default
+        # knobs) kicks in rather than trusting a half-formed JSON.
+        try:
+            print(json.dumps(plan_tick(a.company, a.hour, a.dow), sort_keys=True))
+        except Exception:
+            sys.exit(1)
+        sys.exit(0)
 
     if a.cron:
         eff = effective(a.company)
