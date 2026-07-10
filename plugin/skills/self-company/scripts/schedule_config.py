@@ -79,7 +79,17 @@ FORBIDDEN_KEYS = {
 DEFAULT_TICK_HOURS = 6        # today: */6  (4x/day)
 DEFAULT_RESEARCH_DOW = 0      # Sunday
 DEFAULT_RESEARCH_HOUR = 3
-DEFAULT_AGENT = {"model": "claude-sonnet-4-6", "timeout": 600, "daily_cap": 4}
+
+# Phase 29 Item 2 (Bob M2): the ONE source-of-truth default model for every spawn
+# site in the system (schedule.yaml's `agent.model`, daily-run.sh, fire-trigger.sh,
+# research-scan.sh, company-run.sh, supervisor.py's dispatch default, and the
+# per-employee model table's `sonnet` alias in employee.py). Bumped from the
+# previous-generation `claude-sonnet-4-6` to `claude-sonnet-5` per the Chairman's
+# decision (2026-07-10): near-Opus agentic quality at Sonnet cost, intro pricing
+# through 2026-08-31. Builder note: confirm this id against the claude-api skill's
+# "Current Models" table before changing it — do not guess a model string here.
+DEFAULT_AGENT_MODEL = "claude-sonnet-5"
+DEFAULT_AGENT = {"model": DEFAULT_AGENT_MODEL, "timeout": 600, "daily_cap": 4}
 
 
 # ================================================================ parsing

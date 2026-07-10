@@ -431,12 +431,10 @@ if ! $DRY_RUN && (( _run_backup )) && (( CORE_ABORT )); then
   echo "- backup: skipped — free-space preflight already ABORTED the core (no tarball written to a low-disk filesystem)" >> "$LOG"
 fi
 if ! $DRY_RUN && (( _run_backup )) && (( ! CORE_ABORT )) && [[ -d "$MEM" ]]; then
-  BACKUP_KEEP="$(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
-try:
-    from policy_config import load_policy_constants as L
-    print(int(L('$POLICY').get('BACKUP_KEEP', 14)))
-except Exception:
-    print(14)" 2>/dev/null || echo 14)"
+  # Phase 29 fold-in D8b: the bash->python inline heredoc is now the shared
+  # policy_config.py --get CLI (one seam, not three near-identical copies).
+  BACKUP_KEEP="$(python3 "$SCRIPTS/policy_config.py" --policy "$POLICY" \
+    --get BACKUP_KEEP --default 14 2>/dev/null || echo 14)"
   [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || BACKUP_KEEP=14
   BK_DIR="$COMPANY/backups"
   if (( BACKUP_KEEP == 0 )); then
@@ -1113,12 +1111,9 @@ if $RUN_AGENT; then
   # the cap, degrade to deterministic-only so unattended runs can't overspend.
   # Ground default: policy §3 DAILY_RUNS_PER_DAY (byte-for-byte today when no
   # schedule.yaml). When a schedule.yaml IS present, its agent.daily_cap governs.
-  CAP="$(python3 -c "import sys; sys.path.insert(0, '$SCRIPTS')
-try:
-    from policy_config import load_policy_constants as L
-    print(int(L('$POLICY').get('DAILY_RUNS_PER_DAY', 4)))
-except Exception:
-    print(4)" 2>/dev/null || echo 4)"
+  # Phase 29 fold-in D8b: shared policy_config.py --get CLI, not an inline heredoc.
+  CAP="$(python3 "$SCRIPTS/policy_config.py" --policy "$POLICY" \
+    --get DAILY_RUNS_PER_DAY --default 4 2>/dev/null || echo 4)"
   # Phase 28 Item 3: read from the plan sourced once above instead of a fresh
   # schedule_config.py --agent daily_cap spawn. _PLAN_agent_daily_cap is only
   # ever numeric-nonempty when schedule.yaml+script+python3 all succeeded above
@@ -1275,11 +1270,12 @@ EOF
     # the log. SELF_COMPANY_AGENT_STREAM=0 restores the old buffered text mode.
     STREAM_ARGS=(--output-format stream-json --verbose)
     [[ "${SELF_COMPANY_AGENT_STREAM:-1}" == "0" ]] && STREAM_ARGS=()
-    # Model: env wins; else schedule.yaml's agent.model; else today's default.
-    # (Phase 12: schedule_config returns claude-sonnet-4-6 absent config => today.)
+    # Model: env wins; else schedule.yaml's agent.model; else the Item-2 default.
+    # (Phase 12: schedule_config returns DEFAULT_AGENT_MODEL absent config —
+    # Phase 29 Item 2 bumped that constant sonnet-4-6 -> sonnet-5.)
     # Phase 28 Item 3: read from the plan sourced once above.
     _cfg_model="$_PLAN_agent_model"
-    [[ -n "$_cfg_model" ]] || _cfg_model="claude-sonnet-4-6"
+    [[ -n "$_cfg_model" ]] || _cfg_model="claude-sonnet-5"
     AGENT_MODEL="${SELF_COMPANY_DAILY_MODEL:-$_cfg_model}"
     printf '\n===== agent run %s =====\n' "$ts" >> "$AGENT_LOG"
     # Item 1 (TOM-2) / Phase 25 Item 4.2: hard-kill grace, upgraded to target

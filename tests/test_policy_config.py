@@ -130,5 +130,56 @@ class TestResolve(unittest.TestCase):
         self.assertEqual(policy_config.load_policy_constants(None), {})
 
 
+class TestGetCLI(unittest.TestCase):
+    """Phase 29 fold-in D8b: `policy_config.py --get KEY [--default V]` — the
+    ONE seam that replaced three near-identical bash->python inline heredocs
+    (daily-run.sh's BACKUP_KEEP/DAILY_RUNS_PER_DAY reads, fleet-run.sh's
+    FLEET_AGENT_BUDGET read)."""
+
+    def _policy(self, text):
+        f = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False)
+        f.write(text)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def test_get_declared_constant_prints_value(self):
+        path = self._policy("| `BACKUP_KEEP` | **9** | days | ✓ |\n")
+        rc, out, _ = _helpers.run_script(
+            "policy_config.py", "--policy", path, "--get", "BACKUP_KEEP", "--default", "14")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "9")   # BACKUP_KEEP is typed int
+
+    def test_get_undeclared_key_falls_back_to_default(self):
+        path = self._policy("| `HL_BASE` | **2.0** | x | ✓ |\n")
+        rc, out, _ = _helpers.run_script(
+            "policy_config.py", "--policy", path, "--get", "BACKUP_KEEP", "--default", "14")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "14")
+
+    def test_get_missing_policy_file_falls_back_to_default(self):
+        rc, out, _ = _helpers.run_script(
+            "policy_config.py", "--policy", "/no/such/policy.md",
+            "--get", "DAILY_RUNS_PER_DAY", "--default", "4")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "4")
+
+    def test_get_unknown_key_no_default_exits_1(self):
+        path = self._policy("| `HL_BASE` | **2.0** | x | ✓ |\n")
+        rc, out, _ = _helpers.run_script(
+            "policy_config.py", "--policy", path, "--get", "NOT_A_REAL_CONSTANT")
+        self.assertEqual(rc, 1)
+
+    def test_get_byte_identical_to_resolve(self):
+        # Byte-identical resolved values vs the programmatic resolve() path.
+        path = self._policy("| `DAILY_RUNS_PER_DAY` | **6** | x | ✓ |\n")
+        values, _ = policy_config.resolve({"DAILY_RUNS_PER_DAY": 4}, path)
+        rc, out, _ = _helpers.run_script(
+            "policy_config.py", "--policy", path,
+            "--get", "DAILY_RUNS_PER_DAY", "--default", "4")
+        self.assertEqual(rc, 0)
+        self.assertEqual(int(out.strip()), values["DAILY_RUNS_PER_DAY"])
+
+
 if __name__ == "__main__":
     unittest.main()
