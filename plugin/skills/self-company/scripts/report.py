@@ -78,6 +78,12 @@ def verdict(r, prev_entropy):
     # skip — it needs a human to look, not a routine contention line.
     if r.get("lock_stale"):
         return "stale-lock"
+    # Item 3: a benign one-off flock contention (this cron tick found the lock
+    # already held and skipped, no pile-up) is a RECORDED tick that did NOT
+    # run — rendered distinctly as `locked`, never `flat` ("ran clean but
+    # nothing changed") or `skip` (the agent's own benign-skip vocabulary).
+    if r.get("lock") == "skipped":
+        return "locked"
     # C2: an in-flight run (latest block, prompt built, agent still streaming) is
     # neither keep nor fail yet — it is `running`, and self-corrects on the
     # outcome line. Checked FIRST so a live agent is never rendered `fail`.
@@ -131,6 +137,9 @@ def describe(r):
         bits.append(f"CORE ABORTED — {r.get('abort_reason') or 'safety floor failed'}")
     if r.get("lock_stale"):
         bits.append("LOCK STALE — wedged/orphaned run holding .daily.lock")
+    if r.get("lock") == "skipped":
+        bits.append("locked — cron tick skipped (concurrent run held .daily.lock)")
+        return ", ".join(bits)
     # C2: an in-flight agent leads the description — the deterministic half's
     # progress follows, but the run is not done, so it is neither keep nor fail.
     if r["agent"] == "running":

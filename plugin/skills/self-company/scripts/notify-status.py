@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,15 @@ import daily_log  # noqa: E402
 MARKER = "ops/.last_notified"          # stores ISO timestamp of last notification
 SHOWN_MARKER = "ops/.last_shown"       # P1: last time Elon surfaced a delta in-session
 FAIL_MARKER = "ops/auth-fail.marker"   # B3 (Item 4): consecutive agent/auth fail streak
+# Item 2: "dark for days" must not look like "quiet". Beyond this multiple of
+# the INSTALLED cadence (parsed from the user crontab), --emit-hook escalates.
+# No cron entry installed => no alarm, ever (an intentionally-uninstalled or
+# single-shot company is healthy-by-definition here).
+STALE_RUN_FACTOR = float(os.environ.get("SELF_COMPANY_STALE_RUN_FACTOR", "2"))
+# Item 3: a lock-skip STREAK (consecutive flock-contended cron ticks) at/above
+# this threshold escalates HIGH — one contended tick is normal life (manual-run
+# overlap); a streak means the .daily.lock is likely wedged.
+LOCK_SKIP_STREAK_ESCALATE = int(os.environ.get("SELF_COMPANY_LOCK_SKIP_STREAK_ESCALATE", "3"))
 # B3: consecutive-fail count at/above which --emit-hook surfaces a HIGH-priority
 # escalation, distinct from the routine ledger. NEW constant, default 2; env
 # override for tests. daily-run.sh writes the streak into FAIL_MARKER; we only READ.
@@ -227,6 +237,118 @@ def core_abort_escalation_line(runs):
             f"ops/core-abort.marker is present until a healthy run clears it.")
 
 
+def lock_skip_escalation_line(runs):
+    """Item 3: a HIGH-priority escalation when the MOST RECENT run's
+    lock-skip streak (daily-run.sh's own marker, carried through the JSONL
+    end event) is at/above LOCK_SKIP_STREAK_ESCALATE. One contended tick
+    stays quiet (manual-run overlap is normal life); a streak means the
+    .daily.lock is likely wedged — a different fix than a dead scheduler."""
+    if not runs:
+        return ""
+    streak = runs[-1].get("lock_skip_streak")
+    if not isinstance(streak, int) or streak < LOCK_SKIP_STREAK_ESCALATE:
+        return ""
+    return (f"‼ {streak} consecutive cron ticks lock-skipped — the .daily.lock "
+            f"is likely wedged (see LOCK STALE in the log; P25 stale-holder "
+            f"guidance).")
+
+
+def _read_crontab():
+    """Item 2: read the user crontab through the SAME env seam schedule.sh
+    uses (SELF_COMPANY_CRONTAB_FILE for tests; SELF_COMPANY_CRONTAB_CMD else
+    the real `crontab` binary) — never touches the real crontab in a test."""
+    cf = os.environ.get("SELF_COMPANY_CRONTAB_FILE")
+    if cf:
+        try:
+            return Path(cf).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    cmd = os.environ.get("SELF_COMPANY_CRONTAB_CMD", "crontab")
+    try:
+        r = subprocess.run([cmd, "-l"], capture_output=True, text=True, timeout=5)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _find_daily_cron_line(project_dir):
+    """The `# self-company-daily ... path=<project_dir>` line for THIS
+    project, or None if no such entry is installed (schedule.sh's mark
+    scheme, schedule.sh:19 — path= is always the line's last field)."""
+    text = _read_crontab()
+    if not text:
+        return None
+    candidates = {os.path.normpath(os.path.abspath(project_dir))}
+    try:
+        candidates.add(os.path.realpath(project_dir))
+    except OSError:
+        pass
+    for line in text.splitlines():
+        if "# self-company-daily" not in line:
+            continue
+        m = re.search(r"path=(\S+)\s*$", line.strip())
+        if m and m.group(1) in candidates:
+            return line
+    return None
+
+
+def _cadence_hours(hour_field):
+    """Parse the cron hour-field: `*/N` => every N hours; a fixed-hour list
+    (e.g. "0,6,12,18") or anything else unparseable => a conservative 24h —
+    never a false "dead" alarm from a cadence we can't confidently compute."""
+    hour_field = (hour_field or "").strip()
+    m = re.match(r"^\*/(\d+)$", hour_field)
+    if m:
+        n = int(m.group(1))
+        return float(n) if n > 0 else 24.0
+    return 24.0
+
+
+def staleness_escalation_line(company, now=None):
+    """Item 2: "dark for days" must not look like "quiet". Compares now minus
+    the latest REAL run's ts against STALE_RUN_FACTOR x the installed cron
+    cadence for this project. No cron entry installed => "" always (an
+    intentionally-uninstalled or single-shot company is healthy-by-definition
+    here — Elon's decision, no @reboot catch-up either).
+
+    Reads daily_log directly with window_days=None (NOT the hook's windowed
+    `all_runs`) — a scheduler dead for longer than the parse window must
+    still report its true gap, not misclassify as "never ran"."""
+    now = now or datetime.now()
+    project_dir = str(Path(company).resolve().parent)
+    line = _find_daily_cron_line(project_dir)
+    if line is None:
+        return ""
+    fields = line.strip().split()
+    hour_field = fields[1] if len(fields) > 1 else "*"
+    cadence_h = _cadence_hours(hour_field)
+    threshold_h = cadence_h * STALE_RUN_FACTOR
+
+    all_runs = daily_log.read_runs(company, window_days=None, now=now)
+    real_runs = [r for r in all_runs if not r.get("dry_run")]
+    if not real_runs:
+        # (d) cron installed, ZERO runs ever: we have no install timestamp to
+        # measure "2x cadence since install" against, so fall back to the
+        # cron-line's presence + total JSONL silence => escalate now, named
+        # distinctly from an ordinary staleness gap.
+        return (f"‼ STALE: cron is installed (every {cadence_h:g}h) but no daily "
+                f"run has EVER completed for this company — installed but never "
+                f"ran. Check crontab -l, ops/logs/cron.log, and the .daily.lock.")
+
+    last_ts = max(r["ts"] for r in real_runs)
+    gap_h = (now - last_ts).total_seconds() / 3600.0
+    if gap_h <= threshold_h:
+        return ""
+    msg = (f"‼ STALE: last daily run was {gap_h:.0f}h ago (cron installed: every "
+           f"{cadence_h:g}h — expected ≤{threshold_h:.0f}h). Scheduler may be "
+           f"dead: check crontab -l, ops/logs/cron.log, and the .daily.lock.")
+    streak = real_runs[-1].get("lock_skip_streak")
+    if isinstance(streak, int) and streak > 0:
+        msg += (f" Lock-skip streak: {streak} consecutive cron tick(s) skipped "
+                f"— a wedged lock and a wiped crontab need different fixes.")
+    return msg
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--company", default=".company")
@@ -270,7 +392,16 @@ def main(argv=None):
         # to swallow the report — the marker governs the push alone.
         all_runs = collect_runs(company, None)
         if not all_runs:
-            return 0                          # company has never run — nothing to show
+            # Item 2 (d): even with NO run ever, a company whose crontab HAS an
+            # entry installed is a distinguishable failure ("installed but
+            # never ran") from a genuinely never-touched company (no cron —
+            # silent, as before). Compute this BEFORE going fully silent.
+            stale_esc = staleness_escalation_line(company)
+            if stale_esc:
+                print(json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": "[self-company] " + stale_esc}}))
+            return 0                          # company has never run — nothing more to show
         ledger = recent_ledger_md(company)
         ctx = ("[self-company] Scheduled-work report. Render this ledger inline to the "
                "Chairman in your reply — it is the report he wants to see on entry, "
@@ -290,6 +421,21 @@ def main(argv=None):
         abort_esc = core_abort_escalation_line(all_runs)
         if abort_esc:
             ctx = ("[self-company] " + abort_esc + "\n\n" + ctx)
+
+        # Item 3: a lock-skip streak (wedged .daily.lock) — HIGH-priority,
+        # independent of the other escalations (a streak of "healthy-looking"
+        # skipped ticks needs its own signal or it never surfaces).
+        lock_esc = lock_skip_escalation_line(all_runs)
+        if lock_esc:
+            ctx = ("[self-company] " + lock_esc + "\n\n" + ctx)
+
+        # Item 2: total darkness (a wiped crontab, dead cron PATH, laptop-off
+        # week) is the one failure mode Phase 25's per-run signals can't catch
+        # — there is no run to carry them. Silent when no cron entry is
+        # installed for this project (Elon's decision: never a false fire).
+        stale_esc = staleness_escalation_line(company)
+        if stale_esc:
+            ctx = ("[self-company] " + stale_esc + "\n\n" + ctx)
 
         new_runs = collect_runs(company, read_marker(company))
         if new_runs and substantive(company, new_runs):
@@ -312,10 +458,13 @@ def main(argv=None):
         "fail_reason": fail_reason,
         "escalation": escalation_line(company),
         "core_abort_escalation": core_abort_escalation_line(runs),
+        "lock_skip_escalation": lock_skip_escalation_line(runs),
+        "staleness_escalation": staleness_escalation_line(company),
         "details": [{"ts": b["ts"].isoformat(), "drop": b["drop"],
                      "memories": b["memories"], "entropy": b["entropy"],
                      "agent": b["agent"], "warnings": b.get("warnings", 0),
-                     "core_aborted": b.get("core_aborted", False)} for b in runs],
+                     "core_aborted": b.get("core_aborted", False),
+                     "lock": b.get("lock")} for b in runs],
     }, ensure_ascii=False))
     return 0
 

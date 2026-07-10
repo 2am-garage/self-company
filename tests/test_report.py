@@ -350,5 +350,64 @@ class TestReportWarningsVerdict(unittest.TestCase):
             self.assertEqual(table[0]["status"], "flat")
 
 
+class TestReportItem3LockedVerdict(unittest.TestCase):
+    """Phase 27 Item 3: a benign flock-skipped tick renders `locked`, never
+    `flat`/`skip` — otherwise a permanently wedged lock (or a routine
+    contended tick) renders as an unbroken column of healthy green."""
+
+    def _company_with_jsonl(self, d, date, md, events):
+        import json
+        logs = os.path.join(d, ".company", "ops", "logs")
+        os.makedirs(logs, exist_ok=True)
+        with open(os.path.join(logs, f"daily-{date}.md"), "w") as f:
+            f.write(md)
+        with open(os.path.join(logs, f"daily-{date}.jsonl"), "w") as f:
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+        return os.path.join(d, ".company")
+
+    def test_lock_skipped_renders_locked_not_flat(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_jsonl(
+                d, "2026-07-10",
+                "\n## Daily run 2026-07-10T06:00:00\n"
+                "- lock: another daily-run holds .company/ops/.daily.lock — cron tick SKIPPED\n",
+                [
+                    {"event": "start", "ts": "2026-07-10T06:00:00", "mode": "cron",
+                     "dry_run": False, "pid": 1, "schema": 1},
+                    {"event": "end", "ts": "2026-07-10T06:00:01", "start_ts": "2026-07-10T06:00:00",
+                     "schema": 1, "lock": "skipped", "lock_skip_streak": 1, "core_aborted": False,
+                     "abort_reason": None, "steps": {}, "agent": None, "dry_run": False},
+                ])
+            import datetime as _dt
+            rows = rp.daily_log.read_runs(c, window_days=None, now=_dt.datetime(2026, 7, 10, 7))
+            table = rp.build(rows)
+            self.assertEqual(table[0]["status"], "locked")
+            self.assertIn("locked", table[0]["desc"])
+
+    def test_core_step_timeout_never_flat_or_keep(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self._company_with_jsonl(
+                d, "2026-07-10",
+                "\n## Daily run 2026-07-10T06:00:00\n"
+                "- decay: TIMED OUT after 900s — step skipped this tick, will retry next run\n",
+                [
+                    {"event": "start", "ts": "2026-07-10T06:00:00", "mode": "cron",
+                     "dry_run": False, "pid": 1, "schema": 1},
+                    {"event": "end", "ts": "2026-07-10T06:15:30", "start_ts": "2026-07-10T06:00:00",
+                     "schema": 1, "lock": "acquired", "lock_skip_streak": 0, "core_aborted": False,
+                     "abort_reason": None,
+                     "steps": {"decay": {"outcome": "timeout", "warnings": 0},
+                               "entropy": {"outcome": "ok", "warnings": 0, "value": 0.05,
+                                           "dims": {}, "memories": 10}},
+                     "agent": None, "dry_run": False},
+                ])
+            import datetime as _dt
+            rows = rp.daily_log.read_runs(c, window_days=None, now=_dt.datetime(2026, 7, 10, 7))
+            table = rp.build(rows)
+            self.assertEqual(table[0]["status"], "warn")
+            self.assertIn("TIMEOUT", table[0]["desc"])
+
+
 if __name__ == "__main__":
     unittest.main()
