@@ -5,6 +5,11 @@ All notable changes to the self-company plugin. Versions track
 version before the Phase 19-29 audit series); earlier history lives in the
 git log / `references/status.md`.
 
+> Note: the manifest version went **0.1.10 → 0.1.14 in a single bump** (at Phase 29).
+> There was never a released 0.1.13 — the "0.1.13 batch" (Phases 24–28, so labelled
+> in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
+> The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
+
 ## [0.1.14] — Phase 29: prompt/harness engineering & the employee model table
 
 - Per-employee model table wired end to end (`Employee.resolved_model`): each
