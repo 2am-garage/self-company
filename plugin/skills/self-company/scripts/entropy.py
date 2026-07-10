@@ -342,7 +342,14 @@ def load_memories(memory_dir, include_archived=False):
     # enumeration everyone agrees on. entropy keeps its OWN parse_frontmatter
     # (sources-as-list, defunct->archived, 6-key defaults) and gating ORDER
     # (tombstone check, then id check) exactly as before; only the walk moves.
-    for md_file in corpus.iter_memory_paths(memory_dir):
+    # `sort=False` (behaviour-preservation, Phase 28): entropy's legacy walk
+    # was a BARE UNSORTED `rglob`, and compute_dup_rate's i<j pairwise scan
+    # makes that raw order load-bearing for the ORDER of duplicate_pairs /
+    # review_candidates it emits (positional consumers: elon_survey dups[:4],
+    # daily-run's duplicate-candidates line + agent backlog pairs[:15]).
+    # Sorting would change today's byte output — the other five callers already
+    # sorted, so only entropy takes the raw path.
+    for md_file in corpus.iter_memory_paths(memory_dir, sort=False):
         try:
             with open(md_file, 'r', encoding='utf-8') as f:
                 content = f.read()

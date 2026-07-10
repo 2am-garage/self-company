@@ -519,11 +519,26 @@ class TestPairBatchMode(unittest.TestCase):
             self.assertTrue(os.path.isdir(idx_a))
             self.assertTrue(os.path.isdir(idx_b))
 
+    def _rows_in(self, indexdir, mid):
+        prog = (
+            "import sys, lancedb\n"
+            "db = lancedb.connect(sys.argv[1])\n"
+            "t = db.open_table('memory')\n"
+            "print(sum(1 for r in t.search().to_list() if r['id'] == sys.argv[2]))\n")
+        proc = subprocess.run([self.venv, "-c", prog, indexdir, mid],
+                              capture_output=True, text=True,
+                              env={**os.environ, "SC_RAG_REEXEC": "1"})
+        return int((proc.stdout or "0").strip() or "0")
+
     def test_one_bad_pair_does_not_abort_the_others(self):
-        # Phase 28 Item 2: per-pair failure isolation — a pair whose
-        # index_memory() raises (here: index_dir collides with an existing
-        # FILE, so mkdir(parents=True, exist_ok=True) raises) is recorded as
-        # its OWN error; the healthy pair still refreshes.
+        # Phase 28 Item 2 (Gibby SHOULD-CHECK 3): per-pair failure isolation
+        # PROVEN durable — a pair whose index_memory() raises (here: index_dir
+        # collides with an existing FILE, so mkdir raises) is recorded as its
+        # OWN error, and the healthy pair (which ran FIRST) is not just
+        # reported-embedded but its LanceDB table is actually WRITTEN and
+        # QUERYABLE on disk (a SIGKILL/exception on a LATER pair cannot roll
+        # back an already-committed earlier pair — partial success, not
+        # all-or-nothing).
         with tempfile.TemporaryDirectory() as d:
             mem_good = os.path.join(d, "good", "memory")
             idx_good = os.path.join(mem_good, "index")
@@ -542,6 +557,35 @@ class TestPairBatchMode(unittest.TestCase):
             self.assertEqual(report["pairs"][0]["embedded"], 1)
             self.assertTrue(os.path.isdir(idx_good))
             self.assertIn("error", report["pairs"][1])
+            # Durability: the good (earlier) pair's row is really persisted +
+            # queryable, unaffected by the later pair's failure.
+            self.assertEqual(self._rows_in(idx_good, "g1"), 1)
+
+    def test_company_pair_first_is_never_starved_by_a_bad_employee(self):
+        # daily-run.sh always puts the COMPANY store as pairs[0], then each
+        # rag-employee. Gibby SHOULD-CHECK 3: a broken/slow EMPLOYEE pair
+        # (here, second, a raise) must not prevent the company (first) index
+        # from fully refreshing — it runs to completion BEFORE any employee
+        # pair is even attempted. Mirrors the real daily-run ordering.
+        with tempfile.TemporaryDirectory() as d:
+            company_mem = os.path.join(d, "company", "memory")
+            company_idx = os.path.join(company_mem, "index")
+            _helpers.write_memory(os.path.join(company_mem, "L1-warm", "c1.md"),
+                                  id="c1", tier="L1", body="the shared company index")
+
+            emp_mem = os.path.join(d, "emp", "memory")
+            emp_idx = os.path.join(emp_mem, "index")
+            os.makedirs(emp_mem, exist_ok=True)
+            os.makedirs(os.path.dirname(emp_idx), exist_ok=True)
+            with open(emp_idx, "w") as f:
+                f.write("broken employee index target (a file, not a dir)")
+
+            report = self._run_pairs((company_mem, company_idx), (emp_mem, emp_idx))
+            self.assertEqual(report["pairs"][0]["memory_dir"], company_mem)
+            self.assertEqual(report["pairs"][0]["embedded"], 1)
+            self.assertNotIn("error", report["pairs"][0])
+            self.assertIn("error", report["pairs"][1])   # employee isolated
+            self.assertEqual(self._rows_in(company_idx, "c1"), 1)  # company durable
 
     def test_single_pair_batch_mode_matches_single_store_mode(self):
         # Equality proof: --pair with exactly one pair produces the SAME

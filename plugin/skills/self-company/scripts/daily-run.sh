@@ -773,6 +773,25 @@ elif [[ -f "$SCRIPTS/rag_index.py" ]]; then
   fi
   # A.1 — incremental index refresh (needs the RAG venv). Item 4: timeout-wrapped
   # (now wrapping the WHOLE batch, company + every employee pair, in one bound).
+  #
+  # Phase 28 Item 2c — shared-budget resilience (Gibby SHOULD-CHECK 3): the
+  # batch runs the pairs SEQUENTIALLY in one process under ONE `timeout -k
+  # GRACE $CORE_STEP_TIMEOUT` (900s default). Three properties keep that safe:
+  #   1. COMPANY pair is ALWAYS first, so the shared index (the one this log
+  #      line reports and the interactive hook reads) refreshes to completion
+  #      BEFORE any employee pair is attempted — a slow/broken employee can
+  #      never starve or delay it.
+  #   2. Per-pair EXCEPTION isolation (rag_index.py's batch loop): a pair that
+  #      raises is recorded as its own error; the rest still run.
+  #   3. Each pair's LanceDB upsert commits synchronously before the next pair
+  #      starts, so a mid-batch SIGKILL (whole-batch timeout) only loses the
+  #      currently-running + not-yet-started pairs — every completed pair is
+  #      persisted, and incremental content-hash skip makes the retry next tick
+  #      near-free. This is STRICTLY better-bounded than base, where the
+  #      per-employee refreshes had NO timeout at all (a hung one could hang
+  #      the whole daily-run forever). 900s comfortably covers a cold model
+  #      load + N incremental refreshes; only a full stamp-mismatch rebuild is
+  #      heavy, and that is a one-tick self-heal.
   if [[ -x "$RAG_PY" ]]; then
     PAIR_ARGS=(--pair "$MEM" "$MEM/index")
     if [[ -d "$EMP_ROOT" ]]; then

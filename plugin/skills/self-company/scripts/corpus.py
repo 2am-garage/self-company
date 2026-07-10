@@ -53,9 +53,23 @@ from tombstone import is_tombstoned  # noqa: E402
 TIER_DIRS = (("L0", "L0-working"), ("L1", "L1-warm"), ("L2", "L2-cold"))
 
 
-def iter_memory_paths(memory_dir, tiers=None):
-    """Sorted list of every `*.md` file under memory_dir — the walk every one
-    of the six re-implemented loaders performed independently (D4).
+def iter_memory_paths(memory_dir, tiers=None, sort=True):
+    """List of every `*.md` file under memory_dir — the walk every one of the
+    six re-implemented loaders performed independently (D4).
+
+    `sort=True` (default) returns them SORTED — the order five of the six
+    legacy loaders (decay/verify/reinforce/rag_index, all `sorted(rglob)`) used
+    and the safe default for any NEW caller. `sort=False` returns the RAW
+    `Path.rglob` OS-traversal order UNCHANGED — this exists for exactly ONE
+    caller, entropy.py, whose legacy `load_memories()` used a BARE UNSORTED
+    `rglob` (Phase 28 behaviour-preservation: entropy's `compute_dup_rate`
+    does an i<j pairwise scan, so the list ORDER is load-bearing for the ORDER
+    of `duplicate_pairs`/`review_candidates` it emits — those flow positionally
+    into elon_survey's `dups[:4]` todo, daily-run's duplicate-candidates log
+    line, and the agent backlog's `pairs[:15]`. Sorting would change today's
+    byte output; the law is byte-identical-to-today, so entropy KEEPS the raw
+    order). Do NOT flip entropy to `sort=True` to "improve" determinism — that
+    is a behaviour change vs today, out of scope for a preservation phase.
 
     `tiers` (e.g. `["L0"]`) restricts the walk to those tier subdirectories;
     `None` (default) walks the WHOLE tree — today's behaviour for every
@@ -74,8 +88,9 @@ def iter_memory_paths(memory_dir, tiers=None):
                 d = base / sub
                 if d.exists():
                     paths.extend(d.rglob("*.md"))
-        return sorted(paths)
-    return sorted(base.rglob("*.md"))
+        return sorted(paths) if sort else paths
+    paths = base.rglob("*.md")
+    return sorted(paths) if sort else list(paths)
 
 
 def count_by_tier(memory_dir):

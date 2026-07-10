@@ -503,5 +503,58 @@ class TestFrontmatterDelimiterFix(unittest.TestCase):
         self.assertEqual(reinforce_memory.parse_frontmatter(text), (None, -1))
 
 
+class TestLoadOrderPreserved(unittest.TestCase):
+    """Phase 28 behaviour-preservation (Gibby MUST-FIX 1): entropy's legacy
+    `load_memories()` used a BARE UNSORTED `rglob`; the corpus.py migration must
+    keep that raw OS-traversal order, because `compute_dup_rate`'s i<j scan makes
+    the LOAD order load-bearing for the ORDER of duplicate_pairs / review_candidates
+    it emits — and those flow positionally into elon_survey's todo (`dups[:4]`),
+    daily-run's duplicate-candidates log line, and the agent backlog (`pairs[:15]`).
+    Sorting entropy's walk (which the other 5 callers do, correctly) would change
+    today's byte output. These tests pin the two things that make that safe.
+
+    (Requires SC_RAG_REEXEC=1 so entropy's module-level venv re-exec is a no-op;
+    the whole class is deps-free — load order and the pair-order mechanism are
+    both pure-Python, no fastembed/numpy.)"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["SC_RAG_REEXEC"] = "1"
+        import entropy, corpus
+        cls.entropy = entropy
+        cls.corpus = corpus
+
+    def test_entropy_walk_is_the_unsorted_corpus_walk(self):
+        # entropy.load_memories order == corpus.iter_memory_paths(sort=False)
+        # (raw rglob) — NOT the sorted order. If someone flips entropy back to
+        # the sorted walk, this fails whenever rglob != sorted.
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(12):
+                _helpers.write_memory(
+                    os.path.join(d, "L0-working", f"m{i:02d}.md"),
+                    id=f"obs-{i:02d}", body=f"body number {i}")
+            raw_order = [str(p) for p in
+                         self.corpus.iter_memory_paths(d, sort=False)]
+            loaded_order = [m["path"] for m in self.entropy.load_memories(d)]
+            self.assertEqual(loaded_order, raw_order)
+            # And the raw walk is exactly the UNSORTED rglob — assert corpus.py's
+            # own contract (sorted variant == sorted(raw)) so the two agree.
+            self.assertEqual(
+                [str(p) for p in self.corpus.iter_memory_paths(d, sort=True)],
+                sorted(raw_order))
+
+    def test_compute_dup_rate_order_tracks_input_order(self):
+        # The MECHANISM the raw order protects: feed the SAME memories in two
+        # different orders -> the emitted duplicate_pairs order flips with them.
+        # This is why entropy must NOT silently re-sort its load list.
+        body = "The Chairman prefers async await patterns in Python design clearly."
+        a = {"id": "aaa-mem", "body": body, "sources": []}
+        b = {"id": "zzz-mem", "body": body, "sources": []}
+        pairs_ab = self.entropy.compute_dup_rate([a, b])[1]
+        pairs_ba = self.entropy.compute_dup_rate([b, a])[1]
+        self.assertEqual(pairs_ab, [["aaa-mem", "zzz-mem"]])
+        self.assertEqual(pairs_ba, [["zzz-mem", "aaa-mem"]])   # order flipped
+
+
 if __name__ == "__main__":
     unittest.main()
