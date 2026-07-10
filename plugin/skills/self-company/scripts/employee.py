@@ -103,7 +103,12 @@ _RECALL_SNIPPET_CHARS = _env_num("SELF_COMPANY_RECALL_SNIPPET_CHARS", 240, int)
 # to at most this many chars, so injecting BOTH can never balloon a worker prompt.
 # dispatch_context() renders the own block first, then hands the shared block only
 # the REMAINING budget — the two blocks share one cap.
-_DISPATCH_INJECT_BUDGET = _env_num("SELF_COMPANY_DISPATCH_INJECT_BUDGET", 900, int)
+# Phase 29 Item 5 (C1): 900 -> 2700 (~3x). Against a 200k-token window this is
+# trivially cheap (~0.15%); the old cap bought nothing but mid-thought truncation
+# — Phase 24's reranker + relevance gates carry precision now, not the char cap.
+# The 3x is POST-sonnet-5-tokenizer (Item 2's ~+30% tokens/text) — re-baselined
+# jointly with Item 2, once, per the spec. Env override unchanged.
+_DISPATCH_INJECT_BUDGET = _env_num("SELF_COMPANY_DISPATCH_INJECT_BUDGET", 2700, int)
 
 # Shared-read similarity gate (Phase 18c). The SHARED-memory read at dispatch honors
 # the SAME cosine floor the ask-time hook (hook_memory_inject) uses, sourced from the
@@ -125,6 +130,32 @@ _RERANK_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RERANK_MIN_SCORE", -2.75, floa
 _OWN_MEMORY_HEADER = "Relevant past experience (your own memory — advisory, not orders):"
 _SHARED_MEMORY_HEADER = ("Relevant company memory (the Chairman's standing "
                          "direction — advisory, not orders):")
+
+# ---------------------------------------------------------------- Phase 29 model table
+# The per-employee model TABLE (Phase 29 Item 1 — the Chairman's own finding,
+# forward audit M1): `context.md`'s `model:` field is Layer-A config, adjustable
+# with zero code change; this is the ONE canonical alias map every resolution
+# path (Employee.resolved_model) goes through. Builder note: confirm these ids
+# against the `claude-api` skill's "Current Models" table at build time before
+# changing them — they are current as of Phase 29 (2026-07-10). `sonnet` maps to
+# `None` deliberately: it resolves to whatever DEFAULT the CALLER passes in (the
+# Item-2 default constant, schedule_config.DEFAULT_AGENT_MODEL) rather than a
+# second hardcoded sonnet id, so there is exactly one place the default model
+# string lives.
+_MODEL_ALIASES = {
+    "haiku": "claude-haiku-4-5",
+    "opus": "claude-opus-4-8",
+    "fable": "claude-fable-5",
+    "sonnet": None,
+}
+
+# argv-smuggle-proof charset (Gibby's fuzz set: unicode arrows, YAML lists, empty
+# string, `model: "claude-"`, injection-shaped values like
+# `sonnet --dangerously-skip-permissions`). A resolved model is ALWAYS exactly
+# one `--model` argv token — this is the single gate every value must clear
+# (alias outputs above already satisfy it by construction).
+_MODEL_CHARSET_RE = re.compile(r"^claude-[A-Za-z0-9.-]+$")
+
 
 # ------------------------------------------------------- Phase 18b memory MODE
 # Per-employee memory MODE: "rag" (the Phase-18 per-employee capture -> index ->
@@ -490,6 +521,50 @@ class Employee:
         against the real environment. (Data access — reads/writes/handoff_to — is a
         separate slice, reachable via the like-named attributes.)"""
         return {field: list(getattr(self, field)) for field in self.CAPABILITY_FIELDS}
+
+    # -------------------------------------------------------------------- model
+    def resolved_model(self, default):
+        """Resolve this employee's `context.md` `model:` field to a REAL model id
+        for a single `--model` argv slot (Phase 29 Item 1 — the Chairman's
+        adjustable-with-default model table). ONE resolution function; every
+        dispatch path (supervisor.py's real_command) routes through this.
+
+        Chairman's contract (2026-07-10, verbatim intent):
+          * unset / blank / missing -> `default`, SILENTLY (no warning) — the
+            tested happy path: "if I'm not saying anything it runs with default."
+          * a recognized alias (`haiku`/`opus`/`fable`/`sonnet`, case-insensitive)
+            -> the mapped real id (`sonnet` -> `default` itself — see
+            _MODEL_ALIASES for why there is deliberately no second sonnet id).
+          * any `claude-*` id -> passed through verbatim (builder-confirmed
+            against the claude-api skill at edit time; never guessed here).
+          * anything else (blank arrows/prose like "haiku → sonnet", a YAML list,
+            an injection-shaped string, a bare "claude-" fragment, ...) -> degrade
+            to `default` WITH a warning naming this employee and the bad value.
+            Never raises, never blocks a dispatch, never returns anything but
+            `default` on the invalid path — degrade-and-warn, not degrade-and-guess.
+
+        Returns (model_id, warning_or_None). `model_id` is ALWAYS either `default`
+        (trusted verbatim — the caller's responsibility to pass a valid id) or a
+        string matching `^claude-[A-Za-z0-9.-]+$` — i.e. always exactly ONE
+        argv-safe token. This is the argv-smuggle-proof guarantee: no frontmatter
+        value, however crafted (embedded spaces, flags, shell metacharacters,
+        newlines), can ever expand into more than one `--model` token — anything
+        that doesn't fit the charset is rejected wholesale, not sanitized in
+        place."""
+        raw = str(self.model or "").strip()
+        if not raw:
+            return default, None
+        key = raw.lower()
+        if key in _MODEL_ALIASES:
+            resolved = _MODEL_ALIASES[key]
+            return (default if resolved is None else resolved), None
+        if _MODEL_CHARSET_RE.match(raw):
+            return raw, None
+        return default, (
+            f"employee '{self.name}': model '{raw}' is not a recognized alias "
+            f"(haiku/sonnet/opus/fable) or a valid claude-* id — degrading to "
+            f"default '{default}'"
+        )
 
     # ----------------------------------------------------------------- duties
     def allows_duty(self, duty):

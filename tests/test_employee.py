@@ -143,9 +143,17 @@ class TestExecution(unittest.TestCase):
     def test_model_from_context(self):
         self.assertEqual(Employee.load("tony", TEMPLATE).model, "sonnet")
 
-    def test_model_with_arrow(self):
-        # bob: `model: haiku → sonnet  # ...` -> comment stripped, arrow kept.
-        self.assertEqual(Employee.load("bob", TEMPLATE).model, "haiku → sonnet")
+    def test_model_from_context_bob(self):
+        # Phase 29 Item 1: bob's template model: is now a plain resolvable alias
+        # (was prose "haiku → sonnet" before the model table was wired up).
+        self.assertEqual(Employee.load("bob", TEMPLATE).model, "haiku")
+
+    def test_model_pinned_literal_id_phoebe(self):
+        # Phoebe is Chairman-pinned to an exact claude-* id, not an alias.
+        self.assertEqual(Employee.load("phoebe", TEMPLATE).model, "claude-sonnet-4-6")
+
+    def test_model_elon_fable(self):
+        self.assertEqual(Employee.load("elon", TEMPLATE).model, "fable")
 
     def test_duties_default_to_role_set(self):
         c = _make_company(tempfile.mkdtemp())
@@ -180,6 +188,135 @@ class TestExecution(unittest.TestCase):
             self.assertFalse(Employee.load("elon", c).enabled)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------- Phase 29 Item 1 resolved_model
+class TestResolvedModel(unittest.TestCase):
+    """Employee.resolved_model — the Chairman's adjustable-with-default model
+    table. Four required behaviors: unset -> default SILENTLY; alias -> real id;
+    claude-* -> verbatim; anything else -> default WITH a warning. Plus Gibby's
+    argv-smuggle fuzz set: a resolved model is ALWAYS one safe argv token."""
+
+    DEFAULT = "claude-sonnet-5"
+
+    def _emp(self, model_value):
+        return employee.Employee("x", "/no/such/company",
+                                 fm={"model": model_value} if model_value is not None else {})
+
+    def test_unset_is_silent_default(self):
+        model, warning = self._emp(None).resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNone(warning)
+
+    def test_blank_is_silent_default(self):
+        model, warning = self._emp("   ").resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNone(warning)
+
+    def test_haiku_alias(self):
+        model, warning = self._emp("haiku").resolved_model(self.DEFAULT)
+        self.assertEqual(model, "claude-haiku-4-5")
+        self.assertIsNone(warning)
+
+    def test_opus_alias(self):
+        model, warning = self._emp("opus").resolved_model(self.DEFAULT)
+        self.assertEqual(model, "claude-opus-4-8")
+        self.assertIsNone(warning)
+
+    def test_fable_alias(self):
+        model, warning = self._emp("fable").resolved_model(self.DEFAULT)
+        self.assertEqual(model, "claude-fable-5")
+        self.assertIsNone(warning)
+
+    def test_sonnet_alias_resolves_to_the_caller_default(self):
+        # `sonnet` deliberately has no fixed id of its own — it IS the default,
+        # so bumping the Item-2 default constant moves it with zero rework.
+        model, warning = self._emp("sonnet").resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNone(warning)
+        model2, _ = self._emp("sonnet").resolved_model("claude-sonnet-4-6")
+        self.assertEqual(model2, "claude-sonnet-4-6")
+
+    def test_alias_case_insensitive(self):
+        model, warning = self._emp("Haiku").resolved_model(self.DEFAULT)
+        self.assertEqual(model, "claude-haiku-4-5")
+        self.assertIsNone(warning)
+
+    def test_claude_star_passthrough_verbatim(self):
+        model, warning = self._emp("claude-sonnet-4-6").resolved_model(self.DEFAULT)
+        self.assertEqual(model, "claude-sonnet-4-6")
+        self.assertIsNone(warning)
+
+    def test_claude_star_dated_snapshot_passthrough(self):
+        model, warning = self._emp("claude-haiku-4-5-20251001").resolved_model(self.DEFAULT)
+        self.assertEqual(model, "claude-haiku-4-5-20251001")
+        self.assertIsNone(warning)
+
+    def test_multiline_prose_degrades_with_warning(self):
+        # The live bad value cited by the spec: "haiku → sonnet".
+        model, warning = self._emp("haiku → sonnet").resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNotNone(warning)
+        self.assertIn("x", warning)
+        self.assertIn("haiku → sonnet", warning)
+
+    def test_unrecognized_word_degrades_with_warning(self):
+        model, warning = self._emp("gpt-4").resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNotNone(warning)
+
+    # ---- Gibby's fuzz set: argv-smuggle-proof, one token, never a crash -----
+    def test_bare_claude_prefix_degrades(self):
+        model, warning = self._emp("claude-").resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNotNone(warning)
+
+    def test_injection_shaped_value_never_smuggles_argv(self):
+        model, warning = self._emp(
+            "sonnet --dangerously-skip-permissions").resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNotNone(warning)
+        self.assertNotIn(" ", model)
+
+    def test_claude_star_with_shell_metacharacters_rejected(self):
+        for bad in ("claude-sonnet-5; rm -rf /", "claude-sonnet-5\ncat /etc/passwd",
+                    "claude-sonnet-5 --dangerously-skip-permissions",
+                    "claude-sonnet-5`whoami`", "claude-sonnet-5$(whoami)"):
+            model, warning = self._emp(bad).resolved_model(self.DEFAULT)
+            self.assertEqual(model, self.DEFAULT, bad)
+            self.assertIsNotNone(warning, bad)
+
+    def test_yaml_list_value_degrades(self):
+        # frontmatter's flow-list parser turns `model: [haiku, sonnet]` into an
+        # actual list; the raw field ends up a non-empty non-alias string.
+        model, warning = self._emp(["haiku", "sonnet"]).resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNotNone(warning)
+
+    def test_quoted_fragment_degrades(self):
+        model, warning = self._emp('"claude-"').resolved_model(self.DEFAULT)
+        self.assertEqual(model, self.DEFAULT)
+        self.assertIsNotNone(warning)
+
+    def test_resolved_model_never_raises_on_any_input(self):
+        for bad in (None, "", " ", "haiku → sonnet", ["a", "b"], "claude-", "\n\n",
+                   "sonnet;bob", "claude-sonnet-5" * 50):
+            try:
+                model, warning = self._emp(bad).resolved_model(self.DEFAULT)
+            except Exception as e:                        # pragma: no cover
+                self.fail(f"resolved_model raised on {bad!r}: {e}")
+            self.assertTrue(model)
+
+    def test_never_returns_more_than_one_argv_token(self):
+        # Every resolvable outcome (alias or claude-* passthrough) must be
+        # whitespace-free — a single --model argv slot, never a smuggled second
+        # token, regardless of how the raw frontmatter value was crafted.
+        candidates = ["haiku", "opus", "fable", "sonnet", "claude-opus-4-8",
+                     "gpt-4", "haiku → sonnet", "sonnet --dangerously-skip-permissions",
+                     "claude-sonnet-5;rm -rf /"]
+        for raw in candidates:
+            model, _ = self._emp(raw).resolved_model(self.DEFAULT)
+            self.assertEqual(len(model.split()), 1, raw)
 
 
 # ------------------------------------------------------------------- paths
