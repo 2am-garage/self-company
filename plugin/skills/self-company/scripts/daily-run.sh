@@ -1123,9 +1123,16 @@ if $RUN_AGENT; then
   COUNTER="$LOGDIR/.agent_runs_$DATE"
   RUNS="$(cat "$COUNTER" 2>/dev/null || echo 0)"
   [[ "$RUNS" =~ ^[0-9]+$ ]] || RUNS=0
+  # Read daily token-usage total (populated by supervisor.py result-event handler).
+  _USAGE_MARKER="$COMPANY/ops/.token-usage"
+  _USAGE_COST=0
+  if [[ -f "$_USAGE_MARKER" ]]; then
+    _USAGE_COST="$(sed -n 's/^cost=//p' "$_USAGE_MARKER" 2>/dev/null | head -1 || echo 0)"
+    [[ "$_USAGE_COST" =~ ^[0-9.]+$ ]] || _USAGE_COST=0
+  fi
   # CLAUDE_BIN resolved above (C2), before sc_auth_logged_in()'s definition.
   if (( RUNS >= CAP )); then
-    echo "- agent: skipped — daily agent-run cap reached ($RUNS/$CAP, token breaker)" >> "$LOG"
+    echo "- agent: skipped — daily agent-run cap reached ($RUNS/$CAP, token breaker; accumulated cost \$$_USAGE_COST)" >> "$LOG"
     AGENT_OUTCOME="skipped:cap"; AGENT_RUNS_TODAY="$RUNS"; AGENT_CAP="$CAP"
   elif [[ -n "$CLAUDE_BIN" ]]; then
     # B3 (Item 4) AUTH PRE-FLIGHT: probe login BEFORE spawning the token-spending

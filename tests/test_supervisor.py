@@ -9,6 +9,7 @@ all workers to completion with a live event log, and LiveTree rendering.
 
 import importlib.util
 import io
+import json
 import os
 import tempfile
 import time
@@ -806,6 +807,88 @@ class TestStreamJsonConsumeLine(unittest.TestCase):
                     break
         self.assertGreaterEqual(len(set(phases_seen)), 2, phases_seen)
         self.assertEqual(w.status, sv.Status.DONE)
+
+
+class TestTokenUsage(unittest.TestCase):
+    def test_read_write_token_usage(self):
+        with tempfile.TemporaryDirectory() as d:
+            company_path = os.path.join(d, ".company")
+            os.makedirs(os.path.join(company_path, "ops"))
+            # Read nonexistent marker: defaults
+            usage = sv.read_token_usage(company_path)
+            self.assertEqual(usage["input"], 0)
+            self.assertEqual(usage["output"], 0)
+            self.assertEqual(usage["cost"], 0.0)
+            # Write and read back
+            sv.write_token_usage(company_path, {"input": 100, "output": 50, "cost": 0.12})
+            usage = sv.read_token_usage(company_path)
+            self.assertEqual(usage["input"], 100)
+            self.assertEqual(usage["output"], 50)
+            self.assertAlmostEqual(usage["cost"], 0.12, places=4)
+
+    def test_token_usage_date_reset(self):
+        with tempfile.TemporaryDirectory() as d:
+            company_path = os.path.join(d, ".company")
+            os.makedirs(os.path.join(company_path, "ops"))
+            # Write with old date
+            marker = sv.token_usage_marker_path(company_path)
+            marker.write_text("date=2020-01-01\ninput=1000\noutput=500\ncost=1.23\n")
+            # Read should reset to today's defaults
+            usage = sv.read_token_usage(company_path)
+            self.assertEqual(usage["input"], 0)
+            self.assertEqual(usage["output"], 0)
+            self.assertEqual(usage["cost"], 0.0)
+
+    def test_result_event_usage_capture(self):
+        emp = sv.Member("bob")
+        w = sv.Worker(emp, "t", ["true"])
+        # Simulate a result event with usage
+        result_line = json.dumps({
+            "type": "result",
+            "is_error": False,
+            "usage": {
+                "input_tokens": 250,
+                "output_tokens": 100,
+                "cost": 0.05
+            }
+        })
+        w.consume_line(result_line)
+        self.assertEqual(w.usage["input"], 250)
+        self.assertEqual(w.usage["output"], 100)
+        self.assertAlmostEqual(w.usage["cost"], 0.05, places=4)
+        self.assertEqual(w.status, sv.Status.DONE)
+
+    def test_result_event_no_usage(self):
+        emp = sv.Member("bob")
+        w = sv.Worker(emp, "t", ["true"])
+        # Result event without usage field
+        result_line = json.dumps({"type": "result", "is_error": False})
+        w.consume_line(result_line)
+        self.assertEqual(w.usage["input"], 0)
+        self.assertEqual(w.usage["output"], 0)
+        self.assertEqual(w.usage["cost"], 0.0)
+        self.assertEqual(w.status, sv.Status.DONE)
+
+    def test_supervisor_accumulates_usage(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d)
+            events = []
+            sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()),
+                                event_log=events)
+            # Create workers with mock usage (demo workers)
+            workers = {}
+            for emp_id in ("bob", "tony"):
+                emp = sv.Member(emp_id)
+                w = sv.Worker(emp, "task", ["true"])
+                w.usage = {"input": 100, "output": 50, "cost": 0.05}
+                workers[emp_id] = w
+            # Accumulate usage
+            sup._accumulate_usage(workers)
+            # Verify marker was written
+            usage = sv.read_token_usage(c)
+            self.assertEqual(usage["input"], 200)
+            self.assertEqual(usage["output"], 100)
+            self.assertAlmostEqual(usage["cost"], 0.10, places=4)
 
 
 if __name__ == "__main__":

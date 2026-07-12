@@ -63,7 +63,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -90,6 +90,70 @@ except Exception:                                              # pragma: no cove
 # a SEPARATE budget from the memory-injection cap (Elon's note: persona does
 # NOT eat the memory budget).
 _PERSONA_INLINE_CHARS = 2000
+
+# Token usage daily marker — mirrors decay.py's .last-decay-run pattern.
+TOKEN_USAGE_MARKER = ".token-usage"
+
+
+def token_usage_marker_path(company_dir) -> Path:
+    """Marker storing today's cumulative token usage (input + output).
+    Convention: .company -> .company/ops/.token-usage. Mirroring decay.py."""
+    return Path(company_dir) / "ops" / TOKEN_USAGE_MARKER
+
+
+def read_token_usage(company_dir) -> dict:
+    """Read today's token-usage marker. Returns {'date': YYYY-MM-DD, 'input': int,
+    'output': int, 'cost': float} or defaults if missing/corrupt."""
+    today = str(date.today())
+    try:
+        marker = token_usage_marker_path(company_dir)
+        if not marker.exists():
+            return {"date": today, "input": 0, "output": 0, "cost": 0.0}
+        lines = marker.read_text(encoding="utf-8").strip().split("\n")
+        result = {"date": today, "input": 0, "output": 0, "cost": 0.0}
+        for line in lines:
+            if "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip()
+                if k == "date":
+                    stored_date = v.strip()
+                    if stored_date != today:
+                        return result
+                elif k == "input":
+                    try:
+                        result["input"] = int(v.strip())
+                    except ValueError:
+                        pass
+                elif k == "output":
+                    try:
+                        result["output"] = int(v.strip())
+                    except ValueError:
+                        pass
+                elif k == "cost":
+                    try:
+                        result["cost"] = float(v.strip())
+                    except ValueError:
+                        pass
+        return result
+    except Exception:
+        return {"date": today, "input": 0, "output": 0, "cost": 0.0}
+
+
+def write_token_usage(company_dir, usage: dict) -> None:
+    """Write token-usage marker. Best-effort — marker trouble never fails the run."""
+    try:
+        marker = token_usage_marker_path(company_dir)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        today = str(date.today())
+        lines = [
+            f"date={today}",
+            f"input={usage.get('input', 0)}",
+            f"output={usage.get('output', 0)}",
+            f"cost={usage.get('cost', 0.0)}",
+        ]
+        marker.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
 
 
 # --- Item 3 (TOM-1): bound the live dispatch path ----------------------------
@@ -374,6 +438,7 @@ class Worker:
         self._t0 = None
         self._t1 = None
         self._buf = b""            # Item C1: raw bytes pending a '\n'
+        self.usage = {"input": 0, "output": 0, "cost": 0.0}  # token/cost tracking from result events
 
     def start(self):
         # Item C1 (Phase 26 fold-in / Gibby #4): binary, unbuffered pipe — we
@@ -491,6 +556,12 @@ class Worker:
             is_error = bool(event.get("is_error"))
             self.phase = "failed" if is_error else "done"
             self.status = Status.FAILED if is_error else Status.DONE
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                self.usage["input"] = usage.get("input_tokens", 0)
+                self.usage["output"] = usage.get("output_tokens", 0)
+                cost = usage.get("cost", 0.0)
+                self.usage["cost"] = float(cost) if cost else 0.0
         # else: "system" / "user" / any other recognized JSON shape — valid
         # stream-json, no new phase information; consumed without touching
         # self.last (raw JSON is never shown as the human-readable detail line).
@@ -617,6 +688,22 @@ class Supervisor:
                 event["model_warning"] = warning
             self.event_log.append(event)
 
+    def _accumulate_usage(self, workers):
+        """Accumulate token usage from all workers to daily marker."""
+        total_input = 0
+        total_output = 0
+        total_cost = 0.0
+        for w in workers.values():
+            total_input += w.usage.get("input", 0)
+            total_output += w.usage.get("output", 0)
+            total_cost += w.usage.get("cost", 0.0)
+        if total_input > 0 or total_output > 0 or total_cost > 0.0:
+            current = read_token_usage(Path(self.company_dir))
+            current["input"] += total_input
+            current["output"] += total_output
+            current["cost"] += total_cost
+            write_token_usage(Path(self.company_dir), current)
+
     def dispatch(self, assignments, demo=False, demo_delay=0.3):
         """assignments: {emp_id: task}. Spawn matching workers, run to completion live."""
         # Item 3: real workers get a wall-clock budget (demo workers stay unbounded —
@@ -674,6 +761,7 @@ class Supervisor:
                     self._emit(w, "end")
                     self.renderer.repaint(workers)
         self.renderer.final(workers)
+        self._accumulate_usage(workers)
         return workers
 
 
