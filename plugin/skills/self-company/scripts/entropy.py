@@ -291,6 +291,115 @@ def get_decay_threshold(tier):
         return None  # L2 never stales
 
 # ============================================================================
+# Item N: O(n) Sources-Array Grouping (exact/overlap pre-filter)
+# ============================================================================
+
+def group_by_sources(memories):
+    """
+    O(n) pre-filter: group memories by exact sources match (or single-source overlap).
+    For multi-source entries, check if they share at least one common source.
+
+    Returns a dict: sources_key -> list of memory ids in that group.
+    Only groups of size >= 2 are included (>=2 is a candidate condition).
+
+    The key is constructed as a canonicalized sources string:
+      - Empty sources -> empty string (canonical)
+      - Single source -> that source string
+      - Multiple sources -> sorted unique sources joined (e.g., "[#58,#125]")
+
+    This is advisory only — never auto-merges.
+    """
+    source_groups = {}
+
+    for mem in memories:
+        sources = mem.get('sources', []) or []
+        if not sources:
+            # Empty sources -> group them separately
+            key = ''
+        elif len(sources) == 1:
+            key = sources[0]
+        else:
+            # Multi-source: canonical key is sorted unique sources
+            key = ','.join(sorted(set(sources)))
+
+        if key not in source_groups:
+            source_groups[key] = []
+        source_groups[key].append(mem['id'])
+
+    # Return only groups of size >= 2 (candidate condition)
+    return {k: v for k, v in source_groups.items() if len(v) >= 2}
+
+
+def compute_sources_overlap_candidates(memories):
+    """
+    Find candidate duplicate groups via sources-array exact or subset matching.
+
+    Two memories are candidates if:
+      1. They share at least one exact source (e.g., both have "[#123]")
+      2. One source array is a subset of the other (e.g., [#58] subset of [#58, #125])
+
+    Returns: list of candidate groups [{'members': [id_a, id_b, ...], 'shared_sources': [...]}]
+    with group size >= 2. Emitted in advisory JSON only, never counts toward scoring.
+    """
+    exact_groups = group_by_sources(memories)
+
+    # Build a map: id -> sources for fast lookup
+    id_to_sources = {mem['id']: set(mem.get('sources', []) or [])
+                     for mem in memories}
+
+    candidates = []
+    processed = set()
+
+    # 1. Exact-match groups (same sources key)
+    for sources_key, ids in exact_groups.items():
+        # Skip empty-source groups (sources_key == '')
+        if not sources_key:
+            continue
+        if len(ids) < 2:
+            continue
+        group_tuple = tuple(sorted(ids))
+        if group_tuple in processed:
+            continue
+        processed.add(group_tuple)
+
+        # Compute shared sources for this group
+        shared = set(sources_key.split(',')) if ',' in sources_key else {sources_key}
+
+        candidates.append({
+            'members': sorted(ids),
+            'shared_sources': sorted(list(shared)) if shared else [],
+            'match_type': 'exact'
+        })
+
+    # 2. Subset-match: for each pair (i, j) with i < j, check if one's sources
+    #    are a subset of the other's (O(n^2) pair check, but only on groups
+    #    that haven't been exact-matched already).
+    n = len(memories)
+    for i in range(n):
+        for j in range(i+1, n):
+            id1, id2 = memories[i]['id'], memories[j]['id']
+            pair_tuple = tuple(sorted([id1, id2]))
+
+            if pair_tuple in processed:
+                continue
+
+            src1 = id_to_sources.get(id1, set())
+            src2 = id_to_sources.get(id2, set())
+
+            # Check for subset relationship: one is a subset of the other
+            shared = src1 & src2
+            if shared and (src1 < src2 or src2 < src1):
+                # One is a proper subset of the other
+                processed.add(pair_tuple)
+                candidates.append({
+                    'members': sorted([id1, id2]),
+                    'shared_sources': sorted(list(shared)),
+                    'match_type': 'subset'
+                })
+
+    return candidates
+
+# ============================================================================
 # Jaccard Similarity (for duplicate detection)
 # ============================================================================
 
@@ -991,6 +1100,9 @@ def main():
     # Item 6 anti-abuse: non-blessed memories self-declaring charter (suspicious).
     suspicious_charter_ids = find_suspicious_charter(memories)
 
+    # Item N: sources-array grouping pre-filter (O(n), advisory only)
+    sources_candidates = compute_sources_overlap_candidates(memories)
+
     # Compute dimensions
     dup_rate, dup_pairs = compute_dup_rate(memories, suppressed_pairs=suppressed_pairs)
     contra_score, contra_pairs = compute_contradiction_score(memories, suppressed_pairs=suppressed_pairs)
@@ -1032,6 +1144,8 @@ def main():
             # Item 6 anti-abuse: memories self-declaring charter without being a
             # blessed seed (surfaced, never trusted, never excluded above).
             'suspicious_charter_ids': suspicious_charter_ids,
+            # Item N: O(n) sources-array grouping pre-filter (advisory, never scored)
+            'sources_overlap_candidates': sources_candidates,
         },
         # Item 2: whether the semantic (embedding) dedup pass ran or fell back.
         'semantic_dedup': _SEMANTIC_META,

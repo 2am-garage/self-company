@@ -503,6 +503,146 @@ class TestFrontmatterDelimiterFix(unittest.TestCase):
         self.assertEqual(reinforce_memory.parse_frontmatter(text), (None, -1))
 
 
+class TestSourcesOverlapCandidates(unittest.TestCase):
+    """Item N — O(n) sources-array exact/overlap pre-filter for duplicate detection."""
+
+    def _entropy(self, d):
+        return _helpers.run_json("entropy.py", "--memory-dir", d,
+                                 "--now", "2026-06-25", "--config", "/nonexistent.md")
+
+    def test_exact_source_match_creates_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Two memories with identical single source
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#123]"]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="mem-b", sources='["[#123]"]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            self.assertEqual(len(cands), 1)
+            self.assertIn("mem-a", cands[0]["members"])
+            self.assertIn("mem-b", cands[0]["members"])
+            self.assertEqual(cands[0]["shared_sources"], ["[#123]"])
+            self.assertEqual(cands[0]["match_type"], "exact")
+
+    def test_empty_sources_not_grouped(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="empty-a", sources='[]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="empty-b", sources='[]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            # Empty sources groups should NOT be included in candidates
+            self.assertEqual(len(cands), 0)
+
+    def test_no_group_if_sources_differ(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#123]"]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="mem-b", sources='["[#456]"]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            self.assertEqual(len(cands), 0)
+
+    def test_multi_source_exact_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Both have [#58, #125] (order may differ in storage)
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#58]", "[#125]"]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="mem-b", sources='["[#58]", "[#125]"]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            self.assertEqual(len(cands), 1)
+            self.assertEqual(cands[0]["match_type"], "exact")
+            shared = set(cands[0]["shared_sources"])
+            self.assertEqual(shared, {"[#58]", "[#125]"})
+
+    def test_subset_match_detected(self):
+        with tempfile.TemporaryDirectory() as d:
+            # [#58] is a subset of [#58, #125]
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#58]"]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="mem-b", sources='["[#58]", "[#125]"]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            self.assertEqual(len(cands), 1)
+            self.assertEqual(cands[0]["match_type"], "subset")
+            self.assertEqual(cands[0]["shared_sources"], ["[#58]"])
+
+    def test_three_memory_group_aggregated(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Three memories all share source [#74]
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#74]"]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="mem-b", sources='["[#74]"]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "c.md"),
+                                  id="mem-c", sources='["[#74]"]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            self.assertEqual(len(cands), 1)
+            self.assertEqual(sorted(cands[0]["members"]), ["mem-a", "mem-b", "mem-c"])
+
+    def test_candidates_never_auto_merge_advisory_only(self):
+        # Candidates are advisory only — they appear in JSON but never
+        # cause auto-merge and never count in entropy/dup_rate.
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#999]"]', body="body a")
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="mem-b", sources='["[#999]"]', body="body b")
+            data = self._entropy(d)
+            # Candidates appear
+            cands = data["details"]["sources_overlap_candidates"]
+            self.assertEqual(len(cands), 1)
+            # But they do NOT affect dup_rate or entropy scoring
+            self.assertEqual(data["dimensions"]["dup_rate"], 0.0)
+
+    def test_candidates_sorted_by_member_ids(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="zzz", sources='["[#1]"]')
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="aaa", sources='["[#1]"]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            # Members should be sorted
+            self.assertEqual(cands[0]["members"], ["aaa", "zzz"])
+
+    def test_no_candidate_for_single_memory(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#123]"]')
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            # Single memory, even with sources, should not create a candidate
+            self.assertEqual(len(cands), 0)
+
+    def test_archived_memories_included_when_flagged(self):
+        # Sources grouping includes archived by default (same scope as entropy scoring)
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(os.path.join(d, "L0-working", "a.md"),
+                                  id="mem-a", sources='["[#42]"]', status="active")
+            _helpers.write_memory(os.path.join(d, "L0-working", "b.md"),
+                                  id="mem-b", sources='["[#42]"]', status="archived")
+            # Default call excludes archived
+            data = self._entropy(d)
+            cands = data["details"]["sources_overlap_candidates"]
+            # Only mem-a (no candidate, single memory)
+            self.assertEqual(len(cands), 0)
+            # With include-archived flag
+            data_inc = _helpers.run_json("entropy.py", "--memory-dir", d, "--now",
+                                         "2026-06-25", "--config", "/nonexistent.md",
+                                         "--include-archived")
+            cands_inc = data_inc["details"]["sources_overlap_candidates"]
+            self.assertEqual(len(cands_inc), 1)
+            self.assertEqual(sorted(cands_inc[0]["members"]), ["mem-a", "mem-b"])
+
+
 class TestLoadOrderPreserved(unittest.TestCase):
     """Phase 28 behaviour-preservation (Gibby MUST-FIX 1): entropy's legacy
     `load_memories()` used a BARE UNSORTED `rglob`; the corpus.py migration must
