@@ -132,11 +132,32 @@
 - ✅ Hooks are plugin-native — all **8 hook registrations across 7 events** are declared once in `hooks/hooks.json` at the plugin root and run via `${CLAUDE_PLUGIN_ROOT}`, so Claude Code loads them on install with no per-repo `install-hook.sh` edit: `Stop` (CAPTURE), `SessionStart` (catch-up push **+** `hook_schedule_guard.sh` cron self-heal — two registrations on this event), `UserPromptSubmit` (ask-time memory injection), `PreCompact` (capture-rescue), `PreToolUse` (deny `rm`/`truncate`/`find … -delete`/`mv`-away under `.company/memory` **or the `.company` store root**), `PostToolUse` (lint memory writes), `SessionEnd` (verify fresh captures). Each script's first action is a `.company` opt-in guard (silent `exit 0` in non-company repos).
 - ✅ `install-hook.sh` is a legacy-cleaner only — nothing to install (hooks are plugin-native; the old `install` no-op command was removed in Phase 14); `uninstall` cleans legacy `settings.json` entries that would otherwise double-fire against the plugin hooks; `status` reports plugin-native. See `references/operations.md`.
 
+### v0.1.15 Daily Research Loop Ships Its First Two Features (2026-07-12)
+
+- ✅ **Real token accounting** (Mike Prop A, 2026-07-11 brief) — `supervisor.py`'s
+  existing `result`-event branch now captures the usage/cost fields (previously
+  only `is_error` was read) and persists a running daily total to
+  `.company/ops/.token-usage`; `daily-run.sh`'s budget-degradation check reads
+  the real total alongside the `DAILY_RUNS_PER_DAY` proxy. Closes the long-open
+  "Still Open" item below.
+- ✅ **O(n) sources-array dup-candidate pre-filter** (Tony's 2026-07-11 proposal,
+  evidence-confirmed same day) — `entropy.py` groups active+archived L0 memories
+  by exact `sources:` match / single-source overlap and surfaces groups ≥2 as
+  ADVISORY candidates in the JSON output; never affects `dup_rate`/entropy score,
+  never auto-merges. Catches same-source duplicate pairs cosine similarity misses.
+- Both built by the Chairman's daily loop (Mike 08:00 research → Elon review →
+  `company-run.sh` dispatch → Bob build ⚔ Gibby verify → suite → merge), the
+  first run with headless Edit/Write + WebSearch permissions granted 2026-07-11.
+
 ### Still Open / Deferred
 
 - ⏳ Code/Chat entropy — code drift detection, session distillation
 - ⏳ NLI/cross-encoder second signal for the cosine [0.74, 0.81] overlap band
-- ⏳ Real token accounting (policy §3 currently documented as a runs/day proxy)
+- ⏳ Test-infra: solo `python3 -m unittest tests.test_entropy` crashes on a
+  machine with `.rag-venv` (unguarded in-process `import entropy` triggers the
+  module-level re-exec; full-suite runs are shielded by earlier modules' env).
+  Also `test_daily_run` `test_clean_run_stays_flat_no_false_alarm` fails on main
+  (`keep` vs `flat`, likely date-sensitive) — both on Tony's queue (2026-07-12).
 - ⏳ RAG B.2 — semantic dedup-at-capture (deferred: daily reinforce already absorbs transient dups; false-positive on a write path risks silent loss)
 - ⏳ Persona boilerplate single-sourcing (deferred: isolated workers load only their persona)
 - ✅ July (HR) now has an active scheduled job — the **capability steward** audit (Phase 17) closes the long-open "July has no clear active job" gap. (A quantified worker-*performance* review remains a separate, still-pending track.)

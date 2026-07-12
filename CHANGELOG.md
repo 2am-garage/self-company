@@ -10,6 +10,19 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.15] — 2026-07-12: first features shipped by the daily research loop
+
+- Real token accounting: `supervisor.py` captures usage/cost from the `result`
+  event it already parsed (only `is_error` before) into a running daily total
+  at `.company/ops/.token-usage`; `daily-run.sh`'s budget-degradation check
+  reads the real total alongside the `DAILY_RUNS_PER_DAY` proxy.
+- `entropy.py` O(n) sources-array dup-candidate pre-filter (advisory-only JSON
+  candidates; never scores, never auto-merges) — catches same-source duplicate
+  pairs the cosine scan misses.
+- Process note: both items came from the new daily loop (Mike 08:00 research →
+  Elon review → dispatch → red/blue → merge); headless workers gained
+  Edit/Write + WebSearch/WebFetch permissions on 2026-07-11.
+
 ## [0.1.14] — Phase 29: prompt/harness engineering & the employee model table
 
 - Per-employee model table wired end to end (`Employee.resolved_model`): each
