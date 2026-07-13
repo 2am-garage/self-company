@@ -26,10 +26,15 @@ _spec.loader.exec_module(sv)
 
 
 def _company(d, ids=("elon", "phoebe", "tony", "bob")):
+    # Phase 32 hotfix: Member.roster() now uses the strict per-desk predicate
+    # (employee.is_valid_desk) — a valid desk needs BOTH persona.md AND
+    # context.md — so fixtures must create both, not just persona.md.
     base = os.path.join(d, ".company", "org", "employees")
     for i in ids:
         os.makedirs(os.path.join(base, i))
         open(os.path.join(base, i, "persona.md"), "w").close()
+        with open(os.path.join(base, i, "context.md"), "w") as f:
+            f.write("---\nname: %s\n---\n" % i.capitalize())
     return os.path.join(d, ".company")
 
 
@@ -76,6 +81,124 @@ class TestMember(unittest.TestCase):
             data = json.loads(r.stdout)
             self.assertEqual(data["roster"], ["elon", "phoebe", "tony", "gibby",
                                               "mike", "bob", "july", "tom"])
+
+
+class TestRosterStrictMembership(unittest.TestCase):
+    """Phase 32 hotfix Finding 2: Member.roster() must share the SAME strict
+    per-desk predicate (employee.is_valid_desk) as discover()/R7 — so a desk
+    that the validator excludes (persona-only ghost, symlinked persona, bad
+    charset) is NOT listed here either and never reaches the live dispatch path
+    that inlines persona.md into a worker prompt."""
+
+    def _base(self, d):
+        base = os.path.join(d, ".company", "org", "employees")
+        os.makedirs(base, exist_ok=True)
+        return base
+
+    def _valid_desk(self, base, name):
+        desk = os.path.join(base, name)
+        os.makedirs(desk, exist_ok=True)
+        with open(os.path.join(desk, "persona.md"), "w") as f:
+            f.write("persona\n")
+        with open(os.path.join(desk, "context.md"), "w") as f:
+            f.write("---\nname: %s\n---\n" % name.capitalize())
+        return desk
+
+    def _roster_ids(self, company):
+        return [e.id for e in sv.Member.roster(company)]
+
+    def test_persona_only_ghost_desk_not_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = self._base(d)
+            for i in ("elon", "phoebe", "tony", "gibby", "mike", "bob", "july", "tom"):
+                self._valid_desk(base, i)
+            ghost = os.path.join(base, "ghost")           # persona.md ONLY, no context.md
+            os.makedirs(ghost)
+            with open(os.path.join(ghost, "persona.md"), "w") as f:
+                f.write("SMUGGLED GHOST PERSONA\n")
+            ids = self._roster_ids(os.path.join(d, ".company"))
+            self.assertNotIn("ghost", ids)
+
+    def test_symlinked_persona_desk_not_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = self._base(d)
+            for i in ("elon", "phoebe", "tony", "gibby", "mike", "bob", "july", "tom"):
+                self._valid_desk(base, i)
+            outside = os.path.join(d, "outside-persona.md")
+            with open(outside, "w") as f:
+                f.write("OUT-OF-TREE PERSONA\n")
+            evil = os.path.join(base, "evil-desk")
+            os.makedirs(evil)
+            with open(os.path.join(evil, "context.md"), "w") as f:
+                f.write("---\nname: Evil\n---\n")
+            os.symlink(outside, os.path.join(evil, "persona.md"))
+            ids = self._roster_ids(os.path.join(d, ".company"))
+            self.assertNotIn("evil-desk", ids)
+
+    def test_bad_charset_desk_not_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = self._base(d)
+            self._valid_desk(base, "bob")
+            self._valid_desk(base, "BadCase")            # valid files, invalid id charset
+            ids = self._roster_ids(os.path.join(d, ".company"))
+            self.assertNotIn("BadCase", ids)
+
+    def test_valid_hired_desk_is_listed_after_core_sorted(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = self._base(d)
+            for i in ("elon", "phoebe", "tony", "gibby", "mike", "bob", "july", "tom"):
+                self._valid_desk(base, i)
+            self._valid_desk(base, "sam-jr")             # a real hired desk
+            ids = self._roster_ids(os.path.join(d, ".company"))
+            self.assertIn("sam-jr", ids)
+            # core order first (the fixed ORDER), then discovered ids sorted
+            self.assertEqual(ids, ["elon", "phoebe", "tony", "gibby", "mike",
+                                   "bob", "july", "tom", "sam-jr"])
+
+    def test_zero_hired_desk_list_is_the_core_roster(self):
+        # Byte-identity: with all 8 core desks and NO hired desk, --list is the
+        # 8 core ids in the fixed ORDER (unchanged from pre-hotfix).
+        with tempfile.TemporaryDirectory() as d:
+            base = self._base(d)
+            for i in ("elon", "phoebe", "tony", "gibby", "mike", "bob", "july", "tom"):
+                self._valid_desk(base, i)
+            company = os.path.join(d, ".company")
+            self.assertEqual(self._roster_ids(company),
+                             ["elon", "phoebe", "tony", "gibby", "mike",
+                              "bob", "july", "tom"])
+            script = os.path.join(_helpers.SCRIPTS_DIR, "supervisor.py")
+            r = subprocess.run([sys.executable, script, "--company", company, "--list"],
+                              capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)["roster"],
+                             ["elon", "phoebe", "tony", "gibby", "mike",
+                              "bob", "july", "tom"])
+
+    def test_ghost_and_symlink_absent_from_cli_list_too(self):
+        # The REAL dispatch seam is `supervisor.py --list`; prove exclusion end-to-end.
+        with tempfile.TemporaryDirectory() as d:
+            base = self._base(d)
+            self._valid_desk(base, "bob")
+            os.makedirs(os.path.join(base, "ghost"))
+            with open(os.path.join(base, "ghost", "persona.md"), "w") as f:
+                f.write("ghost\n")
+            outside = os.path.join(d, "out.md")
+            with open(outside, "w") as f:
+                f.write("out\n")
+            evil = os.path.join(base, "evil-desk")
+            os.makedirs(evil)
+            with open(os.path.join(evil, "context.md"), "w") as f:
+                f.write("---\nname: E\n---\n")
+            os.symlink(outside, os.path.join(evil, "persona.md"))
+            script = os.path.join(_helpers.SCRIPTS_DIR, "supervisor.py")
+            r = subprocess.run([sys.executable, script, "--company",
+                               os.path.join(d, ".company"), "--list"],
+                              capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            roster = json.loads(r.stdout)["roster"]
+            self.assertIn("bob", roster)
+            self.assertNotIn("ghost", roster)
+            self.assertNotIn("evil-desk", roster)
 
 
 class TestWorker(unittest.TestCase):
@@ -365,6 +488,8 @@ class TestDispatchBudget(unittest.TestCase):
         for i in ids:
             os.makedirs(os.path.join(base, i))
             open(os.path.join(base, i, "persona.md"), "w").close()
+            with open(os.path.join(base, i, "context.md"), "w") as f:
+                f.write("---\nname: %s\n---\n" % i.capitalize())
         return os.path.join(d, ".company")
 
     def test_hung_worker_killed_at_budget_and_dispatch_returns(self):
