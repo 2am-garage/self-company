@@ -132,6 +132,70 @@ class TestDiscoverHiredDesks(unittest.TestCase):
         self.assertEqual(discover(self.tmp), CORE_EMPLOYEES)
 
 
+class TestDiscoverSymlinkLeastPrivilege(unittest.TestCase):
+    """Phase 32 Bug 4: `is_file()` follows symlinks, so a desk whose
+    persona.md/context.md points OUTSIDE the desk would be discovered and read
+    verbatim into the dispatch prompt (invisible in a git diff). discover() must
+    reject a symlinked desk file — and a symlinked desk directory."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _base(self):
+        base = os.path.join(self.tmp, "org", "employees")
+        os.makedirs(base, exist_ok=True)
+        return base
+
+    def test_symlinked_persona_not_discovered(self):
+        base = self._base()
+        outside = os.path.join(self.tmp, "outside-persona.md")
+        with open(outside, "w") as f:
+            f.write("SMUGGLED\n")
+        d = os.path.join(base, "evil-desk")
+        os.makedirs(d)
+        with open(os.path.join(d, "context.md"), "w") as f:
+            f.write("---\nname: X\n---\nb\n")
+        os.symlink(outside, os.path.join(d, "persona.md"))
+        self.assertNotIn("evil-desk", discover(self.tmp))
+
+    def test_symlinked_context_not_discovered(self):
+        base = self._base()
+        outside = os.path.join(self.tmp, "outside-context.md")
+        with open(outside, "w") as f:
+            f.write("---\nname: X\n---\nb\n")
+        d = os.path.join(base, "evil-desk")
+        os.makedirs(d)
+        with open(os.path.join(d, "persona.md"), "w") as f:
+            f.write("persona\n")
+        os.symlink(outside, os.path.join(d, "context.md"))
+        self.assertNotIn("evil-desk", discover(self.tmp))
+
+    def test_symlinked_desk_directory_not_discovered(self):
+        base = self._base()
+        real = os.path.join(self.tmp, "real-desk")
+        os.makedirs(real)
+        with open(os.path.join(real, "persona.md"), "w") as f:
+            f.write("persona\n")
+        with open(os.path.join(real, "context.md"), "w") as f:
+            f.write("---\nname: X\n---\nb\n")
+        os.symlink(real, os.path.join(base, "linked-desk"))
+        self.assertNotIn("linked-desk", discover(self.tmp))
+
+    def test_real_in_tree_files_still_discovered(self):
+        # Control: a normal desk with real files is unaffected by the guard.
+        base = self._base()
+        d = os.path.join(base, "good-desk")
+        os.makedirs(d)
+        with open(os.path.join(d, "persona.md"), "w") as f:
+            f.write("persona\n")
+        with open(os.path.join(d, "context.md"), "w") as f:
+            f.write("---\nname: X\n---\nb\n")
+        self.assertIn("good-desk", discover(self.tmp))
+
+
 class TestDiscoverCharsetDefenseInDepth(unittest.TestCase):
     """ID charset ^[a-z][a-z0-9-]{1,23}$ enforced HERE too (defense in depth
     alongside hire.sh) — a hand-crafted evil desk dir must be ignored, even

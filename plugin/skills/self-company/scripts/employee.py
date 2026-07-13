@@ -273,14 +273,40 @@ STEP_OWNER = {
 _DESK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 
 
+def _desk_regular_file(desk_dir, filename):
+    """True iff `desk_dir/filename` is a REAL, in-tree regular file — present, a
+    regular file, NOT a symlink, and physically resolving INSIDE `desk_dir`.
+
+    Phase 32 Bug 4 (least-privilege): `Path.is_file()` FOLLOWS symlinks, so a
+    desk whose `persona.md` is symlinked to `/tmp/outside` used to be discovered
+    and read verbatim into the dispatch prompt — an out-of-tree file invisible
+    in a `git diff` of the store. A desk file must live in the desk. We reject
+    the symlinked FILE and (defense in depth) any resolution that escapes the
+    desk dir (e.g. a symlinked parent). Never raises."""
+    try:
+        p = desk_dir / filename
+        if p.is_symlink():
+            return False
+        if not p.is_file():
+            return False
+        rp = Path(os.path.realpath(str(p)))
+        desk_rp = Path(os.path.realpath(str(desk_dir)))
+        return desk_rp == rp or desk_rp in rp.parents
+    except OSError:
+        return False
+
+
 def discover(company_dir):
     """Return CORE_EMPLOYEES plus every valid HIRED desk for this company,
     sorted, appended after the core eight. A "valid" hired desk: its directory
     name matches `_DESK_ID_RE`, is not a core id (core always wins — a
     directory literally named e.g. "elon" is simply ignored here, never
-    shadowing or extending the real core desk), and has BOTH `persona.md` AND
-    `context.md` present (hire.sh's own atomicity guarantee — a half-scaffolded
-    desk is not yet a real employee).
+    shadowing or extending the real core desk), is a real (non-symlink)
+    directory, and has BOTH `persona.md` AND `context.md` present as REAL,
+    in-tree regular files — not symlinks pointing outside the desk (Phase 32
+    Bug 4: `is_file()` follows symlinks, which would let an out-of-tree file be
+    read verbatim into the dispatch prompt; see `_desk_regular_file`). A
+    half-scaffolded or symlink-smuggling desk is not a real employee.
 
     Zero-desk behavior returns EXACTLY `CORE_EMPLOYEES` (same tuple identity
     semantics, same order) — every consumer of this seam (schedule_config's
@@ -302,9 +328,10 @@ def discover(company_dir):
             if not _DESK_ID_RE.match(name):
                 continue                       # bad charset -> ignored (R7 flags it)
             try:
-                if not d.is_dir():
-                    continue
-                if (d / "persona.md").is_file() and (d / "context.md").is_file():
+                if d.is_symlink() or not d.is_dir():
+                    continue                   # symlinked/non-dir desk -> ignored
+                if (_desk_regular_file(d, "persona.md")
+                        and _desk_regular_file(d, "context.md")):
                     found.append(name)
             except OSError:
                 continue
