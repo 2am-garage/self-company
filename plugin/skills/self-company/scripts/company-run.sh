@@ -213,7 +213,25 @@ fi
 echo "[company-run] task: $TASK"
 echo "[company-run] plan ($planned_by): $plan_json"
 
-# --- 2. DISPATCH (supervisor spawns the assigned employees, live) ----------
+# --- 2. VALIDATE before dispatch (Phase 32 hotfix Finding 2, defense-in-depth) -
+# The supervisor's roster already shares discover()'s strict per-desk predicate,
+# so a ghost/symlinked/bad-charset desk is never LISTED. This gate is the
+# belt-and-braces companion: run the full Layer-B validator (R1-R7) over the
+# store and REFUSE to dispatch on a violation (exit 3), rather than sending
+# workers into a company whose org/employees/ carries a flagged desk. Best-
+# effort: if python3 or the validator is unavailable we do NOT block (the
+# roster-level strictness still holds); only an actual validator VIOLATION
+# stops the run.
+VALIDATOR_RT="$SCRIPTS_RT/schedule_validator.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$VALIDATOR_RT" ]]; then
+  if ! vout="$(python3 "$VALIDATOR_RT" --company "$COMPANY" 2>&1)"; then
+    echo "[company-run] REFUSING to dispatch — org/schedule.yaml or a desk fails Layer-B validation:" >&2
+    printf '%s\n' "$vout" | sed 's/^/[company-run]   /' >&2
+    exit 3
+  fi
+fi
+
+# --- 3. DISPATCH (supervisor spawns the assigned employees, live) ----------
 if $DEMO; then
   python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --demo
 else
@@ -221,7 +239,7 @@ else
 fi
 rc=$?
 
-# --- 3. LEDGER -------------------------------------------------------------
+# --- 4. LEDGER -------------------------------------------------------------
 # Store the FULL assignment JSON (no truncation) so org-status.py can attribute
 # EVERY assigned employee, not just the first. Sanitize '|' -> '/' so a subtask
 # string can't break the markdown table (JSON itself has none). Task stays short.
