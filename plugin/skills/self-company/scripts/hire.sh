@@ -227,6 +227,15 @@ TEMPLATE_PERSONA="$TEMPLATES_DIR/new-${TIER}-persona.md"
 [[ -f "$TEMPLATE_CTX" ]] || err "missing template: $TEMPLATE_CTX"
 [[ -f "$TEMPLATE_PERSONA" ]] || err "missing template: $TEMPLATE_PERSONA"
 
+# --- Bug 2: FAIL-CLOSED on a missing validator ------------------------------
+# The validator is what enforces R7 at hire time (spec §2: REFUSE at hire time,
+# don't degrade). Without it we CANNOT prove the new desk is legal — so we
+# refuse the hire outright rather than scaffold an UNCHECKED desk (a desk
+# claiming `role: execution gateway` must never sail through on a silent
+# fail-open). Checked BEFORE any scaffolding, so a refusal leaves nothing behind.
+VALIDATOR="$SCRIPT_DIR/schedule_validator.py"
+[[ -f "$VALIDATOR" ]] || err "validator not found at $VALIDATOR — refusing to hire unchecked (fail-closed: hire.sh cannot prove the new desk satisfies Layer-B R7 without it)"
+
 # Title-case the id ("sam-jr" -> "Sam Jr") for the default display name —
 # bash parameter expansion only (no GNU-sed \U dependency).
 _titlecase() {
@@ -253,6 +262,9 @@ E_PEOPLE_LEAD="$(_esc "$PEOPLE_LEAD")"
 E_MODEL="$(_esc "$MODEL")"
 E_DATE="$(_esc "$DATE")"
 
+# _render returns sed's exit status (sed is the function's last command), so a
+# malformed substitution (`sed: unterminated s command`, …) fails LOUDLY at the
+# call site instead of silently writing a half-rendered desk (Gibby's note).
 _render() {
   sed -e "s|@@ID@@|$E_ID|g" \
       -e "s|@@DISPLAY_NAME@@|$E_DISPLAY|g" \
@@ -266,19 +278,22 @@ _render() {
 
 DESK="$COMPANY/org/employees/$ID"
 mkdir -p "$DESK"
-_render "$TEMPLATE_CTX" > "$DESK/context.md"
-_render "$TEMPLATE_PERSONA" > "$DESK/persona.md"
+# Check each render's exit status; a sed failure removes the partial desk and
+# fails the hire (atomic — never leave a half-rendered desk behind).
+if ! _render "$TEMPLATE_CTX" > "$DESK/context.md" \
+   || ! _render "$TEMPLATE_PERSONA" > "$DESK/persona.md"; then
+  rm -rf "$DESK"
+  err "template rendering failed (sed error) — removed the partial desk (hire is atomic)"
+fi
 : > "$DESK/log.md"
 : > "$DESK/scratchpad.md"
 
 # --- atomic: a validator failure removes the just-scaffolded desk again ----
-VALIDATOR="$SCRIPT_DIR/schedule_validator.py"
-if [[ -f "$VALIDATOR" ]]; then
-  if ! OUT="$("$PY" "$VALIDATOR" --company "$COMPANY" 2>&1)"; then
-    rm -rf "$DESK"
-    err "scaffolded desk failed validation — removed (hire is atomic):
+# (VALIDATOR existence was already asserted fail-closed above, before scaffold.)
+if ! OUT="$("$PY" "$VALIDATOR" --company "$COMPANY" 2>&1)"; then
+  rm -rf "$DESK"
+  err "scaffolded desk failed validation — removed (hire is atomic):
 $OUT"
-  fi
 fi
 
 echo "hire.sh: hired '$ID' ($TIER) — desk at $DESK"

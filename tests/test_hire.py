@@ -220,6 +220,65 @@ class TestAtomicity(HireTestBase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class TestGibbyFixRound(HireTestBase):
+    """Regression tests for Gibby's Phase 32 adversarial pass."""
+
+    def _run_from_copied_scripts(self, scripts_dir, args):
+        hire = os.path.join(scripts_dir, "hire.sh")
+        return subprocess.run(["bash", hire, *args], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL)
+
+    def test_bug1_fire_then_validator_ok_then_rehire_succeeds(self):
+        # BUG 1: --fire tombstones to org/employees/.fired/, which r7_violations
+        # used to raw-scan and flag as a bad-charset id -> validator exit 3
+        # FOREVER after, breaking every subsequent hire. After the fix the
+        # `.fired` dotfile dir is skipped: validator stays `ok` and re-hiring works.
+        r1 = self.hire("temp-worker", "--tier", "worker", "--role", "QA")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        rf = _run(["--fire", "temp-worker", "--company", self.company])
+        self.assertEqual(rf.returncode, 0, rf.stderr)
+        # the tombstone dir really is present (so this test would catch a regression)
+        self.assertTrue(os.path.isdir(
+            os.path.join(self.company, "org", "employees", ".fired")))
+        val = subprocess.run(
+            ["python3", os.path.join(SCRIPTS, "schedule_validator.py"),
+             "--company", self.company], capture_output=True, text=True)
+        self.assertEqual(val.returncode, 0, val.stdout)   # NOT 3
+        self.assertIn("ok", val.stdout)
+        self.assertNotIn("R7", val.stdout)
+        # ...and a subsequent hire still succeeds (would roll back before the fix)
+        r2 = self.hire("another-worker", "--tier", "worker", "--role", "Helper")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+
+    def test_bug2_missing_validator_fails_closed_no_desk(self):
+        # BUG 2: a missing validator used to let the hire SUCCEED unchecked
+        # (fail-open) — a desk claiming a charter role would be written. Now it
+        # must fail CLOSED: refuse, scaffold nothing.
+        skill_copy = os.path.join(self.tmp, "skillcopy")
+        shutil.copytree(os.path.join(REPO, "plugin", "skills", "self-company"),
+                        skill_copy)
+        scripts_copy = os.path.join(skill_copy, "scripts")
+        os.remove(os.path.join(scripts_copy, "schedule_validator.py"))
+        r = self._run_from_copied_scripts(
+            scripts_copy,
+            ["gw", "--tier", "worker", "--role", "execution gateway",
+             "--company", self.company])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("fail-closed", r.stderr)
+        self.assertFalse(os.path.exists(self.desk("gw")))
+
+    def test_sed_failure_removes_partial_desk_and_fails_loudly(self):
+        # Gibby's note: _render's sed calls didn't check exit status, so a
+        # `sed: unterminated s command` (e.g. a newline in the role value) wrote
+        # a half-rendered desk silently. Now the render failure is loud and the
+        # partial desk is removed (atomic).
+        r = self.hire("nl-worker", "--tier", "worker",
+                      "--role", "line1\nline2")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("rendering failed", r.stderr)
+        self.assertFalse(os.path.exists(self.desk("nl-worker")))
+
+
 class TestFire(HireTestBase):
     def test_fire_hired_tombstones(self):
         self.hire("sam-jr", "--tier", "worker", "--role", "QA")
