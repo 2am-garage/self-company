@@ -444,5 +444,93 @@ class TestR7HireAsData(Base):
         self.assertNotIn("R7", out)
 
 
+class TestR7GibbyFixRound(Base):
+    """Regression tests for Gibby's Phase 32 adversarial pass (validator side)."""
+
+    _counter = 0
+
+    def _copy_template(self):
+        # A FRESH isolated company per call (some tests build several), each a
+        # full copy of the shipped template so R7's manager-chain walk sees the
+        # real core desks.
+        TestR7GibbyFixRound._counter += 1
+        c = os.path.join(self.tmp, f"co{TestR7GibbyFixRound._counter}", ".company")
+        shutil.copytree(TEMPLATE, c)
+        return c
+
+    # --- BUG 1: a .fired tombstone dir must NOT be flagged as a bad-charset id
+    def test_bug1_fired_tombstone_dir_not_flagged(self):
+        c = self._copy_template()
+        fired = os.path.join(c, "org", "employees", ".fired", "temp-2026-07-13")
+        os.makedirs(fired)
+        with open(os.path.join(fired, "context.md"), "w") as f:
+            f.write("---\nname: T\n---\nb\n")
+        with open(os.path.join(fired, "persona.md"), "w") as f:
+            f.write("x")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)          # NOT 3
+        self.assertNotIn("R7", out)
+        self.assertNotIn(".fired", out)
+
+    def test_bug1_any_dotfile_entry_skipped(self):
+        c = self._copy_template()
+        os.makedirs(os.path.join(c, "org", "employees", ".scratch"))
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)
+
+    # --- BUG 3: role-claim detection catches ANY phrasing --------------------
+    def _role_flagged(self, role):
+        c = self._copy_template()
+        _mkdesk(c, "rc-desk", role=role)
+        rc, out, _ = self.validate(c)
+        return rc == 3 and "charter singleton" in out
+
+    def test_bug3_hyphen_and_spacing_variants_all_caught(self):
+        for role in ("execution-gateway", "HR-Lead", "qa-signoff",
+                     "chief-executive-officer", "execution  gateway",
+                     "EXECUTION_GATEWAY", "Chief Executive Officer",
+                     "qa sign-off", "human-resources-team-lead"):
+            self.assertTrue(self._role_flagged(role),
+                            f"{role!r} should be flagged as a charter role claim")
+
+    def test_bug3_ordinary_titles_still_not_flagged(self):
+        for role in ("Build Engineer", "R&D Researcher", "QA Assistant",
+                     "Data Analyst", "Marketing Lead-Gen Specialist"):
+            self.assertFalse(self._role_flagged(role),
+                             f"{role!r} must NOT be flagged")
+
+    # --- BUG 4: a symlinked desk file is flagged (and never discovered) ------
+    def test_bug4_symlinked_persona_flagged(self):
+        c = self._copy_template()
+        outside = os.path.join(self.tmp, "outside-persona.md")
+        with open(outside, "w") as f:
+            f.write("SMUGGLED\n")
+        d = os.path.join(c, "org", "employees", "evil-desk")
+        os.makedirs(d)
+        with open(os.path.join(d, "context.md"), "w") as f:
+            f.write("---\nname: X\nrole: QA\ntier: worker\n"
+                    "manager: elon\npeople_lead: july\n---\nb\n")
+        os.symlink(outside, os.path.join(d, "persona.md"))
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("evil-desk", out)
+        self.assertIn("symlink", out)
+
+    def test_bug4_symlinked_context_flagged(self):
+        c = self._copy_template()
+        outside = os.path.join(self.tmp, "outside-context.md")
+        with open(outside, "w") as f:
+            f.write("---\nname: X\ntier: worker\nmanager: elon\n---\nb\n")
+        d = os.path.join(c, "org", "employees", "evil-desk")
+        os.makedirs(d)
+        with open(os.path.join(d, "persona.md"), "w") as f:
+            f.write("persona\n")
+        os.symlink(outside, os.path.join(d, "context.md"))
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("symlink", out)
+
+
 if __name__ == "__main__":
     unittest.main()

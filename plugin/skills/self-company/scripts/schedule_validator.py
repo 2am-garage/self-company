@@ -64,14 +64,42 @@ import employee as emp        # authoritative Layer-B role topology (single sour
 
 # R7(a): a hired employee's `role:` text may not claim one of the FOUR charter
 # singleton roles (Elon=CEO, Phoebe=execution gateway, July=HR line/lead,
-# Gibby=QA sign-off). Whole-phrase, case-insensitive; ordinary role titles
-# ("Build Engineer", "R&D Researcher", ...) never match.
-_ROLE_CLAIM_RE = re.compile(
-    r"\b(ceo|chief executive(?:\s+officer)?|execution gateway|"
-    r"hr (?:team )?lead|human resources (?:team )?lead|"
-    r"qa sign-?off|qa gate)\b",
-    re.IGNORECASE,
+# Gibby=QA sign-off). The spec says ANY PHRASING — so we do NOT rely on a
+# brittle regex that only sees one separator (Phase 32 Bug 3: `execution-gateway`,
+# `HR-Lead`, `qa-signoff`, `chief-executive-officer`, and double-spaced variants
+# all slipped past the old `\b...\s+...` regex). Instead we NORMALIZE the role
+# text — casefold, then collapse every run of non-alphanumerics (hyphens,
+# underscores, whitespace, punctuation) to a single space — and word-boundary
+# match the canonical charter phrases against it. Ordinary titles ("Build
+# Engineer", "R&D Researcher", "QA Assistant") never match.
+_CHARTER_ROLE_PHRASES = (
+    "ceo",
+    "chief executive",
+    "chief executive officer",
+    "execution gateway",
+    "hr lead",
+    "hr team lead",
+    "human resources lead",
+    "human resources team lead",
+    "qa signoff",
+    "qa sign off",
+    "qa gate",
 )
+
+
+def _normalize_role_text(s):
+    """Casefold + collapse every run of non-alphanumeric characters to a single
+    space, so 'Execution-Gateway', 'execution  gateway', and 'EXECUTION_GATEWAY'
+    all normalize to 'execution gateway'."""
+    return re.sub(r"[^a-z0-9]+", " ", str(s).casefold()).strip()
+
+
+def _claims_charter_role(role):
+    """True iff `role` text claims (in any phrasing) one of the four charter
+    singleton roles. Word-boundary substring match against the normalized text
+    so 'CEO' matches the standalone token but not a longer word containing it."""
+    padded = f" {_normalize_role_text(role)} "
+    return any(f" {phrase} " in padded for phrase in _CHARTER_ROLE_PHRASES)
 
 
 def _load(company, config):
@@ -247,6 +275,14 @@ def r7_violations(company):
     # a bad-charset directory from dispatch; this SURFACES it instead of
     # leaving it inert forever unnoticed.
     for d in entries:
+        # Phase 32 Bug 1: a DOTFILE entry (`.fired` tombstone dir, or any
+        # internal dot-dir) is NOT a desk and must share discover()'s exclusion
+        # — otherwise --fire's `.fired/` tombstone would be flagged as a
+        # bad-charset id and the validator would exit 3 FOREVER after (breaking
+        # every subsequent hire and the schedule.sh validator gate). discover()
+        # already skips these via the leading-`[a-z]` charset rule; mirror it.
+        if d.name.startswith("."):
+            continue
         try:
             if not d.is_dir():
                 continue
@@ -260,6 +296,22 @@ def r7_violations(company):
                 f"must match ^[a-z][a-z0-9-]{{1,23}}$ (ignored by discover, "
                 f"never dispatched)"
             )
+            continue
+        # Phase 32 Bug 4 (least-privilege): a valid-charset desk whose
+        # persona.md/context.md is a SYMLINK is excluded by discover() (so it
+        # never dispatches) but must be SURFACED here — a symlinked desk file
+        # can smuggle out-of-tree text into a prompt, invisible in a git diff.
+        for fn in ("persona.md", "context.md"):
+            try:
+                if (d / fn).is_symlink():
+                    v.append(
+                        f"R7: '{d.name}' desk file '{fn}' is a symlink — a desk "
+                        f"file must be a real in-tree file, never a symlink "
+                        f"(excluded from discover; could smuggle out-of-tree "
+                        f"text into the dispatch prompt)"
+                    )
+            except OSError:
+                continue
 
     discovered = emp.discover(company)
     hired = [n for n in discovered if n not in emp.CORE_EMPLOYEES]
@@ -275,7 +327,7 @@ def r7_violations(company):
                 f"— a hired employee's context.md must set tier: worker or "
                 f"tier: manager"
             )
-        if _ROLE_CLAIM_RE.search(e.role or ""):
+        if _claims_charter_role(e.role or ""):
             v.append(
                 f"R7: '{name}' role '{e.role}' claims a charter singleton role "
                 f"(CEO / execution gateway / HR lead / QA sign-off) — those "
