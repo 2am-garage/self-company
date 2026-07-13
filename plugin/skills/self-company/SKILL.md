@@ -174,9 +174,9 @@ stages, iron disciplines, worked examples). Start a spec from
 
 The company runs on **triggers** (Chairman call · 6-hourly `daily-run.sh` cron ·
 `fire-trigger.sh` event · session handoff), a keyed per-project **crontab**
-(`schedule.sh`, tunable in `org/schedule.yaml`), and **8 plugin-native hook
+(`schedule.sh`, tunable in `org/schedule.yaml`), and **9 plugin-native hook
 registrations across 7 events** (`hooks/hooks.json`, each opt-in-guarded to a
-`.company` repo — `SessionStart` fires two). A durability floor
+`.company` repo — `SessionStart` and `PostToolUse` each fire two). A durability floor
 (pre-mutation `memory/` snapshots, soft-delete tombstones, offline-gap damper) and
 reporting (`report.py` ledger, catch-up `SessionStart` push, on-demand views) round it
 out. An **optional holding-company fleet** layer (`fleet.py`/`fleet-run.sh`) drives N
@@ -228,7 +228,7 @@ via `${CLAUDE_PLUGIN_ROOT}`) and survive version bumps automatically.
 
 These are opt-in and live only on your machine (`.claude/` is git-ignored):
 
-- **Hooks** — none needed: all 8 hook registrations (across 7 events) are plugin-native (`hooks/hooks.json`). If you
+- **Hooks** — none needed: all 9 hook registrations (across 7 events) are plugin-native (`hooks/hooks.json`). If you
   used the pre-v0.1.2 installer, run `scripts/install-hook.sh uninstall` once to remove
   the legacy `.claude/settings.json` entries that would otherwise double-fire.
 - **Dev repo only** — if you cloned the skill's *development* repo (the one with a

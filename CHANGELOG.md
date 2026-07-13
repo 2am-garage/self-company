@@ -10,6 +10,23 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.16] — 2026-07-13: Phase 32 — hire-as-data (worker & manager tiers)
+
+- `hire.sh <id> --tier worker|manager` scaffolds an `org/employees/<id>/` desk;
+  `Employee.discover()` = core 8 ∪ valid desks on disk, dispatched with no code
+  edit. Zero hired desks reproduce today's output byte-for-byte. `--fire`
+  tombstones to `org/employees/.fired/` (never deletes).
+- Charter singletons stay code-pinned: a hire can be a worker or a department
+  **manager** but cannot replace/claim Elon (CEO), Phoebe (gateway), July (HR),
+  or Gibby (QA sign-off). New validator **R7**: `tier: worker|manager` only, no
+  attack/build duty (R1 survives), no charter-role claim (normalized match),
+  manager graph acyclic and rooted at Elon. Core 8 keep R1–R6 unchanged.
+- Hardening: `discover()` rejects bad-charset/dotfile/symlinked desks; `hire.sh`
+  is atomic and fail-closed (missing validator → refuse); new 9th hook
+  `hook_org_lint.sh` (PostToolUse, warn-only) lints hand-edits under
+  `org/employees/**`. Red/blue: Gibby found 4 gaps (incl. `.fired` poisoning the
+  validator on first fire), all fixed with +13 regression tests before merge.
+
 ## [0.1.15] — 2026-07-12: first features shipped by the daily research loop
 
 - Real token accounting: `supervisor.py` captures usage/cost from the `result`
