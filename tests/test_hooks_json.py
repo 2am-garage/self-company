@@ -144,9 +144,12 @@ class HooksJsonStructureTest(unittest.TestCase):
 
 
 class HookCountDocTruthTest(unittest.TestCase):
-    """Fold C1: the docs must state the ACCURATE count (8 registrations / 7 events)
-    and must not carry the stale 'X hooks' undercount that omitted the SessionStart
-    schedule guard. Ties the prose to the real hooks.json count so a future edit to
+    """Fold C1 + Phase 32: the docs must state the ACCURATE count (NINE
+    registrations / 7 events — SessionStart AND PostToolUse each fire two after
+    Phase 32 added hook_org_lint.sh) and must not carry a stale undercount
+    ('7 hooks' from Fold C1, or the '8 registrations' that predated the org-lint
+    hook). Ties the prose to the real hooks.json count (see
+    test_total_registrations_is_nine_across_seven_events) so a future edit to
     either side is caught."""
 
     DOCS = {
@@ -169,14 +172,17 @@ class HookCountDocTruthTest(unittest.TestCase):
             m = stale.search(self._text(name))
             self.assertIsNone(m, f"{name} still claims '{m.group(0) if m else ''}'")
 
-    def test_docs_state_eight_registrations(self):
+    def test_docs_state_nine_registrations(self):
         import re
-        # Accurate phrasing: "8 … registrations across 7 events" (order-flexible).
-        pat = re.compile(r"8[\s\S]{0,40}?registrations[\s\S]{0,40}?7 events",
+        # Accurate phrasing (Phase 32): "9 … registrations across 7 events"
+        # (order-flexible). The count went 8 -> 9 when hook_org_lint.sh landed
+        # as the second PostToolUse registration; the docs were swept, this
+        # test tracks the swept value and must never be reverted to 8.
+        pat = re.compile(r"9[\s\S]{0,40}?registrations[\s\S]{0,40}?7 events",
                          re.IGNORECASE)
         for name in self.DOCS:
             self.assertRegex(self._text(name), pat,
-                             f"{name} should state '8 … registrations across 7 events'")
+                             f"{name} should state '9 … registrations across 7 events'")
 
     def test_operations_table_lists_schedule_guard(self):
         # The operations.md hook table must include the previously-missing row.
