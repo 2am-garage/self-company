@@ -243,5 +243,57 @@ class TestDiscoverCharsetDefenseInDepth(unittest.TestCase):
         self.assertIsNone(employee._DESK_ID_RE.match("../evil"))
 
 
+class TestIsValidDeskSharedPredicate(unittest.TestCase):
+    """Phase 32 hotfix Finding 2: is_valid_desk() is the ONE per-desk predicate
+    shared by discover() AND supervisor.Member.roster(), so every discovery path
+    agrees on what a real desk is."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _desk(self, name, persona=True, context=True):
+        d = os.path.join(self.tmp, name)
+        os.makedirs(d, exist_ok=True)
+        if persona:
+            with open(os.path.join(d, "persona.md"), "w") as f:
+                f.write("p\n")
+        if context:
+            with open(os.path.join(d, "context.md"), "w") as f:
+                f.write("---\nname: X\n---\n")
+        return d
+
+    def test_valid_desk_true(self):
+        self.assertTrue(employee.is_valid_desk(self._desk("sam-jr")))
+
+    def test_persona_only_false(self):
+        self.assertFalse(employee.is_valid_desk(self._desk("g", context=False)))
+
+    def test_context_only_false(self):
+        self.assertFalse(employee.is_valid_desk(self._desk("g", persona=False)))
+
+    def test_bad_charset_name_false(self):
+        self.assertFalse(employee.is_valid_desk(self._desk("BadCase")))
+
+    def test_symlinked_persona_false(self):
+        d = self._desk("evil", persona=False)
+        outside = os.path.join(self.tmp, "outside.md")
+        with open(outside, "w") as f:
+            f.write("x\n")
+        os.symlink(outside, os.path.join(d, "persona.md"))
+        self.assertFalse(employee.is_valid_desk(d))
+
+    def test_symlinked_desk_dir_false(self):
+        real = self._desk("real-desk")
+        link = os.path.join(self.tmp, "linked-desk")
+        os.symlink(real, link)
+        self.assertFalse(employee.is_valid_desk(link))
+
+    def test_never_raises_on_missing_path(self):
+        self.assertFalse(employee.is_valid_desk("/no/such/desk"))
+
+
 if __name__ == "__main__":
     unittest.main()

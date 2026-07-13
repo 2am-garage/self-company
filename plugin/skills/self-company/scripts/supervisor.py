@@ -229,10 +229,29 @@ class Member:
 
     @classmethod
     def roster(cls, company_dir):
-        """Discover ALL employees from org/employees/ (not a hardcoded subset)."""
+        """Discover the physically-present employees from org/employees/ using
+        the SAME strict per-desk predicate the validator/discover() use (Phase
+        32 hotfix Finding 2). Before this, roster() did an ad-hoc scan that
+        listed any subdir with a `persona.md` — NO id-charset check, NO
+        `context.md` requirement, NO symlink rejection — so a persona-only
+        "ghost" desk or a symlinked-persona desk that `employee.discover()` /
+        R7 correctly exclude still got listed here AND its `persona.md` inlined
+        into a real worker prompt (supervisor `--list` -> plan -> `--dispatch`
+        -> `real_command`). Routing through `employee.is_valid_desk` makes the
+        live dispatch path share the exact strict membership rules, so the three
+        discovery paths can no longer disagree.
+
+        Membership here is PHYSICAL presence (a desk on disk) filtered by
+        structural validity — deliberately NOT `discover()` itself, because
+        `discover()` force-includes every core id whether or not its desk
+        exists, whereas the supervisor lists only desks it can actually spawn.
+        Display order is unchanged: the fixed ORDER first, then any discovered
+        ids not in ORDER, sorted. Zero hired desks -> the same core roster as
+        before (byte-identical `--list`)."""
+        from employee import is_valid_desk
         base = Path(company_dir) / "org" / "employees"
-        found = [d.name for d in sorted(base.iterdir())
-                 if (d / "persona.md").exists()] if base.exists() else []
+        found = ([d.name for d in sorted(base.iterdir()) if is_valid_desk(d)]
+                 if base.exists() else [])
         ids = [e for e in ORDER if e in found] + [e for e in found if e not in ORDER]
         return [cls(i, company_dir=company_dir) for i in (ids or ORDER)]
 

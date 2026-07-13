@@ -296,6 +296,33 @@ def _desk_regular_file(desk_dir, filename):
         return False
 
 
+def is_valid_desk(desk_path):
+    """True iff `desk_path` is a STRUCTURALLY valid employee desk: a real
+    (non-symlink) directory whose NAME passes the id charset (`_DESK_ID_RE`) and
+    which contains BOTH `persona.md` AND `context.md` as real, in-tree regular
+    files (no symlinks pointing outside the desk — see `_desk_regular_file`).
+
+    This is the SINGLE per-desk predicate shared by every discovery path so they
+    can never disagree (Phase 32 hotfix Finding 2): `discover()` here AND the
+    supervisor's `Member.roster()` both call it, so a persona-only ghost desk or
+    a symlinked-persona desk that the validator's R7 excludes is also invisible
+    to the live dispatch path (supervisor `--list` -> plan -> dispatch, which
+    inlines `persona.md` into the worker prompt). It judges DESK STRUCTURE only;
+    core-id membership policy (core is always a member, regardless of whether a
+    physical desk exists) is `discover()`'s concern, not this function's. Never
+    raises."""
+    try:
+        d = Path(desk_path)
+        if not _DESK_ID_RE.match(d.name):
+            return False
+        if d.is_symlink() or not d.is_dir():
+            return False
+        return (_desk_regular_file(d, "persona.md")
+                and _desk_regular_file(d, "context.md"))
+    except Exception:
+        return False
+
+
 def discover(company_dir):
     """Return CORE_EMPLOYEES plus every valid HIRED desk for this company,
     sorted, appended after the core eight. A "valid" hired desk: its directory
@@ -325,16 +352,11 @@ def discover(company_dir):
             name = d.name
             if name in CORE_EMPLOYEES:
                 continue                       # core always wins, never shadowed
-            if not _DESK_ID_RE.match(name):
-                continue                       # bad charset -> ignored (R7 flags it)
-            try:
-                if d.is_symlink() or not d.is_dir():
-                    continue                   # symlinked/non-dir desk -> ignored
-                if (_desk_regular_file(d, "persona.md")
-                        and _desk_regular_file(d, "context.md")):
-                    found.append(name)
-            except OSError:
-                continue
+            # ONE shared predicate (is_valid_desk): charset + real dir + both
+            # files present as real in-tree files. A bad-charset / ghost /
+            # symlink-smuggling desk is excluded here (and flagged by R7).
+            if is_valid_desk(d):
+                found.append(name)
         return CORE_EMPLOYEES + tuple(sorted(found))
     except Exception:
         return CORE_EMPLOYEES

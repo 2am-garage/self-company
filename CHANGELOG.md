@@ -10,6 +10,23 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.17] — 2026-07-13: Phase 32 hotfix (Gibby's second adversarial pass)
+
+- Fix a deterministic red test the 0.1.16 docs sweep introduced:
+  `test_docs_state_eight_registrations` still expected the docs to say "8"
+  after they correctly moved to "9" — retargeted to assert NINE.
+- Close the discovery-path divergence Gibby found: `supervisor.Member.roster()`
+  still used a pre-Phase-32 ad-hoc scan (no charset / no `context.md` / no
+  symlink rejection) on the real dispatch path, so a persona-only "ghost" desk
+  or a symlinked-persona desk that `discover()`/R7 exclude still got listed and
+  inlined into a worker prompt. `discover()` and `roster()` now share ONE
+  `employee.is_valid_desk()` predicate; `company-run.sh` also runs the validator
+  before dispatch. Defense-in-depth (needs write access to the private store;
+  no Layer-B power was reachable) — but the three paths no longer disagree.
+- +14 regression tests. Note: 0.1.16 shipped with these two issues (merged on
+  Gibby's interim 4-bug report before its full pass landed); this is the same-day
+  correction.
+
 ## [0.1.16] — 2026-07-13: Phase 32 — hire-as-data (worker & manager tiers)
 
 - `hire.sh <id> --tier worker|manager` scaffolds an `org/employees/<id>/` desk;
