@@ -398,8 +398,8 @@ moment the plugin is installed — **no per-repo `install-hook.sh` edit**. Every
 runs the canonical script via `${CLAUDE_PLUGIN_ROOT}/skills/self-company/scripts/<script>`,
 so the wiring survives plugin version bumps with zero stale-path snapshots.
 
-**The 8 registrations across 7 events** (event → matcher → script, per `hooks/hooks.json`).
-`SessionStart` fires **two** scripts, so 8 registrations map onto 7 distinct events:
+**The 9 registrations across 7 events** (event → matcher → script, per `hooks/hooks.json`).
+`SessionStart` and `PostToolUse` each fire **two** scripts, so 9 registrations map onto 7 distinct events:
 
 | Event | Matcher | Script | Timeout | What it does |
 |---|---|---|---|---|
@@ -410,6 +410,7 @@ so the wiring survives plugin version bumps with zero stale-path snapshots.
 | `PreCompact` | `auto\|manual` | `hook_precompact_capture.sh` | 120s | Capture-rescue over the pre-compaction transcript before facts are summarized away; reuses the Stop cooldown to de-dup; never blocks compaction. |
 | `PreToolUse` | `Bash` | `hook_memory_guard.sh` | 10s | Denies `rm`/`unlink`/`shred`/`rmdir`/`truncate`/`find … -delete`/`mv`-away — and, since **Phase 27**, a truncating `>`/`>|`/`&>`/`>&` redirect or a bare `tee` (no `-a`) — of any path under `.company/memory/` **or the `.company` store root** (`rm -rf .company` wipes memory too — physical deletion is the decay reap's job, Phase 6). `>>`/`tee -a` (append, not deletion) stay allowed everywhere. Broadens in-script; emits `permissionDecision` with reason. |
 | `PostToolUse` | `Write\|Edit` | `hook_memory_lint.py` | 10s | Validates frontmatter of any `.company/memory/**.md` write (id/tier/status/sources, tombstone vocab); `block`s malformed writes with a reason. Non-memory files untouched. |
+| `PostToolUse` | `Write\|Edit` | `hook_org_lint.sh` | 10s | **Phase 32**: on any `org/employees/**` write, runs the R7 frontmatter checks (valid `tier: worker\|manager`, no charter-role claim, no attack/build duty) on the touched desk and **WARNs** (never blocks) on a violation. Non-org files untouched. |
 | `SessionEnd` | — | `hook_sessionend_verify.sh` | 120s | Runs the deterministic verify pass so this session's fresh captures are source-stamped before the next SessionStart report. Side-effect only; never fails the session. |
 
 > Matcher key is `matcher` (real Claude Code schema). `PreToolUse` matches all `Bash`

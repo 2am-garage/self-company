@@ -24,6 +24,18 @@ she sits on the orchestration side even though she is "half a tier above" the
 workers and not a manager. She still does not read code, memory internals, or
 infra — her least-privilege scope is unchanged.
 
+**Hire-as-data (Phase 32):** the roster above is the code-known core, but a company
+can hire more via `scripts/hire.sh <id> --tier worker|manager` — each new desk is
+discovered from `org/employees/` at dispatch time (`Employee.discover()`), no code
+edit. A hired **manager** owns workers (their reports' `manager:`), reads its
+department's logs, and hands dispatch *plans* to Phoebe — but the four **charter
+singletons stay code-pinned and cannot be replaced or claimed by a hire**: Elon
+(CEO), Phoebe (execution gateway), July (HR line), Gibby (QA sign-off). A hired
+employee may hold **no** attack- or build-class duty (so attacker≠builder, R1,
+survives), must be `tier: worker|manager`, and its manager graph must be acyclic
+and reach Elon — all machine-enforced by `schedule_validator.py` **R7** (Layer B).
+See `red-blue-protocol.md` and `operations.md`.
+
 ---
 
 ## 2. What an Execution Worker Sub-Agent Sees

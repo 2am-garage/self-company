@@ -380,6 +380,99 @@ class TestPlanTick(Base):
         self.assertEqual(set(plan["steps"].keys()), set(employee.STEP_OWNER.keys()))
 
 
+# ==================================================== Phase 32 Item 1 (discover)
+def _mkdesk(company, name, tier="worker", manager="elon", people_lead="july"):
+    d = os.path.join(company, "org", "employees", name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "context.md"), "w", encoding="utf-8") as f:
+        f.write(
+            f"---\nname: {name}\nrole: X\ntier: {tier}\n"
+            f"manager: {manager}\npeople_lead: {people_lead}\n---\nbody\n"
+        )
+    with open(os.path.join(d, "persona.md"), "w", encoding="utf-8") as f:
+        f.write("persona\n")
+    return d
+
+
+class TestZeroDeskByteIdentity(Base):
+    """The headline Phase 32 invariant: with NO hired desks, --roster and
+    --explain must be byte-identical to pre-Phase-32 output."""
+
+    def test_roster_zero_desk_matches_fixed_golden_shape(self):
+        c = self.company()
+        rc, out, _ = run_script("schedule_config.py", "--company", c, "--roster")
+        self.assertEqual(rc, 0)
+        self.assertIn("# Schedule Roster", out)
+        # exactly the 8 core rows, in canonical order, no "Hired employees" section
+        for name in sc.EMPLOYEES:
+            self.assertIn(f"| {name} |", out)
+        self.assertNotIn("Hired employees", out)
+
+    def test_roster_identical_before_and_after_probing_discover(self):
+        # Calling discover() elsewhere must not mutate roster_md's output for
+        # a company that never hired anyone.
+        c = self.company()
+        rc1, out1, _ = run_script("schedule_config.py", "--company", c, "--roster")
+        import employee
+        employee.discover(c)
+        rc2, out2, _ = run_script("schedule_config.py", "--company", c, "--roster")
+        self.assertEqual((rc1, out1), (rc2, out2))
+
+    def test_explain_zero_desk_employees_key_is_core_eight(self):
+        c = self.company()
+        data = _helpers.run_json("schedule_config.py", "--company", c, "--explain")
+        self.assertEqual(set(data["employees"].keys()), set(sc.EMPLOYEES))
+
+
+class TestHiredEmployeeRoster(Base):
+    """roster_md/effective/top_keys become company-dir-aware (Item 1/4): a
+    hired desk appears in the main table AND gets its own tier/manager
+    section; TOP_KEYS accepts its schedule.yaml block."""
+
+    def test_hired_worker_appears_in_main_table(self):
+        c = self.company()
+        _mkdesk(c, "sam-jr")
+        rc, out, _ = run_script("schedule_config.py", "--company", c, "--roster")
+        self.assertEqual(rc, 0)
+        self.assertIn("| sam-jr |", out)
+
+    def test_hired_section_appears_with_tier_and_manager(self):
+        c = self.company()
+        _mkdesk(c, "sam-jr", tier="worker", manager="elon")
+        rc, out, _ = run_script("schedule_config.py", "--company", c, "--roster")
+        self.assertEqual(rc, 0)
+        self.assertIn("Hired employees", out)
+        self.assertIn("sam-jr", out)
+        self.assertIn("worker", out)
+        self.assertIn("elon", out)
+
+    def test_explain_includes_hired_employee(self):
+        c = self.company()
+        _mkdesk(c, "sam-jr")
+        data = _helpers.run_json("schedule_config.py", "--company", c, "--explain")
+        self.assertIn("sam-jr", data["employees"])
+
+    def test_top_keys_accepts_hired_employee_block(self):
+        c = self.company("sam-jr: { enabled: false }\n")
+        _mkdesk(c, "sam-jr")
+        rc, out, _ = run_script("schedule_validator.py", "--company", c)
+        self.assertEqual(rc, 0, out)
+
+    def test_top_keys_still_rejects_unknown_id(self):
+        c = self.company("nobody-here: { enabled: false }\n")
+        rc, out, _ = run_script("schedule_validator.py", "--company", c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R4", out)
+
+    def test_hired_employee_cannot_default_into_a_duty(self):
+        # A hired employee owns NO Layer-B duty by default (ALLOWED_DUTIES has
+        # no entry for it) — effective() must reflect that, not crash.
+        c = self.company()
+        _mkdesk(c, "sam-jr")
+        data = _helpers.run_json("schedule_config.py", "--company", c, "--explain")
+        self.assertEqual(data["employees"]["sam-jr"]["duties"], [])
+
+
 class TestFallbackParser(unittest.TestCase):
     """The stdlib safe-YAML subset (used when PyYAML is absent)."""
 

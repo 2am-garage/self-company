@@ -204,7 +204,15 @@ _FALSE_TOKENS = frozenset(("off", "false", "no", "0", "disabled"))
 # The fixed role topology — the single source of truth. Config may enable/disable
 # an employee and pick which of THEIR OWN duties run; it can never grant a duty
 # outside these sets or reassign a role (modularize, don't special-case).
-EMPLOYEES = ("tony", "gibby", "bob", "mike", "elon", "phoebe", "tom", "july")
+#
+# Phase 32 (hire-as-data): renamed EMPLOYEES -> CORE_EMPLOYEES — these are the
+# eight CODE-KNOWN, charter-pinned employees. `EMPLOYEES` stays as a plain alias
+# (unchanged value, unchanged identity) so every pre-Phase-32 import keeps
+# working byte-for-byte. New code that means "every employee this COMPANY has,
+# including hired desks" calls `discover(company_dir)` instead — the ONE new
+# seam, not a second hardcoded list.
+CORE_EMPLOYEES = ("tony", "gibby", "bob", "mike", "elon", "phoebe", "tom", "july")
+EMPLOYEES = CORE_EMPLOYEES
 
 # Organizational tier. Stated in prose in each persona.md; pinned here as
 # structured Layer-B data (config may not set `tier:` — it is a forbidden key).
@@ -252,6 +260,84 @@ STEP_OWNER = {
     "agent":     "tony",
     "july_audit": "july",  # Phase 17: July's capability-steward audit (weekly, low-churn)
 }
+
+
+# ============================================================ Phase 32 discovery
+# hire-as-data (Item 1): a company's real roster is CORE_EMPLOYEES plus every
+# HIRED desk under org/employees/<id>/ that looks like a real desk. The id
+# charset is enforced HERE (defense in depth alongside hire.sh's own check,
+# Item 2) — a hand-crafted directory with a bad-charset name is simply never
+# yielded by discover(), so it is never dispatched and never gains a Layer-B
+# duty; schedule_validator's R7 separately FLAGS such a directory (rather than
+# silently leaving it inert forever) by scanning org/employees/ directly.
+_DESK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
+
+
+def _desk_regular_file(desk_dir, filename):
+    """True iff `desk_dir/filename` is a REAL, in-tree regular file — present, a
+    regular file, NOT a symlink, and physically resolving INSIDE `desk_dir`.
+
+    Phase 32 Bug 4 (least-privilege): `Path.is_file()` FOLLOWS symlinks, so a
+    desk whose `persona.md` is symlinked to `/tmp/outside` used to be discovered
+    and read verbatim into the dispatch prompt — an out-of-tree file invisible
+    in a `git diff` of the store. A desk file must live in the desk. We reject
+    the symlinked FILE and (defense in depth) any resolution that escapes the
+    desk dir (e.g. a symlinked parent). Never raises."""
+    try:
+        p = desk_dir / filename
+        if p.is_symlink():
+            return False
+        if not p.is_file():
+            return False
+        rp = Path(os.path.realpath(str(p)))
+        desk_rp = Path(os.path.realpath(str(desk_dir)))
+        return desk_rp == rp or desk_rp in rp.parents
+    except OSError:
+        return False
+
+
+def discover(company_dir):
+    """Return CORE_EMPLOYEES plus every valid HIRED desk for this company,
+    sorted, appended after the core eight. A "valid" hired desk: its directory
+    name matches `_DESK_ID_RE`, is not a core id (core always wins — a
+    directory literally named e.g. "elon" is simply ignored here, never
+    shadowing or extending the real core desk), is a real (non-symlink)
+    directory, and has BOTH `persona.md` AND `context.md` present as REAL,
+    in-tree regular files — not symlinks pointing outside the desk (Phase 32
+    Bug 4: `is_file()` follows symlinks, which would let an out-of-tree file be
+    read verbatim into the dispatch prompt; see `_desk_regular_file`). A
+    half-scaffolded or symlink-smuggling desk is not a real employee.
+
+    Zero-desk behavior returns EXACTLY `CORE_EMPLOYEES` (same tuple identity
+    semantics, same order) — every consumer of this seam (schedule_config's
+    TOP_KEYS/effective/roster_md, schedule_validator, supervisor) is therefore
+    byte-identical to pre-Phase-32 behavior when a company has hired nobody.
+
+    Never raises: any filesystem trouble (missing dir, permission error,
+    non-directory company_dir, even `company_dir=None`) degrades to
+    `CORE_EMPLOYEES` alone."""
+    try:
+        base = Path(company_dir) / "org" / "employees"
+        if not base.is_dir():
+            return CORE_EMPLOYEES
+        found = []
+        for d in sorted(base.iterdir()):
+            name = d.name
+            if name in CORE_EMPLOYEES:
+                continue                       # core always wins, never shadowed
+            if not _DESK_ID_RE.match(name):
+                continue                       # bad charset -> ignored (R7 flags it)
+            try:
+                if d.is_symlink() or not d.is_dir():
+                    continue                   # symlinked/non-dir desk -> ignored
+                if (_desk_regular_file(d, "persona.md")
+                        and _desk_regular_file(d, "context.md")):
+                    found.append(name)
+            except OSError:
+                continue
+        return CORE_EMPLOYEES + tuple(sorted(found))
+    except Exception:
+        return CORE_EMPLOYEES
 
 
 # ================================================================ fm helpers
@@ -410,7 +496,17 @@ class Employee:
         self.role = str(fm.get("role") or "")
         self.manager = str(fm.get("manager") or "")
         self.people_lead = self._clean_optional(fm.get("people_lead"))
-        self.tier = TIERS.get(self.name, "worker")
+        # ---- tier: Layer B for the core 8 (TIERS table, never config); a
+        # discovered (hired) employee declares its own tier in ITS OWN
+        # context.md `tier:` field (Phase 32 R7(a)) — worker/manager only,
+        # defaulting to "worker" on anything absent/invalid. `_tier_raw` keeps
+        # the UNvalidated raw string so schedule_validator's R7 can tell "field
+        # missing" from "field present but garbage" for its own error message.
+        self._tier_raw = str(fm.get("tier") or "").strip().lower()
+        if self.name in TIERS:
+            self.tier = TIERS[self.name]
+        else:
+            self.tier = self._tier_raw if self._tier_raw in ("worker", "manager") else "worker"
 
         # ---- functional capabilities (the least-privilege slice July stewards)
         self.tools = _as_list(fm.get("tools"))
@@ -512,6 +608,17 @@ class Employee:
         `recall()` reads its index under `memory_dir/index`. Physically isolated
         from every other employee and from the shared company memory."""
         return self.desk_dir / "memory"
+
+    @property
+    def declared_tier(self):
+        """The RAW `tier:` frontmatter value on THIS desk's context.md
+        (lowercased, stripped), or "" if absent — Phase 32. Used by
+        schedule_validator's R7 to distinguish "no tier declared" from "a tier
+        was declared but it's not worker/manager" for its error message. Core
+        employees' `self.tier` is Layer-B (the TIERS table) and never reads
+        this field; `declared_tier` is meaningful only for a discovered
+        (hired) employee."""
+        return self._tier_raw
 
     # ------------------------------------------------------------ capabilities
     def capabilities(self):

@@ -7,7 +7,8 @@ callers fall back to defaults. A valid or absent config passes (exit 0). Every
 test drives the CLI as a subprocess (the exact seam schedule.sh / the guard use).
 
 Covers R1–R6 each rejecting with its rule id, plus the parse-error fail-closed
-path and the valid/absent pass-through.
+path and the valid/absent pass-through. Also R7 (Phase 32, hire-as-data): the
+Layer-B invariants on a DISCOVERED (hired) employee's own desk.
 """
 
 import os
@@ -17,6 +18,9 @@ import unittest
 
 import _helpers
 from _helpers import run_script
+
+TEMPLATE = os.path.join(
+    _helpers.REPO_ROOT, "plugin", "skills", "self-company", "assets", "company-template")
 
 
 def _make_company(tmp, body=None):
@@ -30,6 +34,20 @@ def _make_company(tmp, body=None):
         with open(cfg, "w", encoding="utf-8") as f:
             f.write(body)
     return os.path.join(tmp, ".company")
+
+
+def _mkdesk(company, name, tier="worker", manager="phoebe", role="QA",
+           people_lead="july"):
+    d = os.path.join(company, "org", "employees", name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "context.md"), "w", encoding="utf-8") as f:
+        f.write(
+            f"---\nname: {name}\nrole: {role}\ntier: {tier}\n"
+            f"manager: {manager}\npeople_lead: {people_lead}\n---\nbody\n"
+        )
+    with open(os.path.join(d, "persona.md"), "w", encoding="utf-8") as f:
+        f.write("persona\n")
+    return d
 
 
 class Base(unittest.TestCase):
@@ -255,6 +273,263 @@ class TestModelWarnings(Base):
         rc, out, _ = self.validate(c, "--quiet")
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "")
+
+
+# ==================================================== Phase 32 Item 3 (R7)
+class TestR7HireAsData(Base):
+    """R7 — Layer B invariants on a DISCOVERED (hired) employee's own desk,
+    independent of schedule.yaml. Core 8 stay exempt (R1-R6 govern them)."""
+
+    def _copy_template(self):
+        # Real core desks (manager chains that resolve to elon) — R7's
+        # manager-chain walk reads the CORE desks' own context.md too.
+        c = self.company()
+        for name in os.listdir(os.path.join(TEMPLATE, "org", "employees")):
+            src = os.path.join(TEMPLATE, "org", "employees", name)
+            if not os.path.isdir(src):
+                continue
+            dst = os.path.join(c, "org", "employees", name)
+            shutil.copytree(src, dst)
+        return c
+
+    def test_zero_hired_desks_no_r7_lines(self):
+        c = self._copy_template()
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("R7", out)
+
+    def test_valid_hired_worker_passes(self):
+        c = self._copy_template()
+        _mkdesk(c, "sam-jr")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)
+
+    def test_valid_hired_manager_reporting_to_elon_passes(self):
+        c = self._copy_template()
+        _mkdesk(c, "pat-mgr", tier="manager", manager="elon")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)
+
+    def test_bad_tier_value_rejected(self):
+        c = self._copy_template()
+        _mkdesk(c, "sam-jr", tier="ceo")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("tier", out)
+
+    def test_missing_tier_rejected(self):
+        c = self._copy_template()
+        d = os.path.join(c, "org", "employees", "sam-jr")
+        os.makedirs(d)
+        with open(os.path.join(d, "context.md"), "w") as f:
+            f.write("---\nname: Sam\nmanager: phoebe\n---\nbody\n")
+        with open(os.path.join(d, "persona.md"), "w") as f:
+            f.write("x")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("(missing)", out)
+
+    def test_role_claims_ceo_rejected(self):
+        c = self._copy_template()
+        _mkdesk(c, "fake-ceo", role="CEO of everything")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("charter singleton", out)
+
+    def test_role_claims_execution_gateway_rejected(self):
+        c = self._copy_template()
+        _mkdesk(c, "fake-gw", role="Execution Gateway")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+
+    def test_role_claims_hr_lead_rejected(self):
+        c = self._copy_template()
+        _mkdesk(c, "fake-hr", role="HR Lead")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+
+    def test_role_claims_qa_signoff_rejected(self):
+        c = self._copy_template()
+        _mkdesk(c, "fake-qa", role="QA Sign-off")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+
+    def test_ordinary_role_title_not_flagged(self):
+        c = self._copy_template()
+        _mkdesk(c, "sam-jr", role="R&D Researcher")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)
+
+    def test_attack_duty_rejected_via_r1(self):
+        # Attack/build classes stay exclusive to code-known employees — this
+        # is R1's OWN loop, widened to discover(company); R7(b) reuses it
+        # rather than duplicating the check.
+        c = self._copy_template()
+        _mkdesk(c, "sam-jr")
+        cfg = os.path.join(c, "org", "schedule.yaml")
+        with open(cfg, "w") as f:
+            f.write("sam-jr: { duties: [attack] }\n")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R1", out)
+        self.assertIn("sam-jr", out)
+
+    def test_build_duty_rejected_via_r1(self):
+        c = self._copy_template()
+        _mkdesk(c, "sam-jr")
+        cfg = os.path.join(c, "org", "schedule.yaml")
+        with open(cfg, "w") as f:
+            f.write("sam-jr: { duties: [build] }\n")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R1", out)
+
+    def test_manager_cycle_a_to_b_to_a_rejected(self):
+        c = self._copy_template()
+        _mkdesk(c, "aa", manager="bb")
+        _mkdesk(c, "bb", manager="aa")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("cycle", out)
+
+    def test_manager_self_reference_is_a_cycle(self):
+        c = self._copy_template()
+        _mkdesk(c, "sam-jr", manager="sam-jr")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("cycle", out)
+
+    def test_unknown_manager_reference_rejected(self):
+        c = self._copy_template()
+        _mkdesk(c, "sam-jr", manager="nope")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("unknown employee", out)
+
+    def test_worker_under_hired_manager_reaches_elon(self):
+        c = self._copy_template()
+        _mkdesk(c, "pat-mgr", tier="manager", manager="elon")
+        _mkdesk(c, "sam-jr", manager="pat-mgr")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)
+
+    def test_bad_charset_directory_flagged_not_silently_ignored(self):
+        c = self._copy_template()
+        d = os.path.join(c, "org", "employees", "BadCase")
+        os.makedirs(d)
+        with open(os.path.join(d, "context.md"), "w") as f:
+            f.write("---\nname: Bad\n---\nbody\n")
+        with open(os.path.join(d, "persona.md"), "w") as f:
+            f.write("x")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("BadCase", out)
+        self.assertTrue("charset" in out.lower() or "must match" in out)
+
+    def test_core_employees_exempt_from_r7(self):
+        # A core desk's tier/role are Layer-B (TIERS table) — R7 never even
+        # looks at core context.md tier/role text.
+        c = self._copy_template()
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("R7", out)
+
+
+class TestR7GibbyFixRound(Base):
+    """Regression tests for Gibby's Phase 32 adversarial pass (validator side)."""
+
+    _counter = 0
+
+    def _copy_template(self):
+        # A FRESH isolated company per call (some tests build several), each a
+        # full copy of the shipped template so R7's manager-chain walk sees the
+        # real core desks.
+        TestR7GibbyFixRound._counter += 1
+        c = os.path.join(self.tmp, f"co{TestR7GibbyFixRound._counter}", ".company")
+        shutil.copytree(TEMPLATE, c)
+        return c
+
+    # --- BUG 1: a .fired tombstone dir must NOT be flagged as a bad-charset id
+    def test_bug1_fired_tombstone_dir_not_flagged(self):
+        c = self._copy_template()
+        fired = os.path.join(c, "org", "employees", ".fired", "temp-2026-07-13")
+        os.makedirs(fired)
+        with open(os.path.join(fired, "context.md"), "w") as f:
+            f.write("---\nname: T\n---\nb\n")
+        with open(os.path.join(fired, "persona.md"), "w") as f:
+            f.write("x")
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)          # NOT 3
+        self.assertNotIn("R7", out)
+        self.assertNotIn(".fired", out)
+
+    def test_bug1_any_dotfile_entry_skipped(self):
+        c = self._copy_template()
+        os.makedirs(os.path.join(c, "org", "employees", ".scratch"))
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 0, out)
+
+    # --- BUG 3: role-claim detection catches ANY phrasing --------------------
+    def _role_flagged(self, role):
+        c = self._copy_template()
+        _mkdesk(c, "rc-desk", role=role)
+        rc, out, _ = self.validate(c)
+        return rc == 3 and "charter singleton" in out
+
+    def test_bug3_hyphen_and_spacing_variants_all_caught(self):
+        for role in ("execution-gateway", "HR-Lead", "qa-signoff",
+                     "chief-executive-officer", "execution  gateway",
+                     "EXECUTION_GATEWAY", "Chief Executive Officer",
+                     "qa sign-off", "human-resources-team-lead"):
+            self.assertTrue(self._role_flagged(role),
+                            f"{role!r} should be flagged as a charter role claim")
+
+    def test_bug3_ordinary_titles_still_not_flagged(self):
+        for role in ("Build Engineer", "R&D Researcher", "QA Assistant",
+                     "Data Analyst", "Marketing Lead-Gen Specialist"):
+            self.assertFalse(self._role_flagged(role),
+                             f"{role!r} must NOT be flagged")
+
+    # --- BUG 4: a symlinked desk file is flagged (and never discovered) ------
+    def test_bug4_symlinked_persona_flagged(self):
+        c = self._copy_template()
+        outside = os.path.join(self.tmp, "outside-persona.md")
+        with open(outside, "w") as f:
+            f.write("SMUGGLED\n")
+        d = os.path.join(c, "org", "employees", "evil-desk")
+        os.makedirs(d)
+        with open(os.path.join(d, "context.md"), "w") as f:
+            f.write("---\nname: X\nrole: QA\ntier: worker\n"
+                    "manager: elon\npeople_lead: july\n---\nb\n")
+        os.symlink(outside, os.path.join(d, "persona.md"))
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("R7", out)
+        self.assertIn("evil-desk", out)
+        self.assertIn("symlink", out)
+
+    def test_bug4_symlinked_context_flagged(self):
+        c = self._copy_template()
+        outside = os.path.join(self.tmp, "outside-context.md")
+        with open(outside, "w") as f:
+            f.write("---\nname: X\ntier: worker\nmanager: elon\n---\nb\n")
+        d = os.path.join(c, "org", "employees", "evil-desk")
+        os.makedirs(d)
+        with open(os.path.join(d, "persona.md"), "w") as f:
+            f.write("persona\n")
+        os.symlink(outside, os.path.join(d, "context.md"))
+        rc, out, _ = self.validate(c)
+        self.assertEqual(rc, 3)
+        self.assertIn("symlink", out)
 
 
 if __name__ == "__main__":

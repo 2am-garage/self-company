@@ -1,11 +1,13 @@
 """Tests for the plugin-native hooks declaration (hooks/hooks.json) and the
 install-hook.sh migration to a plugin-native no-op / legacy-cleaner.
 
-Phase 10 B4: hooks.json is the single declaration point for all hooks (8
-registrations across 7 events — SessionStart fires two); every
-command must run a canonical skill script via ${CLAUDE_PLUGIN_ROOT}. install-hook.sh
-is deprecated: `install` is a no-op, `uninstall` removes only legacy self-company
-entries from a project settings.json (so existing installs stop double-firing).
+Phase 10 B4: hooks.json is the single declaration point for all hooks. Phase
+32 Item 5 added the 9th registration (hook_org_lint.sh, PostToolUse) — now 9
+registrations across 7 events (SessionStart AND PostToolUse each fire two);
+every command must run a canonical skill script via ${CLAUDE_PLUGIN_ROOT}.
+install-hook.sh is deprecated: `install` is a no-op, `uninstall` removes only
+legacy self-company entries from a project settings.json (so existing installs
+stop double-firing).
 """
 
 import json
@@ -28,11 +30,12 @@ EXPECTED_EVENTS = {
 
 # The agreed canonical script names each event's command must reference.
 # SessionStart carries TWO groups (plugin hooks merge): notify-status.py and the
-# Phase 12 schedule guard hook_schedule_guard.sh.
+# Phase 12 schedule guard hook_schedule_guard.sh. PostToolUse also carries TWO
+# (Phase 32 Item 5): hook_memory_lint.py and the new hook_org_lint.sh.
 AGREED_SCRIPTS = {
     "capture-trigger.py", "notify-status.py", "hook_memory_inject.py",
     "hook_precompact_capture.sh", "hook_memory_guard.sh", "hook_memory_lint.py",
-    "hook_sessionend_verify.sh", "hook_schedule_guard.sh",
+    "hook_sessionend_verify.sh", "hook_schedule_guard.sh", "hook_org_lint.sh",
 }
 
 # Each event maps to the SET of canonical scripts its commands may reference.
@@ -42,7 +45,7 @@ EVENT_SCRIPT = {
     "UserPromptSubmit": {"hook_memory_inject.py"},
     "PreCompact": {"hook_precompact_capture.sh"},
     "PreToolUse": {"hook_memory_guard.sh"},
-    "PostToolUse": {"hook_memory_lint.py"},
+    "PostToolUse": {"hook_memory_lint.py", "hook_org_lint.sh"},
     "SessionEnd": {"hook_sessionend_verify.sh"},
 }
 
@@ -105,11 +108,12 @@ class HooksJsonStructureTest(unittest.TestCase):
             self.assertIn("skills/self-company/scripts/", entry["command"],
                           f"{event}: script not under skill scripts dir")
 
-    def test_total_registrations_is_eight_across_seven_events(self):
-        # Fold C1 (TONY-2): the real count is 8 registrations over 7 events, NOT
-        # "7 hooks" — SessionStart carries two (notify-status + schedule guard).
+    def test_total_registrations_is_nine_across_seven_events(self):
+        # Fold C1 (TONY-2) + Phase 32 Item 5: the real count is 9 registrations
+        # over 7 events — SessionStart carries two (notify-status + schedule
+        # guard) and PostToolUse now carries two (memory lint + org lint).
         total = sum(1 for _ in _commands(self.hooks))
-        self.assertEqual(total, 8, "expected 8 hook registrations")
+        self.assertEqual(total, 9, "expected 9 hook registrations")
         self.assertEqual(len(self.hooks["hooks"]), 7, "expected 7 distinct events")
 
     def test_userpromptsubmit_timeout_is_30(self):
