@@ -22,6 +22,10 @@ git log / `references/status.md`.
 - Process note: both items came from the new daily loop (Mike 08:00 research →
   Elon review → dispatch → red/blue → merge); headless workers gained
   Edit/Write + WebSearch/WebFetch permissions on 2026-07-11.
+- (2026-07-13, same loop) Opt-in ~1,000–2,000-token soft cap on worker return
+  summaries: `output_contract(summary_cap=True)` at supervisor's worker-dispatch
+  site only; trigger contracts stay capless (Phase 21 "seconds, never tokens"
+  invariant preserved). `pipeline.md` handoff spec cites the Anthropic source.
 
 ## [0.1.14] — Phase 29: prompt/harness engineering & the employee model table
 
