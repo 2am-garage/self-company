@@ -87,6 +87,20 @@ class TestOutputContractAndBoundary(unittest.TestCase):
         self.assertIn("ops/logs/trigger-2026-07-10.log", line)
         self.assertIn("a one-line note", line)
 
+    def test_output_contract_includes_soft_cap_in_return_value(self):
+        """Pins the handoff-brief soft-cap to the return value (not just docstring),
+        so the worker receives the constraint in the actual prompt."""
+        contract = pb.output_contract("ops/logs/trigger-2026-07-10.log", "a one-line note", summary_cap=True)
+        self.assertIn("1,000", contract)
+        self.assertIn("2,000", contract)
+        self.assertIn("condensed and distilled", contract)
+
+    def test_output_contract_default_no_summary_cap(self):
+        """Default (no summary_cap) return contains no 'tokens' substring."""
+        contract = pb.output_contract("ops/logs/trigger-2026-07-10.log", "a one-line note")
+        self.assertNotIn("tokens", contract.lower())
+        self.assertIn("Output contract:", contract)
+
     def test_task_boundary_shape(self):
         line = pb.task_boundary("stop before the budget; note what remains")
         self.assertTrue(line.startswith("Boundaries:"))

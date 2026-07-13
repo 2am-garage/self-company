@@ -82,10 +82,18 @@ def fence(data, label="DATA"):
     )
 
 
-def output_contract(where, fmt):
+def output_contract(where, fmt, summary_cap=False):
     """Idea 7's "output contract" element: WHERE the deliverable goes, in WHAT
-    format — stated explicitly instead of left implicit."""
-    return f"Output contract: write {fmt} to {where}."
+    format — stated explicitly instead of left implicit. Soft cap (when
+    summary_cap=True): keep a worker's handoff/return summary to ~1,000–2,000
+    tokens, per Anthropic's context-engineering guidance on sub-agent returns
+    (see pipeline.md's handoff-brief spec for the cited source)."""
+    contract = f"Output contract: write {fmt} to {where}"
+    if summary_cap:
+        contract += ". Keep the returned summary within ~1,000-2,000 tokens — condensed and distilled, not a full transcript."
+    else:
+        contract += "."
+    return contract
 
 
 def task_boundary(text):

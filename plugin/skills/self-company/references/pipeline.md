@@ -59,6 +59,7 @@
 5. **Produce handoff brief**
    - List: "New L0 draft list": id + one-line summary + sources origin
    - Don't hand Phoebe the entire conversation
+   - Keep the handoff brief under ~1,000–2,000 tokens: Anthropic's ["Effective context engineering for AI agents"](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) post describes a sub-agent's return as "a condensed, distilled summary of its work (often 1,000-2,000 tokens)" — adopt the same soft cap here; include only essential L0 drafts, not full conversation transcripts or adjacent documentation
 
 ### Example
 

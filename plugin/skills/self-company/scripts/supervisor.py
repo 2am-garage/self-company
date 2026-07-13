@@ -373,7 +373,8 @@ class Member:
                 "do the task directly; print progress lines beginning with "
                 "'@status <phase>' (e.g. '@status planning', '@status done') as "
                 "optional garnish — the supervisor also derives phases from your "
-                "tool calls"))
+                "tool calls",
+                summary_cap=True))
             parts.append(_pb.task_boundary(
                 "stay in role and use only your granted tools; keep it tight; "
                 "wrap up cleanly before the budget above runs out"))
