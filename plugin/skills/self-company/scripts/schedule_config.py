@@ -52,8 +52,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # of THEIR OWN duties run; it can never grant a duty outside these sets. Editing
 # the topology is a code change over there, deliberately — not a config knob.
 from employee import (  # noqa: E402
-    EMPLOYEES, ALLOWED_DUTIES, ATTACK_DUTIES, BUILD_DUTIES, VERIFY_DUTIES,
-    STEP_OWNER, Employee,
+    EMPLOYEES, CORE_EMPLOYEES, ALLOWED_DUTIES, ATTACK_DUTIES, BUILD_DUTIES,
+    VERIFY_DUTIES, STEP_OWNER, Employee, discover,
 )
 
 CONFIG_SUBPATH = "org/schedule.yaml"
@@ -65,7 +65,18 @@ CONFIG_SUBPATH = "org/schedule.yaml"
 # anything else is rejected by the
 # validator (this is how R3/R4/R5/R6 fall out of ONE structural rule).
 EMPLOYEE_KEYS = {"cadence", "duties", "budget", "enabled"}
+# The CORE-only schema baseline (kept for byte-identity / any caller that wants
+# the static set). schedule_validator's R4 uses `top_keys(company)` below
+# instead — the company-dir-aware version, Phase 32's ONE new seam — so a
+# hired employee's own schedule.yaml block is a valid top-level key too.
 TOP_KEYS = {"cadence", "research", "agent"} | set(EMPLOYEES)
+
+
+def top_keys(company):
+    """Company-aware schema (Phase 32): TOP_KEYS plus every HIRED employee id
+    discovered for this company. A zero-hired-desk company gets a set
+    byte-identical to TOP_KEYS (discover(company) == CORE_EMPLOYEES)."""
+    return {"cadence", "research", "agent"} | set(discover(company))
 
 # Names that must NEVER appear as a config key anywhere (fail-closed footguns:
 # they would imply reassigning a role or tuning the sign-off gate — Layer B).
@@ -332,16 +343,26 @@ def effective(company):
     """Merge config over defaults into a normalized effective view. Pure read;
     does NOT validate role invariants (that is schedule_validator's job) — but it
     IS tolerant: unknown/garbage keys are simply ignored here so a bad config can
-    never crash a caller. Returns a plain dict."""
+    never crash a caller. Returns a plain dict.
+
+    Phase 32: iterates `discover(company)` (CORE_EMPLOYEES plus any HIRED
+    desks) instead of the static EMPLOYEES tuple — a zero-hired-desk company
+    discovers exactly CORE_EMPLOYEES, in the same order, so this is
+    byte-identical to pre-Phase-32 behavior with nobody hired. A hired
+    employee is not in ALLOWED_DUTIES at all (`.get(name, set())` -> empty),
+    so it owns no Layer-B duty by default and any explicit duty in its
+    schedule.yaml block is rejected as "stray" by the validator's R1 —
+    reused, not special-cased (Phase 32 design boundary: no new hard powers)."""
     raw = load_raw(company)
     emp = {}
-    for name in EMPLOYEES:
+    for name in discover(company):
+        allowed = ALLOWED_DUTIES.get(name, set())
         block = raw.get(name) if isinstance(raw.get(name), dict) else {}
         duties = block.get("duties")
         if not isinstance(duties, list):
-            duties = sorted(ALLOWED_DUTIES[name])  # default: all of the role's own duties
+            duties = sorted(allowed)  # default: all of the role's own duties
         # keep only duties this employee is actually allowed to own
-        duties = [d for d in duties if d in ALLOWED_DUTIES[name]]
+        duties = [d for d in duties if d in allowed]
         emp[name] = {
             "enabled": block.get("enabled", True) is not False,
             "cadence": str(block.get("cadence", "every-run")),
@@ -434,7 +455,16 @@ def plan_tick(company, hour, dow):
 # ================================================================ roster
 def roster_md(company):
     """Render ops/schedule/roster.md from the effective config. Deterministic;
-    marked generated so it is never hand-edited (Chairman's sweep-docs rule)."""
+    marked generated so it is never hand-edited (Chairman's sweep-docs rule).
+
+    Phase 32 Item 4: the main duties table now rows over `discover(company)`
+    (CORE_EMPLOYEES plus any HIRED desks) instead of the static EMPLOYEES
+    tuple — a zero-hired-desk company renders byte-identically to
+    pre-Phase-32 (same 8 rows, same order, same columns). When there IS at
+    least one hired employee, a SEPARATE "Hired employees" table is appended
+    below with their tier + manager + people_lead — new information the main
+    5-column table has no room for, and that core employees don't carry
+    either (their tier/manager are prose in persona.md, not rendered here)."""
     eff = effective(company)
     dexpr, _ = daily_cron(eff["cadence"], "M")
     lines = [
@@ -455,7 +485,8 @@ def roster_md(company):
         "| Employee | Enabled | Cadence | Duties | Budget |",
         "|---|---|---|---|---|",
     ]
-    for name in EMPLOYEES:
+    roster = discover(company)
+    for name in roster:
         e = eff["employees"][name]
         duties = ", ".join(e["duties"]) if e["duties"] else "—"
         lines.append(
@@ -463,6 +494,20 @@ def roster_md(company):
             f"| {duties} | {e['budget'] if e['budget'] is not None else '—'} |"
         )
     lines.append("")
+
+    hired = [n for n in roster if n not in CORE_EMPLOYEES]
+    if hired:
+        lines.append("## Hired employees — tier & manager")
+        lines.append("")
+        lines.append("| Employee | Tier | Manager | People Lead |")
+        lines.append("|---|---|---|---|")
+        for name in hired:
+            he = Employee.load(name, company)
+            lines.append(
+                f"| {name} | {he.tier} | {he.manager or '—'} "
+                f"| {he.people_lead or '—'} |"
+            )
+        lines.append("")
     return "\n".join(lines)
 
 
