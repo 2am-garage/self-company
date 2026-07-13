@@ -11,6 +11,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -44,6 +46,36 @@ class TestMember(unittest.TestCase):
             c = _company(d, ids=("elon", "zara"))          # zara not in ORDER
             ids = [e.id for e in sv.Member.roster(c)]
             self.assertIn("zara", ids)                      # discovered, not hardcoded
+
+    def test_order_includes_mike_between_gibby_and_bob(self):
+        # Phase 32 fix: ORDER was missing "mike" entirely (display-order bug)
+        # — a real mike desk fell through to the "not in ORDER" append-at-end
+        # branch instead of its canonical position.
+        self.assertIn("mike", sv.ORDER)
+        self.assertEqual(sv.ORDER.index("mike"), sv.ORDER.index("gibby") + 1)
+        self.assertLess(sv.ORDER.index("mike"), sv.ORDER.index("bob"))
+
+    def test_full_core_roster_orders_mike_correctly(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, ids=("elon", "phoebe", "tony", "gibby", "mike",
+                                 "bob", "july", "tom"))
+            ids = [e.id for e in sv.Member.roster(c)]
+            self.assertEqual(ids, ["elon", "phoebe", "tony", "gibby", "mike",
+                                   "bob", "july", "tom"])
+
+    def test_cli_list_orders_mike_correctly(self):
+        # End-to-end: `supervisor.py --list` (the CLI seam) reflects the same
+        # fixed ORDER, not just the in-process Member.roster() call.
+        with tempfile.TemporaryDirectory() as d:
+            c = _company(d, ids=("elon", "phoebe", "tony", "gibby", "mike",
+                                 "bob", "july", "tom"))
+            script = os.path.join(_helpers.SCRIPTS_DIR, "supervisor.py")
+            r = subprocess.run([sys.executable, script, "--company", c, "--list"],
+                              capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            data = json.loads(r.stdout)
+            self.assertEqual(data["roster"], ["elon", "phoebe", "tony", "gibby",
+                                              "mike", "bob", "july", "tom"])
 
 
 class TestWorker(unittest.TestCase):

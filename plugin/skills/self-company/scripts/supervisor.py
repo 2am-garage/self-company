@@ -208,7 +208,10 @@ ROLE_HINTS = {
     "gibby": "Verify · sources", "bob": "Engineer · builds", "july": "People · personas",
     "tom": "Infra · scheduling",
 }
-ORDER = ["elon", "phoebe", "tony", "gibby", "bob", "july", "tom"]
+# Phase 32 fix: "mike" was missing from ORDER entirely — a real mike desk fell
+# through to the "not in ORDER" append-at-the-end branch below instead of its
+# canonical position. Added after gibby (Chairman's instruction).
+ORDER = ["elon", "phoebe", "tony", "gibby", "mike", "bob", "july", "tom"]
 
 
 class Member:
