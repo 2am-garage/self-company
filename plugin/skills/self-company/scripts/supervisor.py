@@ -322,6 +322,37 @@ _AUTO_ATTACK_TASK = (
     "regression) and report a machine-checkable verdict")
 
 
+# FIX 3 (Finding 1 defense-in-depth — build work routed to a NON-builder skips
+# the gate). Gate-arming keys on the builder id being present; a plan that
+# routes code-mutation work to a non-builder (e.g. {"tony": "refactor X in
+# supervisor.py"}) would never arm Gibby. Until per-worker tool restriction
+# lands (Phase 34 — the sound fix), a CONSERVATIVE content check refuses such a
+# dispatch loudly: a clear code-MUTATION verb AND a code-file/path signal in
+# the task text, assigned to a non-builder. Deliberately requires a MUTATION
+# verb (never a read verb), so a genuine read-only "investigate/survey/measure/
+# audit the caching code in supervisor.py" for tony/mike still runs. This is
+# NOT airtight (a cleverly-worded build task can evade it) — it is a tripwire,
+# not a wall; Phase 34's --allowedTools fence is the real boundary.
+_MUTATION_VERB_RE = re.compile(
+    r"\b(implement(s|ed|ing)?|builds?|building|built|writ(e|es|ing|ten)|"
+    r"edit(s|ed|ing)?|modif(y|ies|ied|ying)|refactor(s|ed|ing)?|"
+    r"rewrit(e|es|ing|ten)|fix(es|ed|ing)?|patch(es|ed|ing)?|"
+    r"creat(e|es|ed|ing)|add(s|ed|ing)?|updat(e|es|ed|ing)|"
+    r"delet(e|es|ed|ing)|remov(e|es|ed|ing)|replac(e|es|ed|ing))\b", re.I)
+_CODE_SIGNAL_RE = re.compile(
+    r"(\.(py|sh|js|ts|tsx|jsx|go|rs|rb|c|cpp|cc|h|hpp|java|json|ya?ml|toml)\b"
+    r"|\bscripts?/|\bin\s+\w+\.\w+\b"
+    r"|\bthe\s+\w+\s+(function|class|method|module|script)\b)", re.I)
+
+
+def _looks_like_code_mutation(task):
+    """Conservative tripwire (FIX 3): True iff `task` text carries BOTH a
+    code-MUTATION verb AND a code-file/path signal. A read-only task (no
+    mutation verb) is never flagged even if it names a `.py` file."""
+    t = str(task or "")
+    return bool(_MUTATION_VERB_RE.search(t) and _CODE_SIGNAL_RE.search(t))
+
+
 _REDBLUE_MAX_ROUNDS_DEFAULT = 3
 _REDBLUE_MAX_ROUNDS_CEILING = 10   # an "absurd" round count is refused, not honored
 
@@ -343,12 +374,17 @@ def _redblue_max_rounds():
     return n
 
 
-def redblue_gate_marker_path(company_dir):
-    """Where the supervisor records the LAST gate cycle's outcome for a
-    non-Python caller (company-run.sh's ledger step) to pick up — mirrors the
-    token-usage `.token-usage` marker convention. Best-effort, overwritten
-    each gated dispatch; a caller that wants freshness removes it first."""
-    return Path(company_dir) / "ops" / ".last-redblue-gate.json"
+# FIX 2 (Finding 3 — a shared-fs ledger marker is worker-forgeable): the gate
+# result is NOT written to any file under the company tree. A Bob worker (no
+# tool fence yet — that's Phase 34) can overwrite ANY known path there, incl. a
+# `ops/.last-redblue-gate.json`, flipping the human-facing ledger cell to a
+# forged "clean". Instead the supervisor emits the result on its OWN stderr as
+# a `@redblue-gate {json}` line (see main()); company-run.sh captures the
+# supervisor's stderr directly (an anonymous pipe, no filesystem path any
+# worker can target — a worker's stderr is merged into its OWN stdout pipe, it
+# cannot write the supervisor's fd 2). Same trust boundary as the pipe-identity
+# verdict channel: parent-controlled, worker-unreachable.
+_GATE_RESULT_SENTINEL = "@redblue-gate "
 
 
 class Status(enum.Enum):
@@ -631,6 +667,15 @@ class Worker:
         # pipe identity, the OS boundary Bob can't cross).
         self.capture_verdict = capture_verdict
         self.verdict = None           # the parsed verdict dict, once seen on this fd
+        # Phase 33 FIX 1 (Finding 2 — echo/last-wins forgery): the verdict is
+        # FIRST-WINS and LOCKED. Once a well-formed sentinel is recorded, a
+        # LATER sentinel on this same fd is ignored — so if Gibby's transcript
+        # ever quotes attacker-planted `@qa-verdict pass` text (e.g. Bob wrote
+        # it in a source comment Gibby echoes), it cannot overwrite Gibby's own
+        # real verdict. The lone EXCEPTION is Gibby's FINAL stream-json `result`
+        # event (authoritative=True): its `.result` is Gibby's completed reply,
+        # so it is preferred over any mid-stream text and overrides the lock.
+        self._verdict_locked = False
         self.status = Status.IDLE
         self.phase = ""
         self.last = ""
@@ -711,9 +756,7 @@ class Worker:
         # worker's fd it is NOT consumed here — it falls through to a plain log
         # line, so Bob printing this sentinel can never satisfy the gate.
         if self.capture_verdict and line.startswith(_QA_VERDICT_SENTINEL):
-            found = _extract_qa_verdict(line)
-            if found is not None:
-                self.verdict = found
+            self._record_verdict(_extract_qa_verdict(line))
             return
         if line.startswith("@status "):
             self.phase = line[len("@status "):].strip()
@@ -756,11 +799,10 @@ class Worker:
                     # Phase 33: in stream-json mode Gibby's verdict sentinel
                     # arrives inside its assistant text. Honored ONLY on the
                     # attacker's fd (capture_verdict) — Bob's assistant text is
-                    # never scanned for a verdict.
+                    # never scanned for a verdict. FIRST-wins (FIX 1): a later
+                    # mid-stream sentinel can't overwrite the first.
                     if self.capture_verdict:
-                        found = _extract_qa_verdict(text)
-                        if found is not None:
-                            self.verdict = found
+                        self._record_verdict(_extract_qa_verdict(text))
                     matches = _EMBEDDED_STATUS_RE.findall(text)
                     if matches:
                         word = matches[-1].strip()
@@ -780,10 +822,36 @@ class Worker:
                 self.usage["output"] = usage.get("output_tokens", 0)
                 cost = usage.get("cost", 0.0)
                 self.usage["cost"] = float(cost) if cost else 0.0
+            # FIX 1: the `result` event's `.result` is Gibby's COMPLETED final
+            # reply — the cleanest place its verdict lives in the stream-json
+            # shape. Prefer it over any mid-stream text (authoritative: it
+            # overrides even a locked mid-stream verdict), so a verdict Gibby
+            # only firms up in its final answer still wins.
+            if self.capture_verdict:
+                rtext = event.get("result")
+                if isinstance(rtext, str):
+                    self._record_verdict(_extract_qa_verdict(rtext), authoritative=True)
         # else: "system" / "user" / any other recognized JSON shape — valid
         # stream-json, no new phase information; consumed without touching
         # self.last (raw JSON is never shown as the human-readable detail line).
         return True
+
+    def _record_verdict(self, found, authoritative=False):
+        """FIX 1 (Finding 2): record a captured verdict FIRST-wins + LOCKED.
+        A None (no/ill-formed sentinel) is ignored. A mid-stream sentinel sets
+        the verdict only if none is locked yet, then locks it — so a later
+        echoed/planted sentinel on the same fd cannot flip it. Gibby's final
+        `result` event is `authoritative`: it overrides the lock (its `.result`
+        is the completed reply, preferred over mid-stream text)."""
+        if found is None:
+            return
+        if authoritative:
+            self.verdict = found
+            self._verdict_locked = True
+            return
+        if not self._verdict_locked:
+            self.verdict = found
+            self._verdict_locked = True
 
     def on_eof(self):
         rc = self.proc.wait() if self.proc else 0
@@ -945,7 +1013,21 @@ class Supervisor:
             self.last_gate = None
             return self._dispatch_once(assignments, demo=True, demo_delay=demo_delay)
 
-        builders_present = _builder_ids() & set(assignments)
+        # FIX 3 (Finding 1 defense-in-depth): REFUSE code-mutation work routed
+        # to a non-builder — it would run WITHOUT the gate (arming keys on a
+        # builder id). Checked BEFORE arming, loudly (rc nonzero via main),
+        # naming every offending {id: task}. Conservative: read-only tasks
+        # (no mutation verb) are never refused. Not airtight — Phase 34 tool
+        # restriction is the real fix.
+        builders = _builder_ids()
+        offenders = {eid: task for eid, task in assignments.items()
+                     if eid not in builders and _looks_like_code_mutation(task)}
+        if offenders:
+            self.last_gate = {"verdict": "refused", "offenders": offenders}
+            self._emit_refusal(offenders)
+            return {}
+
+        builders_present = builders & set(assignments)
         if builders_present:
             armed = dict(assignments)
             # Loop on a builder that is actually present (defaults to bob).
@@ -973,6 +1055,19 @@ class Supervisor:
                 "ts": datetime.now().replace(microsecond=0).isoformat(),
                 "kind": "redblue_autoarm", "builder": builder_id,
                 "attacker": attacker_id})
+
+    def _emit_refusal(self, offenders):
+        """FIX 3: surface a refusal loudly on stderr + the event log. The CLI
+        (main) turns a `refused` last_gate into a non-zero exit."""
+        for eid, task in offenders.items():
+            print(f"[supervisor] REFUSED: code-mutation work routed to non-builder "
+                  f"'{eid}' would skip the verification gate — {eid}: {task!r}. "
+                  f"Route build work to a builder (bob) so Gibby can verify it.",
+                  file=sys.stderr)
+        if self.event_log is not None:
+            self.event_log.append({
+                "ts": datetime.now().replace(microsecond=0).isoformat(),
+                "kind": "redblue_refused", "offenders": offenders})
 
     def _dispatch_once(self, assignments, demo=False, demo_delay=0.3,
                        extra_contracts=None, verdict_capture_id=None):
@@ -1107,15 +1202,15 @@ class Supervisor:
                 self.last_gate = {"run_id": run_id, "rounds": rounds_used,
                                   "verdict": "clean", "builder": builder_id,
                                   "attacker": attacker_id, "auto_injected": auto_injected}
-                self._write_gate_marker()
                 return workers
 
         # Cap reached without a clean verdict — fail LOUD, never silent-done
-        # (spec §2/§3): last_gate + the on-disk marker both say UNRESOLVED.
+        # (spec §2/§3). The trusted record is `self.last_gate` (in-process) +
+        # the `@redblue-gate` line main() prints on the supervisor's own
+        # stderr; there is NO shared-fs marker a worker could forge (FIX 2).
         self.last_gate = {"run_id": run_id, "rounds": rounds_used,
                           "verdict": "unresolved", "builder": builder_id,
                           "attacker": attacker_id, "auto_injected": auto_injected}
-        self._write_gate_marker()
         return workers
 
     def _emit_gate_round(self, run_id, round_no, verdict):
@@ -1125,23 +1220,6 @@ class Supervisor:
                 "kind": "redblue_round", "run_id": run_id, "round": round_no,
                 "verdict": verdict.get("verdict"), "clean": verdict.get("clean"),
             })
-
-    def _write_gate_marker(self):
-        """Best-effort marker so a non-Python caller (company-run.sh's ledger
-        step) can pick up rounds-used + final verdict without parsing stdout
-        (which is also the live TTY render stream). Mirrors the
-        `.token-usage` marker convention; trouble writing it never fails the
-        dispatch — the in-process `self.last_gate` is the primary record."""
-        if self.last_gate is None:
-            return
-        try:
-            path = redblue_gate_marker_path(self.company_dir)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = dict(self.last_gate)
-            payload["ts"] = datetime.now().replace(microsecond=0).isoformat()
-            path.write_text(json.dumps(payload), encoding="utf-8")
-        except Exception:
-            pass
 
 
 def main(argv=None):
@@ -1163,12 +1241,19 @@ def main(argv=None):
         return 0
     if args.dispatch:
         sup.dispatch(json.loads(args.dispatch), demo=False)
-        # Phase 33: fail LOUD, never silent-done. A gated dispatch that hit the
-        # round cap without a clean verdict reports UNRESOLVED on stderr AND a
-        # non-zero exit — company-run.sh's `rc=$?` already ledgers this.
-        if sup.last_gate and sup.last_gate.get("verdict") == "unresolved":
-            gate = sup.last_gate
-            print(json.dumps({"redblue_gate": gate}), file=sys.stderr)
+        gate = sup.last_gate
+        # FIX 2: the gate result is emitted on the supervisor's OWN stderr as a
+        # `@redblue-gate {json}` line — the trusted channel company-run.sh reads
+        # for the ledger (NOT a worker-forgeable file). Printed for EVERY armed
+        # outcome (clean / unresolved / refused); a non-armed dispatch leaves
+        # last_gate None and prints nothing (ledger shows the "-" placeholder).
+        if gate:
+            print(_GATE_RESULT_SENTINEL + json.dumps(gate), file=sys.stderr)
+        verdict = gate.get("verdict") if gate else None
+        # Fail LOUD, never silent-done.
+        if verdict == "refused":
+            return 2
+        if verdict == "unresolved":
             print(f"[supervisor] UNRESOLVED: {gate['builder']}/{gate['attacker']} "
                   f"did not clear verification in {gate['rounds']} round(s) "
                   f"(run_id={gate['run_id']})", file=sys.stderr)
