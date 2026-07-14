@@ -41,29 +41,29 @@ def _company(d, ids=("elon", "phoebe", "bob", "gibby", "tom")):
     return os.path.join(d, ".company")
 
 
-# Phase 33: the verification gate arms whenever a real (non-demo) dispatch
-# pairs bob+gibby — which every plan fixture below does (a named plan or the
-# heuristic fallback). Gibby's dispatch prompt now carries a MANDATORY
-# "write a JSON verdict marker to <path>" output-contract clause (Phase 33
-# Item 1); supervisor.py reads it after Gibby's run and re-loops on a
-# missing/failing one. A fake `claude` that never writes that marker would
-# turn every one of these `rc == 0` fixtures into a 3-round UNRESOLVED
-# (rc == 1) — not a Phase-33 regression, but this fixture no longer models a
-# real Gibby. This snippet, appended to each dispatch-branch, greps its own
-# prompt arg for the marker path the contract embeds and writes a PASS
-# verdict there — mirroring a Gibby that genuinely found nothing on round 1.
-_WRITE_VERDICT_MARKER_SNIPPET = """
+# Phase 33 (security redesign): the verification gate arms whenever a real
+# (non-demo) dispatch contains a builder — which every plan fixture below does
+# (a named bob plan or the heuristic bob+gibby fallback). Gibby's dispatch
+# prompt now carries a MANDATORY output-contract clause requiring it to print
+# a `@qa-verdict {json}` sentinel ON ITS OWN STDOUT (NOT a shared-fs file that
+# Bob could forge — that was Gibby's break). supervisor.py reads it off
+# Gibby's pipe fd and re-loops on a missing/failing verdict. A fake `claude`
+# that never emits it would turn every `rc == 0` fixture into a 3-round
+# UNRESOLVED — so this snippet, in the dispatch branch, detects the contract
+# in its OWN prompt (only Gibby's prompt carries `@qa-verdict`) and emits a
+# PASS sentinel as a stream-json assistant-text event, mirroring a real Gibby
+# that found nothing on round 1. Bob's prompt has no such clause, so Bob never
+# emits it — matching production, where only Gibby's fd is the trusted channel.
+_EMIT_VERDICT_SNIPPET = r"""
+  emit_verdict=false
   for a in "$@"; do
     case "$a" in
-      *qa-verdict-*.json*)
-        marker="$(printf '%s' "$a" | grep -oE '/[^ ]*qa-verdict-[^ ]*\\.json' | head -1)"
-        if [[ -n "$marker" ]]; then
-          mkdir -p "$(dirname "$marker")"
-          printf '%s' '{"run_id":"fake","target":"x","verdict":"pass","checked":["fake"],"ts":"now"}' > "$marker"
-        fi
-        ;;
+      *@qa-verdict*) emit_verdict=true ;;
     esac
   done
+  if $emit_verdict; then
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"@qa-verdict {\"verdict\":\"pass\",\"target\":\"x\",\"checked\":[\"fake\"]}"}]}}'
+  fi
 """
 
 
@@ -72,8 +72,8 @@ def _fake_claude(bindir, plan_result_text):
     JSON envelope whose `.result` is `plan_result_text` (fixture-controlled);
     for the DISPATCH call (`--output-format stream-json`) returns a fast
     canned success so supervisor.py's real (non-demo) dispatch completes
-    quickly without a real LLM call. Also writes Gibby's Phase-33 verdict
-    marker when its dispatch prompt carries one (see the snippet above)."""
+    quickly without a real LLM call. Also emits Gibby's Phase-33 `@qa-verdict`
+    stdout sentinel when its dispatch prompt carries the contract (snippet)."""
     os.makedirs(bindir, exist_ok=True)
     path = os.path.join(bindir, "claude")
     envelope = json.dumps({
@@ -90,7 +90,7 @@ if $is_plan; then
 {envelope}
 FIXTURE_EOF
 else
-{_WRITE_VERDICT_MARKER_SNIPPET}
+{_EMIT_VERDICT_SNIPPET}
   echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"@status done"}}]}}}}'
   echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok"}}'
 fi
@@ -115,7 +115,7 @@ done
 if $is_plan; then
   echo '{{"type":"result","subtype":"error_max_turns","is_error":true,"result":null}}'
 else
-{_WRITE_VERDICT_MARKER_SNIPPET}
+{_EMIT_VERDICT_SNIPPET}
   echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok"}}'
 fi
 exit 0
@@ -139,7 +139,7 @@ done
 if $is_plan; then
   echo 'not json at all, just noise'
 else
-{_WRITE_VERDICT_MARKER_SNIPPET}
+{_EMIT_VERDICT_SNIPPET}
   echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok"}}'
 fi
 exit 0
@@ -189,7 +189,7 @@ class TestCleanJSON(Base):
     def test_ledger_records_redblue_rounds_and_verdict(self):
         # Phase 33 Item 2: a real bob+gibby dispatch arms the verification
         # gate; the fake claude's Gibby call writes a passing verdict marker
-        # on round 1 (see _WRITE_VERDICT_MARKER_SNIPPET), so the ledger row
+        # on round 1 (see _EMIT_VERDICT_SNIPPET), so the ledger row
         # should record exactly 1 round and a "clean" verdict — not the "-"
         # placeholder a lone-worker/non-gated dispatch would get.
         _fake_claude(self.bindir, '{"bob":"build it","gibby":"verify it"}')
@@ -213,11 +213,24 @@ class TestJSONPlusProse(Base):
         body = self._ledger_body()
         self.assertIn("Phoebe", body)
 
-    def test_lone_worker_dispatch_ledgers_placeholder_rounds_verdict(self):
-        # Phase 33: a bob-ONLY plan (no gibby) never arms the gate — the
-        # ledger's trailing rounds/verdict columns stay the "-" placeholder,
-        # not a fabricated round count.
+    def test_builder_only_plan_auto_arms_gibby(self):
+        # Phase 33 FIX B (Finding 4): a bob-ONLY plan (Phoebe dropped the gibby
+        # key) MUST still verify — Gibby is auto-injected, so the ledger records
+        # a real gate cycle (1 round, clean), NOT an unverified lone-worker pass.
         _fake_claude(self.bindir, '{"bob":"build it"}')
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = self._ledger_body()
+        rows = [ln for ln in body.splitlines() if ln.startswith("| 20")]
+        self.assertEqual(len(rows), 1)
+        cells = [c.strip() for c in rows[0].strip("|").split("|")]
+        self.assertEqual(cells[-2], "1")           # rounds
+        self.assertEqual(cells[-1], "clean")       # verdict
+
+    def test_non_builder_lone_plan_ledgers_placeholder_rounds_verdict(self):
+        # Phase 33 FIX B: a genuinely non-builder lone task (tom backup) is
+        # UNCHANGED — no gate arms, so the trailing columns stay "-"/"-".
+        _fake_claude(self.bindir, '{"tom":"run a backup"}')
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stderr)
         body = self._ledger_body()
@@ -296,7 +309,7 @@ class TestErrorEnvelope(Base):
 
 
 def _fake_claude_never_verifies(bindir, plan_result_text):
-    """A `claude` stub whose Gibby NEVER writes a verdict marker — the
+    """A `claude` stub whose Gibby NEVER emits a `@qa-verdict` sentinel — the
     end-to-end UNRESOLVED-at-cap path (spec §2: 'cap-without-pass ⇒ stop,
     mark the cycle UNRESOLVED (loud), never silently done'). Every worker
     just echoes '@status done' — company-run.sh's rc must go non-zero."""
