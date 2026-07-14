@@ -186,6 +186,22 @@ class TestCleanJSON(Base):
         self.assertIn("Phoebe", body)
         self.assertNotIn("heuristic", body)
 
+    def test_ledger_records_redblue_rounds_and_verdict(self):
+        # Phase 33 Item 2: a real bob+gibby dispatch arms the verification
+        # gate; the fake claude's Gibby call writes a passing verdict marker
+        # on round 1 (see _WRITE_VERDICT_MARKER_SNIPPET), so the ledger row
+        # should record exactly 1 round and a "clean" verdict — not the "-"
+        # placeholder a lone-worker/non-gated dispatch would get.
+        _fake_claude(self.bindir, '{"bob":"build it","gibby":"verify it"}')
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = self._ledger_body()
+        rows = [ln for ln in body.splitlines() if ln.startswith("| 20")]
+        self.assertEqual(len(rows), 1)
+        cells = [c.strip() for c in rows[0].strip("|").split("|")]
+        self.assertEqual(cells[-2], "1")           # rounds
+        self.assertEqual(cells[-1], "clean")       # verdict
+
 
 class TestJSONPlusProse(Base):
     def test_json_embedded_in_prose_still_parses(self):
@@ -196,6 +212,20 @@ class TestJSONPlusProse(Base):
         self.assertIn("plan (Phoebe):", r.stdout)
         body = self._ledger_body()
         self.assertIn("Phoebe", body)
+
+    def test_lone_worker_dispatch_ledgers_placeholder_rounds_verdict(self):
+        # Phase 33: a bob-ONLY plan (no gibby) never arms the gate — the
+        # ledger's trailing rounds/verdict columns stay the "-" placeholder,
+        # not a fabricated round count.
+        _fake_claude(self.bindir, '{"bob":"build it"}')
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = self._ledger_body()
+        rows = [ln for ln in body.splitlines() if ln.startswith("| 20")]
+        self.assertEqual(len(rows), 1)
+        cells = [c.strip() for c in rows[0].strip("|").split("|")]
+        self.assertEqual(cells[-2], "-")
+        self.assertEqual(cells[-1], "-")
 
 
 class TestHallucinatedEmployee(Base):
@@ -263,6 +293,53 @@ class TestErrorEnvelope(Base):
         with open(os.path.join(plan_log_dir, logs[0]), encoding="utf-8") as f:
             log_body = f.read()
         self.assertIn("error", log_body.lower())
+
+
+def _fake_claude_never_verifies(bindir, plan_result_text):
+    """A `claude` stub whose Gibby NEVER writes a verdict marker — the
+    end-to-end UNRESOLVED-at-cap path (spec §2: 'cap-without-pass ⇒ stop,
+    mark the cycle UNRESOLVED (loud), never silently done'). Every worker
+    just echoes '@status done' — company-run.sh's rc must go non-zero."""
+    os.makedirs(bindir, exist_ok=True)
+    path = os.path.join(bindir, "claude")
+    envelope = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": plan_result_text,
+    })
+    body = f"""#!/usr/bin/env bash
+is_plan=false
+for a in "$@"; do
+  if [[ "$a" == "json" ]]; then is_plan=true; fi
+done
+if $is_plan; then
+  cat <<'FIXTURE_EOF'
+{envelope}
+FIXTURE_EOF
+else
+  echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"@status done"}}]}}}}'
+  echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok"}}'
+fi
+exit 0
+"""
+    with open(path, "w") as f:
+        f.write(body)
+    st = os.stat(path)
+    os.chmod(path, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
+class TestRedBlueUnresolved(Base):
+    def test_gibby_never_passes_ends_unresolved_and_rc_nonzero(self):
+        _fake_claude_never_verifies(self.bindir, '{"bob":"build it","gibby":"verify it"}')
+        r = self._run(extra_env={"SELF_COMPANY_REDBLUE_MAX_ROUNDS": "2"})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)   # fail LOUD
+        self.assertIn("UNRESOLVED", r.stderr)
+        body = self._ledger_body()
+        rows = [ln for ln in body.splitlines() if ln.startswith("| 20")]
+        self.assertEqual(len(rows), 1)
+        cells = [c.strip() for c in rows[0].strip("|").split("|")]
+        self.assertEqual(cells[-2], "2")            # cap respected exactly
+        self.assertEqual(cells[-1], "unresolved")
 
 
 if __name__ == "__main__":
