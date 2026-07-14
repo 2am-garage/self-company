@@ -232,6 +232,12 @@ if command -v python3 >/dev/null 2>&1 && [[ -f "$VALIDATOR_RT" ]]; then
 fi
 
 # --- 3. DISPATCH (supervisor spawns the assigned employees, live) ----------
+# Phase 33: supervisor.py writes ops/.last-redblue-gate.json ONLY when a
+# gated (builder+Gibby) dispatch actually ran — remove any stale one first so
+# a leftover from a PRIOR run (or a lone-worker dispatch that never arms the
+# gate) can never be misread as THIS run's rounds/verdict.
+GATE_MARKER="$COMPANY/ops/.last-redblue-gate.json"
+rm -f "$GATE_MARKER" 2>/dev/null || true
 if $DEMO; then
   python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --demo
 else
@@ -245,8 +251,29 @@ rc=$?
 # string can't break the markdown table (JSON itself has none). Task stays short.
 assign_cell="${plan_json//|//}"          # sanitize pipes; keep the FULL json
 task_short="${TASK:0:40}"; task_cell="${task_short//|//}"
-[[ -f "$LEDGER" ]] || printf '# Company Runs (session-triggered)\n\n_Each row: a company work cycle started from the session. See MISSION.md._\n\n| time | task | planned by | assignments | rc |\n|---|---|---|---|---|\n' > "$LEDGER"
-printf '| %s | %s | %s | `%s` | %s |\n' "$TS" "$task_cell" "$planned_by" "$assign_cell" "$rc" >> "$LEDGER"
+# Phase 33 Item 2: rounds used + final verdict, when the gate armed for this
+# dispatch (bob+gibby paired). "-"/"-" for a lone-worker dispatch or a --demo
+# run — the gate never arms there, so this stays exactly what a pre-Phase-33
+# ledger row looked like except for the two trailing columns.
+gate_rounds="-"; gate_verdict="-"
+if [[ -f "$GATE_MARKER" ]]; then
+  gate_rounds="$(python3 -c "
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get('rounds', '-'))
+except Exception:
+    print('-')
+" "$GATE_MARKER" 2>/dev/null || echo '-')"
+  gate_verdict="$(python3 -c "
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get('verdict', '-'))
+except Exception:
+    print('-')
+" "$GATE_MARKER" 2>/dev/null || echo '-')"
+fi
+[[ -f "$LEDGER" ]] || printf '# Company Runs (session-triggered)\n\n_Each row: a company work cycle started from the session. See MISSION.md._\n\n| time | task | planned by | assignments | rc | rounds | verdict |\n|---|---|---|---|---|---|---|\n' > "$LEDGER"
+printf '| %s | %s | %s | `%s` | %s | %s | %s |\n' "$TS" "$task_cell" "$planned_by" "$assign_cell" "$rc" "$gate_rounds" "$gate_verdict" >> "$LEDGER"
 
 echo "[company-run] done (rc $rc) — logged to ops/reports/company-runs.md"
 exit "$rc"

@@ -58,6 +58,7 @@ import enum
 import json
 import os
 import re
+import secrets
 import select
 import shutil
 import subprocess
@@ -189,6 +190,123 @@ def _wrap_timeout(cmd, budget, kill_after):
     if shutil.which("timeout") is None:
         return cmd
     return ["timeout", "-k", str(int(kill_after)), str(int(budget)), *cmd]
+
+
+# --- Phase 33: the Bob<->Gibby verification gate -----------------------------
+# Spec: .company/ops/plans/spec-phase33-verification-gate.md. Elon's mechanism
+# correction (spec §0): workers are `claude -p` SUBPROCESSES, not Task-tool
+# subagents of this session, so a `SubagentStop` hook never fires for them.
+# The gate is enforced HERE, at the supervisor dispatch layer that already
+# owns the red/blue cycle — not a hook.
+#
+# SPIKE finding (spec §4, verified empirically before this loop was wired): a
+# `claude -p` subprocess sharing the parent's filesystem can write a file
+# under `company_dir` that the supervisor reads the instant the subprocess
+# reaches EOF (`Worker.on_eof`) — no new IPC, no polling, nothing to wire.
+# That is a STRICTLY cleaner and more robust seam than routing the verdict
+# through the existing `@status` stream protocol: (a) the dispatch loop only
+# forwards a BARE '@status ' line to the event log — a real worker's embedded
+# marker (inside a stream-json assistant text block) never reaches it without
+# new wiring; (b) `Worker.phase` is overwritten by the NEXT tool_use event, so
+# a verdict word emitted before Gibby's last tool call would be silently
+# clobbered; (c) the stream carries one word, never Item 1's structured
+# {run_id, target, checked, ts} shape needed for the ledger/audit trail. So
+# this file uses the spec's own suggested JSON marker — no deviation.
+def qa_verdict_path(company_dir, run_id):
+    """Path Gibby's dispatch prompt is told to write its verdict marker to —
+    ops/reports/qa-verdict-<run_id>.json (spec §1). A plain function (not a
+    class method) so both Member.real_command's contract text and
+    Supervisor's post-run read share the exact same path formula."""
+    return Path(company_dir) / "ops" / "reports" / f"qa-verdict-{run_id}.json"
+
+
+def read_qa_verdict(marker_path):
+    """Read + classify one verdict marker. Fail-LOUD-never-fail-open (spec
+    §3): missing file, unreadable file, malformed JSON, a non-dict body, or a
+    `verdict` field that isn't exactly "pass"/"fail" are ALL treated as NOT
+    CLEAN — never as an implicit pass, and never as a crash (every failure
+    mode is caught, not just the JSON parse). Returns a dict carrying at
+    least {'clean': bool, 'verdict': 'pass'|'fail'|'missing'|'malformed'|
+    'error'} plus whatever other fields the marker itself provided."""
+    try:
+        path = Path(marker_path)
+        if not path.exists():
+            return {"clean": False, "verdict": "missing"}
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {"clean": False, "verdict": "malformed"}
+        verdict = data.get("verdict")
+        if verdict not in ("pass", "fail"):
+            return {"clean": False, "verdict": "malformed", "raw": data}
+        result = dict(data)
+        result["clean"] = (verdict == "pass")
+        return result
+    except Exception:
+        return {"clean": False, "verdict": "error"}
+
+
+def _verdict_contract(marker_path):
+    """The output-contract clause Gibby's dispatch prompt gains (spec §1),
+    composed via the SAME `prompt_builder.output_contract` every other
+    dispatch contract goes through — not a hand-rolled string. Returns None
+    if prompt_builder couldn't be imported (real_command already degrades to
+    a plain prompt in that case; the gate simply has nothing to append)."""
+    if _pb is None:                                        # pragma: no cover
+        return None
+    fmt = (
+        'a JSON object {"run_id": "...", "target": "...", "verdict": '
+        '"pass"|"fail", "checked": ["attack surface 1", "..."], "ts": '
+        '"ISO-8601"} — verdict is "pass" ONLY if you genuinely attacked this '
+        'and found nothing; this marker is MANDATORY, the round is not '
+        'considered complete without it'
+    )
+    return _pb.output_contract(str(marker_path), fmt)
+
+
+def _redblue_pair_ids():
+    """The Layer-B builder/attacker ids the gate arms for — READ from
+    `employee.ALLOWED_DUTIES` (whoever holds the 'build' duty / the 'attack'
+    duty), never a second hardcoded pair living beside schedule_validator's
+    own tables (modularize, don't special-case). Degrades to the known
+    ('bob', 'gibby') pair if employee.py can't be imported — the topology
+    those duties encode is fixed (R1/R4), so the fallback is not a guess."""
+    try:
+        from employee import ALLOWED_DUTIES
+        builder = next((k for k, v in ALLOWED_DUTIES.items() if "build" in v), "bob")
+        attacker = next((k for k, v in ALLOWED_DUTIES.items() if "attack" in v), "gibby")
+        return builder, attacker
+    except Exception:
+        return "bob", "gibby"
+
+
+_REDBLUE_MAX_ROUNDS_DEFAULT = 3
+_REDBLUE_MAX_ROUNDS_CEILING = 10   # an "absurd" round count is refused, not honored
+
+
+def _redblue_max_rounds():
+    """SELF_COMPANY_REDBLUE_MAX_ROUNDS — the MANDATORY iteration cap (spec
+    §2/§3): "a block-forever loop is the proposal's own named risk," so this
+    is never tunable to effectively-infinite. A non-positive value, an
+    unparseable value, OR an absurdly large one all clamp to the default —
+    exactly the fail-closed-to-default discipline schedule_config's cadence
+    validation already uses for a bad cron field."""
+    raw = os.environ.get("SELF_COMPANY_REDBLUE_MAX_ROUNDS", str(_REDBLUE_MAX_ROUNDS_DEFAULT))
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _REDBLUE_MAX_ROUNDS_DEFAULT
+    if n < 1 or n > _REDBLUE_MAX_ROUNDS_CEILING:
+        return _REDBLUE_MAX_ROUNDS_DEFAULT
+    return n
+
+
+def redblue_gate_marker_path(company_dir):
+    """Where the supervisor records the LAST gate cycle's outcome for a
+    non-Python caller (company-run.sh's ledger step) to pick up — mirrors the
+    token-usage `.token-usage` marker convention. Best-effort, overwritten
+    each gated dispatch; a caller that wants freshness removes it first."""
+    return Path(company_dir) / "ops" / ".last-redblue-gate.json"
 
 
 class Status(enum.Enum):
@@ -342,13 +460,19 @@ class Member:
             text = text[:_PERSONA_INLINE_CHARS].rstrip() + "…"
         return text
 
-    def real_command(self, task, default_model=None):
+    def real_command(self, task, default_model=None, extra_contract=None):
         """A real headless agent, primed with this employee's role, persona,
         and the task. Assembled via the Phase 29 Item 4 shared prompt_builder
         (role header, stated wall-clock budget, output contract, task
         boundary — Mike's Idea 7 four elements) when available; degrades to
         the pre-Item-4 inline strings if the module can't be imported (never
         blocks a dispatch).
+
+        `extra_contract` (Phase 33): an OPTIONAL extra output-contract clause
+        appended after the standard one — real_command stays generic (no
+        Gibby special-case in here); the caller (Supervisor's red/blue gate)
+        decides when and for whom to pass one, e.g. the verdict-marker
+        requirement for an attacker in a gated round.
 
         Phase 29 Item 1: the model is resolved from THIS employee's context.md
         `model:` field (haiku/sonnet/opus/fable alias, a `claude-*` id verbatim,
@@ -397,6 +521,8 @@ class Member:
                 "optional garnish — the supervisor also derives phases from your "
                 "tool calls",
                 summary_cap=True))
+            if extra_contract:
+                parts.append(extra_contract)
             parts.append(_pb.task_boundary(
                 "stay in role and use only your granted tools; keep it tight; "
                 "wrap up cleanly before the budget above runs out"))
@@ -411,6 +537,8 @@ class Member:
                 f"working', '@status reviewing'). Print '@status done' when finished. "
                 f"Keep it tight."
             )
+            if extra_contract:
+                prompt = f"{prompt}\n\n{extra_contract}"
         memory = self._recall_memory(task)
         if memory:
             prompt = f"{prompt}\n\n{memory}"
@@ -691,6 +819,10 @@ class Supervisor:
         self.by_id = {e.id: e for e in self.roster}
         self.renderer = renderer if renderer is not None else LiveTree(self.roster)
         self.event_log = event_log
+        # Phase 33: set by a gated dispatch (see dispatch()/_dispatch_redblue);
+        # stays None for a lone-worker / non-red-blue dispatch, so a caller can
+        # tell "gate never armed" apart from "gate armed and resolved clean".
+        self.last_gate = None
 
     def _emit(self, worker, kind):
         if self.event_log is not None:
@@ -727,8 +859,32 @@ class Supervisor:
             current["cost"] += total_cost
             write_token_usage(Path(self.company_dir), current)
 
-    def dispatch(self, assignments, demo=False, demo_delay=0.3):
-        """assignments: {emp_id: task}. Spawn matching workers, run to completion live."""
+    def dispatch(self, assignments, demo=False, demo_delay=0.3, run_id=None):
+        """assignments: {emp_id: task}. Spawn matching workers, run to completion live.
+
+        Phase 33: when this is a REAL dispatch (demo=False, matching the spec's
+        own scenario — a simulated `--demo` run has no real Gibby to produce a
+        verdict) AND the assignments pair a builder with an attacker (spec
+        §2's red/blue shape supervisor already emits, e.g. company-run.sh's
+        heuristic `{"bob": task, "gibby": "verify the change"}` fallback), the
+        verification gate ARMS: see `_dispatch_redblue`. Any OTHER dispatch —
+        a lone worker, or a `--demo` simulate-all run — takes the exact same
+        path this method has always taken, byte-identical."""
+        builder_id, attacker_id = _redblue_pair_ids()
+        if not demo and builder_id in assignments and attacker_id in assignments:
+            return self._dispatch_redblue(assignments, builder_id, attacker_id,
+                                          demo_delay, run_id)
+        self.last_gate = None
+        return self._dispatch_once(assignments, demo=demo, demo_delay=demo_delay)
+
+    def _dispatch_once(self, assignments, demo=False, demo_delay=0.3, extra_contracts=None):
+        """The ORIGINAL dispatch body (pre-Phase-33), now the single per-round
+        primitive: spawn matching workers, run to completion live, return.
+        `extra_contracts` ({emp_id: contract_str}) lets a caller (the red/blue
+        gate) append ONE extra output-contract clause to a specific worker's
+        prompt (e.g. the verdict-marker requirement for the attacker) without
+        this method special-casing who that worker is."""
+        extra_contracts = extra_contracts or {}
         # Item 3: real workers get a wall-clock budget (demo workers stay unbounded —
         # they are trusted local echoes). The budget bounds BOTH the outer
         # `timeout -k` wrap and the in-loop deadline below.
@@ -743,7 +899,14 @@ class Supervisor:
                 cmd = emp.demo_command(task, demo_delay)
                 model = None
             else:
-                cmd = _wrap_timeout(emp.real_command(task), budget, kill_after)
+                # Only pass `extra_contract` when one is actually set — a
+                # test double (or any caller) that monkeypatches
+                # `real_command` with the pre-Phase-33 two-arg signature
+                # keeps working unchanged for a non-gated dispatch.
+                contract = extra_contracts.get(emp_id)
+                real_cmd = (emp.real_command(task, extra_contract=contract)
+                           if contract else emp.real_command(task))
+                cmd = _wrap_timeout(real_cmd, budget, kill_after)
                 model = _model_from_cmd(cmd)
             # Real workers get the double-injection guard env for shared_memory_read
             # employees (elon); demo workers just echo, so they inherit unchanged.
@@ -787,6 +950,88 @@ class Supervisor:
         self._accumulate_usage(workers)
         return workers
 
+    def _dispatch_redblue(self, assignments, builder_id, attacker_id, demo_delay, run_id):
+        """Phase 33 Item 2: the bounded builder+attacker re-loop. Runs up to
+        `_redblue_max_rounds()` rounds of (builder, attacker, [any other
+        assignees on round 1 only]); after each attacker run, reads that
+        round's verdict marker (`read_qa_verdict`) and stops the instant it's
+        clean. Never reaches the cap without recording UNRESOLVED — this
+        method NEVER returns silently on an unresolved cap; `self.last_gate`
+        always ends up populated so a caller (CLI, tests) can tell."""
+        max_rounds = _redblue_max_rounds()
+        other = {k: v for k, v in assignments.items()
+                 if k not in (builder_id, attacker_id)}
+        builder_task = assignments[builder_id]
+        attacker_task = assignments[attacker_id]
+        run_id = run_id or f"{int(time.time())}-{secrets.token_hex(3)}"
+
+        workers = {}
+        verdict = {"clean": False, "verdict": "missing"}
+        rounds_used = 0
+        for round_no in range(1, max_rounds + 1):
+            rounds_used = round_no
+            marker_path = qa_verdict_path(self.company_dir, f"{run_id}-r{round_no}")
+            round_assignments = dict(other)
+            if round_no == 1:
+                round_assignments[builder_id] = builder_task
+                round_assignments[attacker_id] = attacker_task
+            else:
+                prev_marker = qa_verdict_path(self.company_dir, f"{run_id}-r{round_no - 1}")
+                round_assignments[builder_id] = (
+                    f"{builder_task}\n\nRound {round_no} FIX: Gibby's previous "
+                    f"verdict was '{verdict.get('verdict')}' (marker: {prev_marker}). "
+                    f"Fix what it found before handing back to Gibby.")
+                round_assignments[attacker_id] = (
+                    f"{attacker_task}\n\nRe-attack round {round_no}: Bob just applied "
+                    f"a fix for the previous round's '{verdict.get('verdict')}' "
+                    f"verdict. Verify the fix AND regress the earlier finding.")
+            extra_contracts = {attacker_id: _verdict_contract(marker_path)}
+            workers = self._dispatch_once(round_assignments, demo=False,
+                                          demo_delay=demo_delay,
+                                          extra_contracts=extra_contracts)
+            verdict = read_qa_verdict(marker_path)
+            self._emit_gate_round(run_id, round_no, marker_path, verdict)
+            if verdict["clean"]:
+                self.last_gate = {"run_id": run_id, "rounds": rounds_used,
+                                  "verdict": "clean", "builder": builder_id,
+                                  "attacker": attacker_id}
+                self._write_gate_marker()
+                return workers
+
+        # Cap reached without a clean verdict — fail LOUD, never silent-done
+        # (spec §2/§3): last_gate + the on-disk marker both say UNRESOLVED.
+        self.last_gate = {"run_id": run_id, "rounds": rounds_used,
+                          "verdict": "unresolved", "builder": builder_id,
+                          "attacker": attacker_id}
+        self._write_gate_marker()
+        return workers
+
+    def _emit_gate_round(self, run_id, round_no, marker_path, verdict):
+        if self.event_log is not None:
+            self.event_log.append({
+                "ts": datetime.now().replace(microsecond=0).isoformat(),
+                "kind": "redblue_round", "run_id": run_id, "round": round_no,
+                "marker": str(marker_path), "verdict": verdict.get("verdict"),
+                "clean": verdict.get("clean"),
+            })
+
+    def _write_gate_marker(self):
+        """Best-effort marker so a non-Python caller (company-run.sh's ledger
+        step) can pick up rounds-used + final verdict without parsing stdout
+        (which is also the live TTY render stream). Mirrors the
+        `.token-usage` marker convention; trouble writing it never fails the
+        dispatch — the in-process `self.last_gate` is the primary record."""
+        if self.last_gate is None:
+            return
+        try:
+            path = redblue_gate_marker_path(self.company_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = dict(self.last_gate)
+            payload["ts"] = datetime.now().replace(microsecond=0).isoformat()
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        except Exception:
+            pass
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
@@ -807,6 +1052,16 @@ def main(argv=None):
         return 0
     if args.dispatch:
         sup.dispatch(json.loads(args.dispatch), demo=False)
+        # Phase 33: fail LOUD, never silent-done. A gated dispatch that hit the
+        # round cap without a clean verdict reports UNRESOLVED on stderr AND a
+        # non-zero exit — company-run.sh's `rc=$?` already ledgers this.
+        if sup.last_gate and sup.last_gate.get("verdict") == "unresolved":
+            gate = sup.last_gate
+            print(json.dumps({"redblue_gate": gate}), file=sys.stderr)
+            print(f"[supervisor] UNRESOLVED: {gate['builder']}/{gate['attacker']} "
+                  f"did not clear verification in {gate['rounds']} round(s) "
+                  f"(run_id={gate['run_id']})", file=sys.stderr)
+            return 1
         return 0
     ap.print_help()
     return 2

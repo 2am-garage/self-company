@@ -41,12 +41,39 @@ def _company(d, ids=("elon", "phoebe", "bob", "gibby", "tom")):
     return os.path.join(d, ".company")
 
 
+# Phase 33: the verification gate arms whenever a real (non-demo) dispatch
+# pairs bob+gibby — which every plan fixture below does (a named plan or the
+# heuristic fallback). Gibby's dispatch prompt now carries a MANDATORY
+# "write a JSON verdict marker to <path>" output-contract clause (Phase 33
+# Item 1); supervisor.py reads it after Gibby's run and re-loops on a
+# missing/failing one. A fake `claude` that never writes that marker would
+# turn every one of these `rc == 0` fixtures into a 3-round UNRESOLVED
+# (rc == 1) — not a Phase-33 regression, but this fixture no longer models a
+# real Gibby. This snippet, appended to each dispatch-branch, greps its own
+# prompt arg for the marker path the contract embeds and writes a PASS
+# verdict there — mirroring a Gibby that genuinely found nothing on round 1.
+_WRITE_VERDICT_MARKER_SNIPPET = """
+  for a in "$@"; do
+    case "$a" in
+      *qa-verdict-*.json*)
+        marker="$(printf '%s' "$a" | grep -oE '/[^ ]*qa-verdict-[^ ]*\\.json' | head -1)"
+        if [[ -n "$marker" ]]; then
+          mkdir -p "$(dirname "$marker")"
+          printf '%s' '{"run_id":"fake","target":"x","verdict":"pass","checked":["fake"],"ts":"now"}' > "$marker"
+        fi
+        ;;
+    esac
+  done
+"""
+
+
 def _fake_claude(bindir, plan_result_text):
     """A `claude` stub: for the PLAN call (`--output-format json`) returns a
     JSON envelope whose `.result` is `plan_result_text` (fixture-controlled);
     for the DISPATCH call (`--output-format stream-json`) returns a fast
     canned success so supervisor.py's real (non-demo) dispatch completes
-    quickly without a real LLM call."""
+    quickly without a real LLM call. Also writes Gibby's Phase-33 verdict
+    marker when its dispatch prompt carries one (see the snippet above)."""
     os.makedirs(bindir, exist_ok=True)
     path = os.path.join(bindir, "claude")
     envelope = json.dumps({
@@ -63,6 +90,7 @@ if $is_plan; then
 {envelope}
 FIXTURE_EOF
 else
+{_WRITE_VERDICT_MARKER_SNIPPET}
   echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"@status done"}}]}}}}'
   echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok"}}'
 fi
@@ -79,15 +107,16 @@ def _fake_claude_errored(bindir):
     """`claude` stub that reports is_error=true for the plan call."""
     os.makedirs(bindir, exist_ok=True)
     path = os.path.join(bindir, "claude")
-    body = """#!/usr/bin/env bash
+    body = f"""#!/usr/bin/env bash
 is_plan=false
 for a in "$@"; do
   if [[ "$a" == "json" ]]; then is_plan=true; fi
 done
 if $is_plan; then
-  echo '{"type":"result","subtype":"error_max_turns","is_error":true,"result":null}'
+  echo '{{"type":"result","subtype":"error_max_turns","is_error":true,"result":null}}'
 else
-  echo '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
+{_WRITE_VERDICT_MARKER_SNIPPET}
+  echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok"}}'
 fi
 exit 0
 """
@@ -102,7 +131,7 @@ def _fake_claude_garbage(bindir):
     """`claude` stub that returns non-JSON garbage for the plan call."""
     os.makedirs(bindir, exist_ok=True)
     path = os.path.join(bindir, "claude")
-    body = """#!/usr/bin/env bash
+    body = f"""#!/usr/bin/env bash
 is_plan=false
 for a in "$@"; do
   if [[ "$a" == "json" ]]; then is_plan=true; fi
@@ -110,7 +139,8 @@ done
 if $is_plan; then
   echo 'not json at all, just noise'
 else
-  echo '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
+{_WRITE_VERDICT_MARKER_SNIPPET}
+  echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok"}}'
 fi
 exit 0
 """
