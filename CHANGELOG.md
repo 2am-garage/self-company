@@ -27,6 +27,26 @@ git log / `references/status.md`.
   Gibby's interim 4-bug report before its full pass landed); this is the same-day
   correction.
 
+## [0.1.18] — 2026-07-15: Phase 34 — per-worker tool restriction
+
+- Dispatched workers are tool-fenced by a code-locked duty→profile table
+  (`employee.py` `CORE_TOOL_PROFILES`): **execute** tier (bob/tom/gibby) keeps
+  full tools; **restricted** tier (tony/mike/elon/phoebe/july) is spawned with
+  `--disallowedTools Bash Write Edit NotebookEdit`; hired/unknown names
+  fail-close to restricted. Name-only lookup — a desk's own `context.md` can't
+  raise its ceiling.
+- The bare-name `--disallowedTools` form removes the tool from the model's
+  schema structurally (verified against a real `claude -p`; propagates through
+  Task-subagent delegation). No Bash ⇒ the `/proc/<pid>/fd` write vector is
+  closed for restricted roles — the foundation Phase 33's gate needs (build
+  work can't be silently routed to a non-builder).
+- Boundary (documented, deliberate): the fence covers supervisor-dispatched
+  workers; `daily-run.sh`/`research-scan.sh`/`fire-trigger.sh` run the same
+  personas with full tools for their own `.company/` deliverables. Fence-
+  extension to `agent_spawn.sh` is a logged follow-up.
+- Phase 33 (verification gate) branch stays unmerged; it returns next on this
+  foundation, finalized with a verdict nonce + capture timeout.
+
 ## [0.1.16] — 2026-07-13: Phase 32 — hire-as-data (worker & manager tiers)
 
 - `hire.sh <id> --tier worker|manager` scaffolds an `org/employees/<id>/` desk;
