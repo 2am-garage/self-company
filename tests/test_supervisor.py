@@ -823,10 +823,12 @@ class TestModelRouting(unittest.TestCase):
 # --------------------------------------------- Phase 34 Item 2: tool restriction
 class TestToolRestrictionSpawnSeam(unittest.TestCase):
     """Item 2: real_command appends the resolved duty->tool-profile as
-    `--disallowedTools` — bob (build) gets a bare/unrestricted argv (no flag at
-    all, byte-identical to pre-Phase-34); every other dispatched worker gets a
-    bare `--disallowedTools Bash Write Edit NotebookEdit` tail. Derived from
-    the employee's id via employee.py's table, never from worker input.
+    `--disallowedTools` — the three EXECUTION roles (bob=build, tom=infra,
+    gibby=attack/QA) get a bare/unrestricted argv (no flag at all,
+    byte-identical to pre-Phase-34); the five pure reason/research/plan roles
+    (tony/mike/elon/phoebe/july) get a bare `--disallowedTools Bash Write Edit
+    NotebookEdit` tail. Derived from the employee's id via employee.py's table,
+    never from worker input.
 
     These tests exercise OUR argv-construction code only — deterministic,
     CI-safe, no real `claude` binary needed. The underlying CLAIM that
@@ -862,14 +864,19 @@ class TestToolRestrictionSpawnSeam(unittest.TestCase):
       # observed: FILE gets written — the &&-chained write is NOT blocked.
     """
 
-    def test_bob_build_argv_has_no_disallowed_tools_flag(self):
-        m = sv.Member("bob")
-        cmd = m.real_command("do a thing")
-        self.assertNotIn("--disallowedTools", cmd)
+    def test_execute_roles_have_no_disallowed_tools_flag(self):
+        # bob (build), tom (infra), gibby (attack/QA) all run code by
+        # necessity — full tools, byte-identical to pre-Phase-34 dispatch.
+        for name in ("bob", "tom", "gibby"):
+            cmd = sv.Member(name).real_command("do a thing")
+            self.assertNotIn("--disallowedTools", cmd, name)
 
-    def test_tom_infra_argv_has_no_disallowed_tools_flag(self):
-        m = sv.Member("tom")
-        cmd = m.real_command("do a thing")
+    def test_gibby_keeps_full_tools_for_dynamic_verification(self):
+        # Gibby runs the suite + writes/runs repro scripts against bob's
+        # change; restricting it would cripple the red/blue loop for no
+        # security gain (it ISSUES the verdict, it doesn't get verified).
+        m = sv.Member("gibby")
+        cmd = m.real_command("verify the change")
         self.assertNotIn("--disallowedTools", cmd)
 
     def test_tony_restricted_argv_denies_mutating_tools(self):
@@ -889,13 +896,13 @@ class TestToolRestrictionSpawnSeam(unittest.TestCase):
         for tool in ("Bash", "Write", "Edit", "NotebookEdit"):
             self.assertIn(tool, denied)
 
-    def test_gibby_attack_duty_still_gets_no_bash(self):
-        # Spike finding: Bash command-pattern scoping doesn't stop shell
-        # chaining, so even the attack/QA role is denied Bash entirely.
-        m = sv.Member("gibby")
-        cmd = m.real_command("do a thing")
-        idx = cmd.index("--disallowedTools")
-        self.assertIn("Bash", cmd[idx + 1:])
+    def test_reasoning_roles_are_restricted(self):
+        # The five pure reason/research/plan roles all deny mutation tools.
+        for name in ("tony", "mike", "elon", "phoebe", "july"):
+            cmd = sv.Member(name).real_command("do a thing")
+            self.assertIn("--disallowedTools", cmd, name)
+            idx = cmd.index("--disallowedTools")
+            self.assertIn("Bash", cmd[idx + 1:], name)
 
     def test_bob_vs_tony_argv_one_clean_token_list_no_injection(self):
         # Both are single flat lists of plain strings — no shell join, no
