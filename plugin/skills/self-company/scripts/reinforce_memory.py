@@ -68,6 +68,12 @@ from frontmatter import (split as _fm_split, parse as _fm_parse,
 # body string for the SAME file).
 import corpus
 
+# Advisory sources-array overlap candidates: group_by_sources (O(n) pre-filter,
+# exact/subset matching) and compute_sources_overlap_candidates (both). Surfaced
+# in JSON output only, never auto-merges same-source pairs that cosine didn't
+# also flag.
+from entropy import group_by_sources, compute_sources_overlap_candidates
+
 try:
     import rag_embed
     import numpy as np
@@ -112,16 +118,19 @@ def load_memories(memory_dir):
     ]
 
 
-def plan_reinforcements(mems, pairs, threshold):
+def plan_reinforcements(mems, pairs, threshold, memories_list=None):
     """
     Pure decision step. `mems`: {id: mem}. `pairs`: iterable of (a_id, b_id, score).
-    Returns (reinforcements, skipped_l2).
+    `memories_list`: optional list of memory dicts for sources-overlap advisory.
+    Returns (reinforcements, skipped_l2, sources_overlap_candidates).
       - absorbed is ALWAYS an L0; canonical is the kept memory.
       - if the partner is L2 -> skip (report only; never touch L2).
       - partner L1 -> canonical = L1, absorbed = the L0.
       - both L0 -> canonical = older by created (tie -> lexically smaller id),
         absorbed = the other L0.
     Each memory is used at most once (as absorbed); processed by score desc.
+    sources_overlap_candidates: advisory only, never auto-merges same-source pairs
+    that cosine didn't also flag.
     """
     reinforcements, skipped_l2 = [], []
     used = set()
@@ -150,7 +159,13 @@ def plan_reinforcements(mems, pairs, threshold):
         used.add(absorbed["id"])
         reinforcements.append({"canonical": canon["id"], "absorbed": absorbed["id"],
                                "canonical_tier": canon["tier"], "score": round(score, 4)})
-    return reinforcements, skipped_l2
+
+    # Compute sources-overlap candidates (advisory, never auto-merge).
+    sources_candidates = []
+    if memories_list:
+        sources_candidates = compute_sources_overlap_candidates(memories_list)
+
+    return reinforcements, skipped_l2, sources_candidates
 
 
 def _source_items(sources_value):
@@ -317,7 +332,8 @@ def main(argv=None):
     mems = load_memories(args.memory_dir)
     by_id = {m["id"]: m for m in mems}
     pairs = nearest_pairs(mems, args.threshold) if mems else []
-    reinforcements, skipped_l2 = plan_reinforcements(by_id, pairs, args.threshold)
+    reinforcements, skipped_l2, sources_overlap_candidates = plan_reinforcements(
+        by_id, pairs, args.threshold, memories_list=mems)
 
     if args.apply:
         for r in reinforcements:
@@ -326,6 +342,7 @@ def main(argv=None):
     print(json.dumps({
         "applied": args.apply, "threshold": args.threshold,
         "reinforcements": reinforcements, "skipped_l2": skipped_l2,
+        "sources_overlap_candidates": sources_overlap_candidates,
         "scanned": len(mems),
     }, ensure_ascii=False, indent=2))
     return 0

@@ -28,41 +28,71 @@ def M(id, tier, created="2026-06-01"):
 class TestPlan(unittest.TestCase):
     def test_l0_l0_keeps_older_absorbs_newer(self):
         mems = {"a": M("a", "L0", "2026-06-01"), "b": M("b", "L0", "2026-06-05")}
-        r, skip = rm.plan_reinforcements(mems, [("a", "b", 0.95)], 0.92)
+        r, skip, _cands = rm.plan_reinforcements(mems, [("a", "b", 0.95)], 0.92)
         self.assertEqual(r, [{"canonical": "a", "absorbed": "b",
                               "canonical_tier": "L0", "score": 0.95}])
         self.assertEqual(skip, [])
 
     def test_l0_into_l1_canonical_is_l1(self):
         mems = {"a": M("a", "L0"), "c": M("c", "L1")}
-        r, _ = rm.plan_reinforcements(mems, [("a", "c", 0.97)], 0.92)
+        r, _, _cands = rm.plan_reinforcements(mems, [("a", "c", 0.97)], 0.92)
         self.assertEqual(r[0]["canonical"], "c")
         self.assertEqual(r[0]["absorbed"], "a")
 
     def test_l2_is_never_touched(self):
         mems = {"a": M("a", "L0"), "e": M("e", "L2")}
-        r, skip = rm.plan_reinforcements(mems, [("a", "e", 0.99)], 0.92)
+        r, skip, _cands = rm.plan_reinforcements(mems, [("a", "e", 0.99)], 0.92)
         self.assertEqual(r, [])
         self.assertEqual(skip[0]["pair"], ["a", "e"])
 
     def test_below_threshold_nothing(self):
         mems = {"a": M("a", "L0"), "b": M("b", "L0")}
-        r, skip = rm.plan_reinforcements(mems, [("a", "b", 0.80)], 0.92)
+        r, skip, _cands = rm.plan_reinforcements(mems, [("a", "b", 0.80)], 0.92)
         self.assertEqual((r, skip), ([], []))
 
     def test_l1_l1_not_auto_merged(self):
         mems = {"a": M("a", "L1"), "b": M("b", "L1")}
-        r, _ = rm.plan_reinforcements(mems, [("a", "b", 0.99)], 0.92)
+        r, _, _cands = rm.plan_reinforcements(mems, [("a", "b", 0.99)], 0.92)
         self.assertEqual(r, [])  # warm memories aren't auto-merged
 
     def test_each_memory_used_once(self):
         mems = {"a": M("a", "L0", "2026-06-01"),
                 "b": M("b", "L0", "2026-06-02"),
                 "c": M("c", "L0", "2026-06-03")}
-        r, _ = rm.plan_reinforcements(
+        r, _, _cands = rm.plan_reinforcements(
             mems, [("a", "b", 0.95), ("a", "c", 0.94), ("b", "c", 0.93)], 0.92)
         involved = [x for rr in r for x in (rr["canonical"], rr["absorbed"])]
         self.assertEqual(len(involved), len(set(involved)))  # no id reused
+
+    def test_same_source_near_duplicate_surfaces_as_advisory_candidate(self):
+        # Two L0s share a source but their embedding score falls short of the
+        # auto-merge threshold (paraphrased, not identical) — cosine alone
+        # would silently drop them. The sources-overlap pre-filter still
+        # surfaces the pair as an advisory candidate.
+        mems = {"a": M("a", "L0", "2026-06-01"), "b": M("b", "L0", "2026-06-02")}
+        memories_list = [{"id": "a", "sources": ["[#123]"]},
+                          {"id": "b", "sources": ["[#123]"]}]
+        r, _skip, cands = rm.plan_reinforcements(
+            mems, [("a", "b", 0.80)], 0.92, memories_list=memories_list)
+        self.assertEqual(r, [])   # not auto-merged by cosine
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(cands[0]["members"], ["a", "b"])
+        self.assertEqual(cands[0]["shared_sources"], ["[#123]"])
+        self.assertEqual(cands[0]["match_type"], "exact")
+
+    def test_same_source_distinct_fact_not_auto_merged(self):
+        # Same source, but embeddings never even paired them (distinct facts
+        # recorded from the same session) — must never appear in
+        # `reinforcements`, only (still) as an advisory candidate.
+        mems = {"a": M("a", "L0", "2026-06-01"), "b": M("b", "L0", "2026-06-02")}
+        memories_list = [{"id": "a", "sources": ["[#999]"]},
+                          {"id": "b", "sources": ["[#999]"]}]
+        r, skip, cands = rm.plan_reinforcements(
+            mems, [], 0.92, memories_list=memories_list)
+        self.assertEqual(r, [])      # never auto-merged
+        self.assertEqual(skip, [])
+        self.assertEqual(len(cands), 1)   # still advisory-surfaced
+        self.assertEqual(cands[0]["match_type"], "exact")
 
 
 def _write(path, id, sources):
