@@ -199,69 +199,89 @@ def _wrap_timeout(cmd, budget, kill_after):
 # The gate is enforced HERE, at the supervisor dispatch layer that already
 # owns the red/blue cycle — not a hook.
 #
-# SPIKE finding (spec §4, verified empirically before this loop was wired): a
-# `claude -p` subprocess sharing the parent's filesystem can write a file
-# under `company_dir` that the supervisor reads the instant the subprocess
-# reaches EOF (`Worker.on_eof`) — no new IPC, no polling, nothing to wire.
-# That is a STRICTLY cleaner and more robust seam than routing the verdict
-# through the existing `@status` stream protocol: (a) the dispatch loop only
-# forwards a BARE '@status ' line to the event log — a real worker's embedded
-# marker (inside a stream-json assistant text block) never reaches it without
-# new wiring; (b) `Worker.phase` is overwritten by the NEXT tool_use event, so
-# a verdict word emitted before Gibby's last tool call would be silently
-# clobbered; (c) the stream carries one word, never Item 1's structured
-# {run_id, target, checked, ts} shape needed for the ledger/audit trail. So
-# this file uses the spec's own suggested JSON marker — no deviation.
-def qa_verdict_path(company_dir, run_id):
-    """Path Gibby's dispatch prompt is told to write its verdict marker to —
-    ops/reports/qa-verdict-<run_id>.json (spec §1). A plain function (not a
-    class method) so both Member.real_command's contract text and
-    Supervisor's post-run read share the exact same path formula."""
-    return Path(company_dir) / "ops" / "reports" / f"qa-verdict-{run_id}.json"
+# SECURITY REDESIGN (Gibby's adversarial pass, Elon adjudication #2): the FIRST
+# cut routed Gibby's verdict through a shared-filesystem marker file
+# (ops/reports/qa-verdict-*.json). Gibby broke it end-to-end — Bob and Gibby
+# are CONCURRENT `claude -p` subprocesses sharing ONE filesystem, both with
+# Bash+Write and no --allowedTools fence, writing the same ops/reports/ dir.
+# So the actor the gate CONSTRAINS (Bob) could forge the marker: (1) race —
+# poll ops/reports/ and overwrite Gibby's round-1 marker; (2) replay — from
+# round 2 on, Bob's OWN fix-round prompt literally contained the previous
+# marker's path, so deriving round-N's filename was trivial. token_hex
+# filename secrecy is worthless when every worker can read/write the whole
+# directory. A gate its own subject can forge is no gate.
+#
+# The verdict now travels IN-BAND on Gibby's OWN stdout, read by the
+# supervisor from GIBBY'S SPECIFIC pipe fd (Worker.fd). Attribution is by
+# PIPE IDENTITY — the OS process-isolation boundary the file approach threw
+# away. Bob cannot write to Gibby's stdout pipe; a `@qa-verdict` sentinel seen
+# on any OTHER worker's fd is IGNORED (only the attacker's Worker has
+# capture_verdict=True). The structured JSON shape (spike objection: "one word
+# isn't structured") rides in-band as a full JSON object AFTER the sentinel on
+# the trusted channel. No shared-fs verdict artifact exists to forge or
+# replay — Findings 1/2/3 are removed by construction, not patched.
+
+# The reserved verdict sentinel Gibby emits on stdout (bare line, or embedded
+# in a stream-json assistant-text block). Recognized ONLY on the attacker's fd.
+_QA_VERDICT_SENTINEL = "@qa-verdict "
 
 
-def read_qa_verdict(marker_path):
-    """Read + classify one verdict marker. Fail-LOUD-never-fail-open (spec
-    §3): missing file, unreadable file, malformed JSON, a non-dict body, or a
-    `verdict` field that isn't exactly "pass"/"fail" are ALL treated as NOT
-    CLEAN — never as an implicit pass, and never as a crash (every failure
-    mode is caught, not just the JSON parse). Returns a dict carrying at
-    least {'clean': bool, 'verdict': 'pass'|'fail'|'missing'|'malformed'|
-    'error'} plus whatever other fields the marker itself provided."""
-    try:
-        path = Path(marker_path)
-        if not path.exists():
-            return {"clean": False, "verdict": "missing"}
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            return {"clean": False, "verdict": "malformed"}
-        verdict = data.get("verdict")
-        if verdict not in ("pass", "fail"):
-            return {"clean": False, "verdict": "malformed", "raw": data}
-        result = dict(data)
-        result["clean"] = (verdict == "pass")
-        return result
-    except Exception:
-        return {"clean": False, "verdict": "error"}
+def _extract_qa_verdict(text):
+    """Scan `text` (one bare line, or a whole stream-json assistant-text
+    block) for the reserved verdict sentinel and return the parsed verdict
+    dict, or None. Fail-LOUD-never-fail-open (spec §3): a line that isn't
+    well-formed `@qa-verdict {json-with-verdict:pass|fail}` yields None (the
+    caller treats None as NOT clean), never a crash. Only a dict whose
+    `verdict` is exactly "pass"/"fail" is accepted."""
+    for ln in str(text).splitlines():
+        s = ln.strip()
+        if not s.startswith(_QA_VERDICT_SENTINEL):
+            continue
+        payload = s[len(_QA_VERDICT_SENTINEL):].strip()
+        try:
+            data = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict) and data.get("verdict") in ("pass", "fail"):
+            return dict(data)
+    return None
 
 
-def _verdict_contract(marker_path):
-    """The output-contract clause Gibby's dispatch prompt gains (spec §1),
-    composed via the SAME `prompt_builder.output_contract` every other
-    dispatch contract goes through — not a hand-rolled string. Returns None
-    if prompt_builder couldn't be imported (real_command already degrades to
-    a plain prompt in that case; the gate simply has nothing to append)."""
+def classify_verdict(raw):
+    """Classify the attacker Worker's captured verdict (the parsed dict from
+    its `@qa-verdict` sentinel, or None if it never emitted a well-formed
+    one). Fail-LOUD: None/absent -> not clean; a dict with verdict pass/fail
+    -> clean iff pass. Returns {'clean': bool, 'verdict': ...} plus any fields
+    the sentinel carried."""
+    if not isinstance(raw, dict):
+        return {"clean": False, "verdict": "missing"}
+    verdict = raw.get("verdict")
+    if verdict not in ("pass", "fail"):
+        return {"clean": False, "verdict": "malformed", "raw": raw}
+    result = dict(raw)
+    result["clean"] = (verdict == "pass")
+    return result
+
+
+def _verdict_contract():
+    """The output-contract clause Gibby's dispatch prompt gains, composed via
+    the SAME `prompt_builder.output_contract` every other dispatch contract
+    goes through. The verdict rides on Gibby's OWN stdout as the reserved
+    `@qa-verdict ` sentinel line — NOT a file (a shared-fs artifact Bob could
+    forge). Returns None if prompt_builder couldn't be imported (real_command
+    already degrades to a plain prompt then; the gate simply appends nothing)."""
     if _pb is None:                                        # pragma: no cover
         return None
+    where = "your OWN stdout, printed as the LAST thing you output"
     fmt = (
-        'a JSON object {"run_id": "...", "target": "...", "verdict": '
-        '"pass"|"fail", "checked": ["attack surface 1", "..."], "ts": '
-        '"ISO-8601"} — verdict is "pass" ONLY if you genuinely attacked this '
-        'and found nothing; this marker is MANDATORY, the round is not '
-        'considered complete without it'
+        'a SINGLE line beginning with the exact sentinel `@qa-verdict ` '
+        'followed by one JSON object {"verdict": "pass"|"fail", "target": '
+        '"...", "checked": ["attack surface 1", "..."]} — verdict is "pass" '
+        'ONLY if you genuinely attacked this and found nothing. This line is '
+        'MANDATORY; the round is not complete without it. Do NOT write it to '
+        'any file — print it on stdout'
     )
-    return _pb.output_contract(str(marker_path), fmt)
+    return _pb.output_contract(where, fmt)
 
 
 def _redblue_pair_ids():
@@ -278,6 +298,28 @@ def _redblue_pair_ids():
         return builder, attacker
     except Exception:
         return "bob", "gibby"
+
+
+def _builder_ids():
+    """Every id holding a BUILD-class duty (FIX B / Finding 4). Read from the
+    SAME Layer-B tables as _redblue_pair_ids — so "does this plan contain a
+    builder?" (which forces the attacker to be present) can never disagree
+    with "who is the builder". Degrades to {'bob'} if employee.py is absent."""
+    try:
+        from employee import ALLOWED_DUTIES, BUILD_DUTIES
+        return {k for k, v in ALLOWED_DUTIES.items() if set(v) & set(BUILD_DUTIES)}
+    except Exception:
+        return {"bob"}
+
+
+# FIX B: when a code-touching (builder) plan omits the attacker, the gate
+# auto-injects Gibby with this default attack task rather than letting a
+# builder run unverified because Phoebe (an LLM fed attacker-influenced $TASK)
+# dropped the key.
+_AUTO_ATTACK_TASK = (
+    "verify the builder's change: attack it across the standard surfaces "
+    "(correctness, malformed input, concurrency, resources, spec drift, "
+    "regression) and report a machine-checkable verdict")
 
 
 _REDBLUE_MAX_ROUNDS_DEFAULT = 3
@@ -573,7 +615,8 @@ class Worker:
     stream-json for a real worker (Phase 29 Item 3), the legacy '@status'
     marker protocol for a demo worker or a plain-text fallback."""
 
-    def __init__(self, employee, task, command, env=None, budget=None, model=None):
+    def __init__(self, employee, task, command, env=None, budget=None, model=None,
+                 capture_verdict=False):
         self.emp = employee
         self.task = task
         self.command = command
@@ -581,6 +624,13 @@ class Worker:
         self.budget = budget          # Item 3 (TOM-1): wall-clock deadline (s); None -> unbounded
         self.model = model            # Item 1: the --model this worker actually runs (None for demo)
         self.timed_out = False        # Item 3 (TOM-1): killed by the deadline (vs natural exit)
+        # Phase 33 security redesign: True ONLY for the attacker (Gibby) worker
+        # in a gated round. A `@qa-verdict` sentinel is honored ONLY when this
+        # is set — i.e. only when read off THIS (Gibby's) pipe fd. Bob's worker
+        # has it False, so a sentinel Bob prints is ignored (attribution by
+        # pipe identity, the OS boundary Bob can't cross).
+        self.capture_verdict = capture_verdict
+        self.verdict = None           # the parsed verdict dict, once seen on this fd
         self.status = Status.IDLE
         self.phase = ""
         self.last = ""
@@ -656,6 +706,15 @@ class Worker:
         branching here — they simply never produce a line starting with '{'."""
         line = line.rstrip("\n")
         self.lines.append(line)
+        # Phase 33: a bare `@qa-verdict {json}` line (demo/plain-text mode) is
+        # honored ONLY on the attacker's fd (capture_verdict). On any other
+        # worker's fd it is NOT consumed here — it falls through to a plain log
+        # line, so Bob printing this sentinel can never satisfy the gate.
+        if self.capture_verdict and line.startswith(_QA_VERDICT_SENTINEL):
+            found = _extract_qa_verdict(line)
+            if found is not None:
+                self.verdict = found
+            return
         if line.startswith("@status "):
             self.phase = line[len("@status "):].strip()
             self.status = Status.DONE if self.phase == "done" else Status.WORKING
@@ -694,6 +753,14 @@ class Worker:
                     self.last = f"tool: {name}"
                 elif btype == "text":
                     text = str(block.get("text") or "")
+                    # Phase 33: in stream-json mode Gibby's verdict sentinel
+                    # arrives inside its assistant text. Honored ONLY on the
+                    # attacker's fd (capture_verdict) — Bob's assistant text is
+                    # never scanned for a verdict.
+                    if self.capture_verdict:
+                        found = _extract_qa_verdict(text)
+                        if found is not None:
+                            self.verdict = found
                     matches = _EMBEDDED_STATUS_RE.findall(text)
                     if matches:
                         word = matches[-1].strip()
@@ -862,28 +929,62 @@ class Supervisor:
     def dispatch(self, assignments, demo=False, demo_delay=0.3, run_id=None):
         """assignments: {emp_id: task}. Spawn matching workers, run to completion live.
 
-        Phase 33: when this is a REAL dispatch (demo=False, matching the spec's
-        own scenario — a simulated `--demo` run has no real Gibby to produce a
-        verdict) AND the assignments pair a builder with an attacker (spec
-        §2's red/blue shape supervisor already emits, e.g. company-run.sh's
-        heuristic `{"bob": task, "gibby": "verify the change"}` fallback), the
-        verification gate ARMS: see `_dispatch_redblue`. Any OTHER dispatch —
-        a lone worker, or a `--demo` simulate-all run — takes the exact same
-        path this method has always taken, byte-identical."""
+        Phase 33 (FIX B / Finding 4 — gate-arming is ENFORCED, not Phoebe's
+        discretion): for a REAL dispatch (demo=False), if the plan contains ANY
+        builder-duty assignee then the attacker (Gibby) MUST run. Gate-arming
+        is no longer "did the plan happen to include both keys" — a plan of
+        `{"bob": "build X"}` alone would let a code-touching change ship
+        unverified because Phoebe (an LLM fed attacker-influenced $TASK)
+        dropped the Gibby key. So if a builder is present and the attacker is
+        NOT, the attacker is AUTO-INJECTED (logged) — the plan stays runnable
+        and the gate always covers a build. Genuinely non-builder lone-worker
+        dispatches (a lone tony/mike research task, or a `--demo` simulate-all
+        run) are UNCHANGED — only a BUILDER present forces Gibby."""
         builder_id, attacker_id = _redblue_pair_ids()
-        if not demo and builder_id in assignments and attacker_id in assignments:
-            return self._dispatch_redblue(assignments, builder_id, attacker_id,
-                                          demo_delay, run_id)
-        self.last_gate = None
-        return self._dispatch_once(assignments, demo=demo, demo_delay=demo_delay)
+        if demo:
+            self.last_gate = None
+            return self._dispatch_once(assignments, demo=True, demo_delay=demo_delay)
 
-    def _dispatch_once(self, assignments, demo=False, demo_delay=0.3, extra_contracts=None):
+        builders_present = _builder_ids() & set(assignments)
+        if builders_present:
+            armed = dict(assignments)
+            # Loop on a builder that is actually present (defaults to bob).
+            loop_builder = builder_id if builder_id in armed else sorted(builders_present)[0]
+            auto_injected = attacker_id not in armed
+            if auto_injected:
+                armed[attacker_id] = _AUTO_ATTACK_TASK
+                self._emit_autoarm(loop_builder, attacker_id)
+            return self._dispatch_redblue(armed, loop_builder, attacker_id,
+                                          demo_delay, run_id, auto_injected=auto_injected)
+        # No builder in the plan -> genuinely non-red/blue; unchanged path.
+        self.last_gate = None
+        return self._dispatch_once(assignments, demo=False, demo_delay=demo_delay)
+
+    def _emit_autoarm(self, builder_id, attacker_id):
+        """FIX B: a code-touching plan that omitted the attacker had it
+        auto-injected — surface it on the event log AND stderr (not just a
+        code comment) so a run record shows the gate armed itself. stderr, not
+        stdout: stdout is the live TTY render stream."""
+        print(f"[supervisor] gate auto-armed: builder '{builder_id}' present but "
+              f"attacker '{attacker_id}' absent from plan — injecting '{attacker_id}'",
+              file=sys.stderr)
+        if self.event_log is not None:
+            self.event_log.append({
+                "ts": datetime.now().replace(microsecond=0).isoformat(),
+                "kind": "redblue_autoarm", "builder": builder_id,
+                "attacker": attacker_id})
+
+    def _dispatch_once(self, assignments, demo=False, demo_delay=0.3,
+                       extra_contracts=None, verdict_capture_id=None):
         """The ORIGINAL dispatch body (pre-Phase-33), now the single per-round
         primitive: spawn matching workers, run to completion live, return.
         `extra_contracts` ({emp_id: contract_str}) lets a caller (the red/blue
         gate) append ONE extra output-contract clause to a specific worker's
-        prompt (e.g. the verdict-marker requirement for the attacker) without
-        this method special-casing who that worker is."""
+        prompt (e.g. the verdict sentinel requirement for the attacker) without
+        this method special-casing who that worker is.
+        `verdict_capture_id` marks WHICH worker's fd is the trusted verdict
+        channel (the attacker); only that Worker honors a `@qa-verdict`
+        sentinel — attribution by pipe identity (Phase 33 security redesign)."""
         extra_contracts = extra_contracts or {}
         # Item 3: real workers get a wall-clock budget (demo workers stay unbounded —
         # they are trusted local echoes). The budget bounds BOTH the outer
@@ -911,7 +1012,8 @@ class Supervisor:
             # Real workers get the double-injection guard env for shared_memory_read
             # employees (elon); demo workers just echo, so they inherit unchanged.
             env = None if demo else emp.worker_env()
-            w = Worker(emp, task, cmd, env=env, budget=budget, model=model)
+            w = Worker(emp, task, cmd, env=env, budget=budget, model=model,
+                       capture_verdict=(emp_id == verdict_capture_id))
             w.start()
             workers[emp_id] = w
             self._emit(w, "start")
@@ -950,51 +1052,61 @@ class Supervisor:
         self._accumulate_usage(workers)
         return workers
 
-    def _dispatch_redblue(self, assignments, builder_id, attacker_id, demo_delay, run_id):
+    def _dispatch_redblue(self, assignments, builder_id, attacker_id, demo_delay,
+                          run_id, auto_injected=False):
         """Phase 33 Item 2: the bounded builder+attacker re-loop. Runs up to
-        `_redblue_max_rounds()` rounds of (builder, attacker, [any other
-        assignees on round 1 only]); after each attacker run, reads that
-        round's verdict marker (`read_qa_verdict`) and stops the instant it's
-        clean. Never reaches the cap without recording UNRESOLVED — this
-        method NEVER returns silently on an unresolved cap; `self.last_gate`
-        always ends up populated so a caller (CLI, tests) can tell."""
+        `_redblue_max_rounds()` rounds; after each attacker run, reads the
+        verdict from the ATTACKER WORKER'S OWN stdout (its `@qa-verdict`
+        sentinel, captured off its pipe fd — never a shared-fs file Bob could
+        forge) and stops the instant it's clean. Never reaches the cap without
+        recording UNRESOLVED — this method NEVER returns silently on an
+        unresolved cap; `self.last_gate` always ends up populated so a caller
+        (CLI, tests) can tell.
+
+        FIX C (Finding 5): any THIRD-PARTY assignee (`other`) is dispatched on
+        ROUND 1 ONLY — a fix/re-attack round is strictly (builder, attacker).
+        Before, `other` was re-seeded every round, so a bob+gibby+tony plan
+        that never cleared re-ran tony once PER round."""
         max_rounds = _redblue_max_rounds()
         other = {k: v for k, v in assignments.items()
                  if k not in (builder_id, attacker_id)}
         builder_task = assignments[builder_id]
         attacker_task = assignments[attacker_id]
         run_id = run_id or f"{int(time.time())}-{secrets.token_hex(3)}"
+        contract = _verdict_contract()
 
         workers = {}
         verdict = {"clean": False, "verdict": "missing"}
         rounds_used = 0
         for round_no in range(1, max_rounds + 1):
             rounds_used = round_no
-            marker_path = qa_verdict_path(self.company_dir, f"{run_id}-r{round_no}")
-            round_assignments = dict(other)
+            round_assignments = {}
             if round_no == 1:
+                round_assignments.update(other)          # FIX C: round 1 ONLY
                 round_assignments[builder_id] = builder_task
                 round_assignments[attacker_id] = attacker_task
             else:
-                prev_marker = qa_verdict_path(self.company_dir, f"{run_id}-r{round_no - 1}")
                 round_assignments[builder_id] = (
                     f"{builder_task}\n\nRound {round_no} FIX: Gibby's previous "
-                    f"verdict was '{verdict.get('verdict')}' (marker: {prev_marker}). "
-                    f"Fix what it found before handing back to Gibby.")
+                    f"verdict was '{verdict.get('verdict')}'. Fix what it found "
+                    f"before handing back to Gibby.")
                 round_assignments[attacker_id] = (
                     f"{attacker_task}\n\nRe-attack round {round_no}: Bob just applied "
                     f"a fix for the previous round's '{verdict.get('verdict')}' "
                     f"verdict. Verify the fix AND regress the earlier finding.")
-            extra_contracts = {attacker_id: _verdict_contract(marker_path)}
-            workers = self._dispatch_once(round_assignments, demo=False,
-                                          demo_delay=demo_delay,
-                                          extra_contracts=extra_contracts)
-            verdict = read_qa_verdict(marker_path)
-            self._emit_gate_round(run_id, round_no, marker_path, verdict)
+            workers = self._dispatch_once(
+                round_assignments, demo=False, demo_delay=demo_delay,
+                extra_contracts={attacker_id: contract},
+                verdict_capture_id=attacker_id)
+            # Read the verdict off the ATTACKER'S OWN pipe (trusted channel).
+            attacker_worker = workers.get(attacker_id)
+            raw = attacker_worker.verdict if attacker_worker else None
+            verdict = classify_verdict(raw)
+            self._emit_gate_round(run_id, round_no, verdict)
             if verdict["clean"]:
                 self.last_gate = {"run_id": run_id, "rounds": rounds_used,
                                   "verdict": "clean", "builder": builder_id,
-                                  "attacker": attacker_id}
+                                  "attacker": attacker_id, "auto_injected": auto_injected}
                 self._write_gate_marker()
                 return workers
 
@@ -1002,17 +1114,16 @@ class Supervisor:
         # (spec §2/§3): last_gate + the on-disk marker both say UNRESOLVED.
         self.last_gate = {"run_id": run_id, "rounds": rounds_used,
                           "verdict": "unresolved", "builder": builder_id,
-                          "attacker": attacker_id}
+                          "attacker": attacker_id, "auto_injected": auto_injected}
         self._write_gate_marker()
         return workers
 
-    def _emit_gate_round(self, run_id, round_no, marker_path, verdict):
+    def _emit_gate_round(self, run_id, round_no, verdict):
         if self.event_log is not None:
             self.event_log.append({
                 "ts": datetime.now().replace(microsecond=0).isoformat(),
                 "kind": "redblue_round", "run_id": run_id, "round": round_no,
-                "marker": str(marker_path), "verdict": verdict.get("verdict"),
-                "clean": verdict.get("clean"),
+                "verdict": verdict.get("verdict"), "clean": verdict.get("clean"),
             })
 
     def _write_gate_marker(self):
