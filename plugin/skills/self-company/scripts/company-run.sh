@@ -232,18 +232,30 @@ if command -v python3 >/dev/null 2>&1 && [[ -f "$VALIDATOR_RT" ]]; then
 fi
 
 # --- 3. DISPATCH (supervisor spawns the assigned employees, live) ----------
-# Phase 33: supervisor.py writes ops/.last-redblue-gate.json ONLY when a
-# gated (builder+Gibby) dispatch actually ran — remove any stale one first so
-# a leftover from a PRIOR run (or a lone-worker dispatch that never arms the
-# gate) can never be misread as THIS run's rounds/verdict.
-GATE_MARKER="$COMPANY/ops/.last-redblue-gate.json"
-rm -f "$GATE_MARKER" 2>/dev/null || true
+# Phase 33 FIX 2 (Finding 3): the gate's rounds/verdict come from the
+# supervisor's OWN stderr (`@redblue-gate {json}`), NOT a shared-fs marker a
+# Bob worker could overwrite to forge a "clean" ledger cell. We capture the
+# supervisor's stderr via an anonymous pipe (command substitution) while its
+# stdout — the live tree — passes straight through to the terminal (fd 3
+# trick). A worker's own stderr is merged into ITS stdout pipe (consumed by
+# the supervisor), so no worker can write the supervisor's fd 2: the captured
+# stream is parent-trusted, and there is no filesystem path to target.
+gate_line=""
 if $DEMO; then
   python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --demo
+  rc=$?
 else
-  python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --dispatch "$plan_json"
+  exec 3>&1
+  gate_err="$(python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" \
+    --dispatch "$plan_json" 2>&1 1>&3)"
+  rc=$?
+  exec 3>&-
+  # Replay the supervisor's diagnostics to the terminal (its loud UNRESOLVED /
+  # auto-arm / refusal messages), minus the machine `@redblue-gate` sentinel.
+  printf '%s\n' "$gate_err" | grep -v '^@redblue-gate ' >&2 || true
+  gate_line="$(printf '%s\n' "$gate_err" | grep '^@redblue-gate ' | tail -1 \
+    | sed 's/^@redblue-gate //')"
 fi
-rc=$?
 
 # --- 4. LEDGER -------------------------------------------------------------
 # Store the FULL assignment JSON (no truncation) so org-status.py can attribute
@@ -251,26 +263,26 @@ rc=$?
 # string can't break the markdown table (JSON itself has none). Task stays short.
 assign_cell="${plan_json//|//}"          # sanitize pipes; keep the FULL json
 task_short="${TASK:0:40}"; task_cell="${task_short//|//}"
-# Phase 33 Item 2: rounds used + final verdict, when the gate armed for this
-# dispatch (bob+gibby paired). "-"/"-" for a lone-worker dispatch or a --demo
-# run — the gate never arms there, so this stays exactly what a pre-Phase-33
-# ledger row looked like except for the two trailing columns.
+# Phase 33: rounds used + final verdict, parsed from the trusted supervisor
+# stderr sentinel. "-"/"-" for a lone-worker (non-builder) dispatch or a --demo
+# run — the gate never arms there, so nothing is emitted and this stays exactly
+# a pre-Phase-33 ledger row except for the two trailing columns.
 gate_rounds="-"; gate_verdict="-"
-if [[ -f "$GATE_MARKER" ]]; then
-  gate_rounds="$(python3 -c "
+if [[ -n "$gate_line" ]]; then
+  gate_rounds="$(printf '%s' "$gate_line" | python3 -c "
 import json, sys
 try:
-    print(json.load(open(sys.argv[1])).get('rounds', '-'))
+    print(json.load(sys.stdin).get('rounds', '-'))
 except Exception:
     print('-')
-" "$GATE_MARKER" 2>/dev/null || echo '-')"
-  gate_verdict="$(python3 -c "
+" 2>/dev/null || echo '-')"
+  gate_verdict="$(printf '%s' "$gate_line" | python3 -c "
 import json, sys
 try:
-    print(json.load(open(sys.argv[1])).get('verdict', '-'))
+    print(json.load(sys.stdin).get('verdict', '-'))
 except Exception:
     print('-')
-" "$GATE_MARKER" 2>/dev/null || echo '-')"
+" 2>/dev/null || echo '-')"
 fi
 [[ -f "$LEDGER" ]] || printf '# Company Runs (session-triggered)\n\n_Each row: a company work cycle started from the session. See MISSION.md._\n\n| time | task | planned by | assignments | rc | rounds | verdict |\n|---|---|---|---|---|---|---|\n' > "$LEDGER"
 printf '| %s | %s | %s | `%s` | %s | %s | %s |\n' "$TS" "$task_cell" "$planned_by" "$assign_cell" "$rc" "$gate_rounds" "$gate_verdict" >> "$LEDGER"
