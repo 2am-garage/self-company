@@ -105,6 +105,46 @@ The ledger's value:
 
 ---
 
+## Machine-enforced gate (Phase 33) — supervisor layer, not a hook
+
+The red/blue sign-off is no longer convention-only: `supervisor.py` **machine-enforces**
+Gibby's verdict on every dispatched build. Key design points (so they are not re-litigated):
+
+- **Why the supervisor layer, not a `SubagentStop` hook.** self-company dispatches workers as
+  `claude -p` **subprocesses** (see `supervisor.py` `real_command`), NOT Task-tool subagents of
+  the session. Claude Code's `SubagentStop` fires only for Task-tool subagents, so a hook scoped
+  to Gibby would **never fire** — a no-op gate that only *looks* like enforcement. The gate lives
+  where the red/blue cycle actually runs: the supervisor dispatch loop.
+- **Verdict attribution is by PIPE IDENTITY.** Gibby emits its verdict as a reserved
+  `@qa-verdict {"verdict":"pass"|"fail",...}` sentinel on its **own stdout**, which the supervisor
+  reads off Gibby's specific pipe fd (`Worker.capture_verdict`). Bob and Gibby are concurrent
+  subprocesses sharing one filesystem, so an earlier design that wrote the verdict to a
+  shared-fs marker file was **forgeable by Bob** (race/overwrite, and the round-N path leaked into
+  Bob's own prompt). A worker cannot write another worker's stdout pipe — that OS boundary is the
+  attribution. A `@qa-verdict` line on any other worker's fd is ignored. The verdict is
+  **first-wins + locked** (a later echoed sentinel can't flip it), with Gibby's final stream-json
+  `result` event preferred as authoritative.
+- **The gate result is on the supervisor's own stderr**, not a file. `supervisor.py` prints a
+  `@redblue-gate {json}` line on its own stderr; `company-run.sh` captures that trusted channel for
+  the ledger. No shared-fs artifact a worker could overwrite to forge the human-facing verdict cell.
+- **Bounded re-loop.** missing/malformed/`fail` ⇒ not clean ⇒ re-dispatch Bob(fix)+Gibby(re-attack)
+  up to `SELF_COMPANY_REDBLUE_MAX_ROUNDS` (default 3, env-tunable, clamped to default on a
+  non-positive/absurd value). Cap-without-pass ⇒ **UNRESOLVED** (loud, non-zero exit), never a
+  silent "done".
+- **Arming is enforced, not the planner's discretion.** If a plan contains any builder-duty
+  assignee, Gibby is required; if absent, Gibby is **auto-injected**. A plan routing code-mutation
+  work to a **non-builder** (which would skip arming) is **refused loudly** by a conservative
+  content check (a code-mutation verb + a code-file/path signal in the task) — read-only tasks are
+  never refused.
+
+**Known limitation → follow-up (Phase 34):** the non-builder refusal is **defense-in-depth, not
+airtight** — a cleverly-worded build task can evade the text heuristic. The sound fix is
+**per-worker `--allowedTools` tool restriction** (fence each worker to the tools its role needs, so
+a non-builder physically cannot mutate source), tracked as **Phase 34**. Until then the content
+check is a tripwire, not a wall.
+
+---
+
 ## Relationship with Memory Pipeline VERIFY
 
 Memory Pipeline B's VERIFY (§3 design) is a "lightweight version" of this adversarial approach: Gibby makes a single attack surface against each memory record — **provenance attack** (can't point back to real source, reject), send back to CAPTURE, discard after `VERIFY_MAX_RETRY=2`. Pipeline A is the full multi-surface, N=3 red/blue adversarial.
