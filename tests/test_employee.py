@@ -376,6 +376,77 @@ class TestDutiesAndSteps(unittest.TestCase):
                                  name == owner, f"{name}.{step}")
 
 
+# --------------------------------------------------- Phase 34: duty -> tool profile
+class TestToolProfiles(unittest.TestCase):
+    """Item 1: the duty->tool-profile table (Layer B, code-locked next to
+    ALLOWED_DUTIES). The single security invariant: only bob (build) and tom
+    (infra) may mutate source; every other dispatched worker gets NO mutation
+    tools (Bash/Write/Edit/NotebookEdit) at all."""
+
+    def test_bob_is_build_unrestricted(self):
+        self.assertEqual(employee.tool_profile_for("bob"), "build")
+        self.assertEqual(employee.disallowed_tools_for("bob"), ())
+
+    def test_tom_is_infra_unrestricted(self):
+        self.assertEqual(employee.tool_profile_for("tom"), "infra")
+        self.assertEqual(employee.disallowed_tools_for("tom"), ())
+
+    def test_every_other_core_employee_is_restricted(self):
+        for name in ("gibby", "tony", "mike", "elon", "phoebe", "july"):
+            self.assertEqual(employee.tool_profile_for(name), "restricted", name)
+            tools = employee.disallowed_tools_for(name)
+            for mutating in ("Bash", "Write", "Edit", "NotebookEdit"):
+                self.assertIn(mutating, tools, f"{name} must deny {mutating}")
+
+    def test_gibby_does_not_get_bash_despite_attack_duty(self):
+        # Phase 34 spike finding: Bash command-pattern scoping does not stop
+        # shell chaining, so it cannot be safely granted even to the
+        # attack/QA role — a deliberate deviation from the original draft.
+        self.assertIn("Bash", employee.disallowed_tools_for("gibby"))
+
+    def test_only_build_and_infra_may_mutate_source(self):
+        # The single security invariant, asserted directly against the whole
+        # core roster: exactly bob and tom have an EMPTY disallow list
+        # (unrestricted); everyone else denies all four mutating tools.
+        mutators = [n for n in employee.CORE_EMPLOYEES
+                    if employee.disallowed_tools_for(n) == ()]
+        self.assertEqual(sorted(mutators), ["bob", "tom"])
+
+    def test_unknown_duty_or_hired_desk_is_most_restrictive(self):
+        for bogus in ("", None, "zzz-not-a-real-employee", "../../etc",
+                      "hired-researcher"):
+            self.assertEqual(employee.tool_profile_for(bogus), "restricted", repr(bogus))
+            tools = employee.disallowed_tools_for(bogus)
+            for mutating in ("Bash", "Write", "Edit", "NotebookEdit"):
+                self.assertIn(mutating, tools, repr(bogus))
+
+    def test_hired_desk_never_resolves_to_build_or_infra(self):
+        # A hired worker/manager desk (R7 forbids it from holding a build/
+        # attack duty in the first place) must never fall through to an
+        # unrestricted profile just because its name isn't recognized.
+        for hired_name in ("zara", "quinn-analyst", "newhire"):
+            self.assertNotEqual(employee.tool_profile_for(hired_name), "build")
+            self.assertNotEqual(employee.tool_profile_for(hired_name), "infra")
+            self.assertNotEqual(employee.disallowed_tools_for(hired_name), ())
+
+    def test_disallowed_tools_for_always_returns_tuple_or_list_never_raises(self):
+        for weird in (123, [], {}, object()):
+            try:
+                result = employee.disallowed_tools_for(weird)
+            except Exception as e:  # pragma: no cover - must never happen
+                self.fail(f"disallowed_tools_for({weird!r}) raised {e!r}")
+            self.assertIsInstance(result, (tuple, list))
+
+    def test_case_insensitive_lookup(self):
+        self.assertEqual(employee.tool_profile_for("BOB"), "build")
+        self.assertEqual(employee.tool_profile_for("Bob"), "build")
+        self.assertEqual(employee.tool_profile_for("  bob  "), "build")
+
+    def test_core_tool_profiles_covers_every_core_employee(self):
+        for name in employee.CORE_EMPLOYEES:
+            self.assertIn(name, employee.CORE_TOOL_PROFILES, name)
+
+
 # ------------------------------------------------------------------- should_run parity
 class TestShouldRunParity(unittest.TestCase):
     """Employee.should_run must match schedule_config.should_run everywhere — the

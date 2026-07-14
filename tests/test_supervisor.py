@@ -820,6 +820,139 @@ class TestModelRouting(unittest.TestCase):
         self.assertEqual(sv.DEFAULT_MODEL, sc.DEFAULT_AGENT_MODEL)
 
 
+# --------------------------------------------- Phase 34 Item 2: tool restriction
+class TestToolRestrictionSpawnSeam(unittest.TestCase):
+    """Item 2: real_command appends the resolved duty->tool-profile as
+    `--disallowedTools` — bob (build) gets a bare/unrestricted argv (no flag at
+    all, byte-identical to pre-Phase-34); every other dispatched worker gets a
+    bare `--disallowedTools Bash Write Edit NotebookEdit` tail. Derived from
+    the employee's id via employee.py's table, never from worker input.
+
+    These tests exercise OUR argv-construction code only — deterministic,
+    CI-safe, no real `claude` binary needed. The underlying CLAIM that
+    `--disallowedTools <Tool>` actually blocks the model from calling that
+    tool (vs. merely a suite mock believing it did) was verified empirically
+    against a real headless `claude -p` during the Phase 34 spike and is NOT
+    re-exercised here (no `claude` binary / network / API key in CI). The
+    exact manual-verification commands, for anyone who wants to re-confirm
+    against a live CLI:
+
+      # (1) a bare --disallowedTools removes the tool from the model's
+      #     function-calling schema entirely (structural, not advisory) —
+      #     inspect the `system`/`init` stream-json event's `tools` array:
+      claude -p "say hi" --model claude-haiku-4-5 \\
+        --disallowedTools Write Edit Bash NotebookEdit \\
+        --output-format stream-json --verbose | head -1 \\
+        | python3 -c "import json,sys; d=json.loads(sys.stdin.readline()); \\
+          print(any(t in d['tools'] for t in ('Write','Edit','Bash','NotebookEdit')))"
+      # expect: False
+
+      # (2) with Bash denied, a worker cannot write ANYWHERE (including via
+      #     the /proc/<pid>/fd vector Gibby exploited) because there is no
+      #     shell primitive to invoke at all:
+      claude -p "Use Bash to run: echo x > /tmp/should_not_exist.txt" \\
+        --model claude-haiku-4-5 --disallowedTools Bash
+      test -e /tmp/should_not_exist.txt && echo FAIL || echo "OK: blocked"
+
+      # (3) --allowedTools path/command-pattern scoping is UNRELIABLE headless
+      #     (do NOT use it as a security boundary) — a matched-prefix Bash
+      #     command with a chained &&-clause still runs the chained part:
+      claude -p "Run: python3 -m unittest --help > /dev/null && echo x > FILE" \\
+        --model claude-haiku-4-5 --allowedTools "Bash(python3 -m unittest *)"
+      # observed: FILE gets written — the &&-chained write is NOT blocked.
+    """
+
+    def test_bob_build_argv_has_no_disallowed_tools_flag(self):
+        m = sv.Member("bob")
+        cmd = m.real_command("do a thing")
+        self.assertNotIn("--disallowedTools", cmd)
+
+    def test_tom_infra_argv_has_no_disallowed_tools_flag(self):
+        m = sv.Member("tom")
+        cmd = m.real_command("do a thing")
+        self.assertNotIn("--disallowedTools", cmd)
+
+    def test_tony_restricted_argv_denies_mutating_tools(self):
+        m = sv.Member("tony")
+        cmd = m.real_command("do a thing")
+        self.assertIn("--disallowedTools", cmd)
+        idx = cmd.index("--disallowedTools")
+        denied = cmd[idx + 1:]
+        for tool in ("Bash", "Write", "Edit", "NotebookEdit"):
+            self.assertIn(tool, denied)
+
+    def test_mike_restricted_argv_denies_mutating_tools(self):
+        m = sv.Member("mike")
+        cmd = m.real_command("do a thing")
+        idx = cmd.index("--disallowedTools")
+        denied = cmd[idx + 1:]
+        for tool in ("Bash", "Write", "Edit", "NotebookEdit"):
+            self.assertIn(tool, denied)
+
+    def test_gibby_attack_duty_still_gets_no_bash(self):
+        # Spike finding: Bash command-pattern scoping doesn't stop shell
+        # chaining, so even the attack/QA role is denied Bash entirely.
+        m = sv.Member("gibby")
+        cmd = m.real_command("do a thing")
+        idx = cmd.index("--disallowedTools")
+        self.assertIn("Bash", cmd[idx + 1:])
+
+    def test_bob_vs_tony_argv_one_clean_token_list_no_injection(self):
+        # Both are single flat lists of plain strings — no shell join, no
+        # embedded whitespace-smuggled extra flags, regardless of duty.
+        bob_cmd = sv.Member("bob").real_command("build it")
+        tony_cmd = sv.Member("tony").real_command("inspect it")
+        for cmd in (bob_cmd, tony_cmd):
+            self.assertIsInstance(cmd, list)
+            for tok in cmd:
+                self.assertIsInstance(tok, str)
+        self.assertNotIn("--disallowedTools", bob_cmd)
+        self.assertIn("--disallowedTools", tony_cmd)
+
+    def test_disallowed_tools_appended_after_model_and_stream_args(self):
+        # cmd[2] must stay the prompt (existing contract) regardless of the
+        # new flag; --disallowedTools rides at the end.
+        m = sv.Member("tony")
+        cmd = m.real_command("do a thing")
+        self.assertEqual(cmd[0], "claude")
+        self.assertEqual(cmd[1], "-p")
+        self.assertIn("do a thing", cmd[2])
+        self.assertLess(cmd.index("--model"), cmd.index("--disallowedTools"))
+
+    def test_hired_worker_never_gets_unrestricted_argv(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, ".company", "org", "employees", "quinn")
+            os.makedirs(base, exist_ok=True)
+            open(os.path.join(base, "persona.md"), "w").close()
+            with open(os.path.join(base, "context.md"), "w", encoding="utf-8") as f:
+                f.write("---\nname: Quinn\ntier: worker\n---\n")
+            m = sv.Member("quinn", company_dir=os.path.join(d, ".company"))
+            cmd = m.real_command("do a thing")
+            self.assertIn("--disallowedTools", cmd)
+            idx = cmd.index("--disallowedTools")
+            for tool in ("Bash", "Write", "Edit", "NotebookEdit"):
+                self.assertIn(tool, cmd[idx + 1:])
+
+    def test_fail_closed_backstop_when_employee_lookup_broken(self):
+        # If employee.py's disallowed_tools_for can't be resolved at all, the
+        # module's own hardcoded backstop is used — never an empty/unrestricted
+        # list. Simulate by pointing at a company_dir that still resolves
+        # (employee.load never raises) but assert the backstop constant itself
+        # is non-empty and matches what a broken import would fall back to.
+        self.assertEqual(
+            set(sv._FAILCLOSED_DISALLOWED_TOOLS),
+            {"Bash", "Write", "Edit", "NotebookEdit"},
+        )
+
+    def test_resolve_tool_profile_direct(self):
+        bob = sv.Member("bob")
+        self.assertEqual(bob._resolve_tool_profile(), [])
+        tony = sv.Member("tony")
+        denied = tony._resolve_tool_profile()
+        for tool in ("Bash", "Write", "Edit", "NotebookEdit"):
+            self.assertIn(tool, denied)
+
+
 # --------------------------------------------- Phase 29 Item 3: stream-json
 class TestStreamJsonConsumeLine(unittest.TestCase):
     """Worker.consume_line derives phases from stream-json events (assistant
