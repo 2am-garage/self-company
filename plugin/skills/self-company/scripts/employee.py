@@ -262,6 +262,113 @@ STEP_OWNER = {
 }
 
 
+# ================================================================ Phase 34: duty -> tool profile
+# Gibby proved (3 rounds) that a worker holding unrestricted Bash + a shared
+# uid/process-tree/filesystem can reach any channel (file overwrite,
+# /proc/<pid>/fd write, echo-through-own-output) regardless of what its
+# Write/Edit scope was SUPPOSED to be. The one class this closes structurally:
+# code-mutation work routed to a non-builder must be physically unable to
+# mutate source. This table is that gate — Layer B, code-locked NEXT TO
+# ALLOWED_DUTIES (not config; a hired desk or a schedule.yaml tweak can
+# enable/disable a duty but can never widen the tool profile attached to it).
+#
+# THE SINGLE SECURITY INVARIANT: only `build` (bob) and `infra` (tom) may
+# mutate source; every other dispatched worker gets NO mutation tools at all.
+#
+# MECHANISM (empirical spike, 2026-07-14, against real headless `claude -p`
+# — see the Phase 34 dispatch note for the full transcript). Two things that
+# looked plausible on paper turned out NOT to hold up headless, so neither is
+# used here:
+#   - `--allowedTools <Tool>` alone is NOT a restriction. Spiked with ONLY
+#     `--allowedTools Read Grep Glob`: the `system/init` stream-json event
+#     still listed Bash/Write/Edit/NotebookEdit as fully present, callable
+#     tools. `--allowedTools` is an additive pre-approval grant, not an
+#     allow-list ceiling.
+#   - `--allowedTools "Write(<path>/**)"` / `"Edit(<path>/**)"` PATH-SCOPING is
+#     unreliable and can run BACKWARDS: spiked writing one file inside the
+#     intended scratch pattern (denied — no interactive approval headless)
+#     and one file OUTSIDE the pattern but inside the project's trusted cwd
+#     (silently SUCCEEDED, landing a canary file inside plugin/skills/...).
+#     Never rely on path-scoping for a security boundary headless.
+#   - `--allowedTools "Bash(<prefix> *)"` COMMAND-pattern scoping does not stop
+#     shell metacharacter chaining: `Bash(python3 -m unittest *)` still let a
+#     compound `python3 -m unittest --help > /dev/null && echo ... > <repo
+#     file>` through with NO permission denial — the trailing `&&` clause rode
+#     along. Bash is therefore treated as BINARY: a duty gets full Bash
+#     (build/infra) or none at all — never "scoped" Bash. This is why `gibby`
+#     (attack/QA) does NOT get Bash here even though the original Phase 34
+#     draft proposed it for running tests/repros — a deliberate deviation,
+#     forced by this finding (see the dispatch note).
+#
+# What DOES work, structurally: a BARE `--disallowedTools <ToolName>` (no
+# path/command pattern) removes the tool from the model's function-calling
+# schema entirely — confirmed via the `system/init` stream-json event: the
+# named tool is simply ABSENT from the `tools` array, so the model has no
+# protocol-level way to even attempt the call. That is the one lever this
+# table uses. Read/Grep/Glob/WebSearch/WebFetch/etc. are left untouched by
+# this table — WHICH files end up in a worker's prompt is the separate,
+# existing reads:/context.md slice (execution-model.md §2); this table only
+# removes the ABILITY to write once dispatched.
+_MUTATING_TOOLS = ("Bash", "Write", "Edit", "NotebookEdit")
+
+# Profile name -> the concrete `--disallowedTools` argv tokens for that
+# profile. An empty tuple means "append no flag at all" (byte-identical to
+# pre-Phase-34 dispatch) — reserved for the two roles the spec calls out as
+# deliberately privileged.
+TOOL_PROFILES = {
+    "build":      (),                 # bob   — full tools; the gate verifies it
+    "infra":      (),                 # tom   — deliberately privileged, like build
+    "restricted": _MUTATING_TOOLS,    # everyone else dispatched: no mutation, ever
+}
+
+# Every CORE employee's profile NAME. Layer B, code-locked here (not config):
+# ties 1:1 to each employee's fixed duty set above, so this is equivalent to
+# "profile by duty class" for the core eight without a second duty->profile
+# indirection. Only bob and tom mutate; every other core employee — INCLUDING
+# gibby, whose `attack` duty might look Bash-shaped — is `restricted` (see the
+# Bash-chaining finding above).
+CORE_TOOL_PROFILES = {
+    "bob":    "build",
+    "tom":    "infra",
+    "gibby":  "restricted",
+    "tony":   "restricted",
+    "mike":   "restricted",
+    "elon":   "restricted",
+    "phoebe": "restricted",
+    "july":   "restricted",
+}
+
+# Fail-closed default for any name NOT in CORE_TOOL_PROFILES — a hired desk, a
+# typo, an empty/garbage/None value. Always the MOST restrictive profile,
+# NEVER "build"/"infra" and NEVER unrestricted. Correct for hire-as-data by
+# construction: R7 already forbids a hired desk from holding a build/attack
+# duty (schedule_validator.py), so a hired name can never legitimately need
+# more than this anyway; this table doesn't have to re-derive that — it just
+# never grants build/infra to anyone but the two hardcoded names above.
+_DEFAULT_TOOL_PROFILE = "restricted"
+
+
+def tool_profile_for(name):
+    """The Layer-B tool-restriction profile NAME for employee `name` (Phase 34
+    Item 1) — pure lookup, never raises. Fail-closed: any `name` not in
+    `CORE_TOOL_PROFILES` (hired desk / malformed / absent) resolves to
+    `_DEFAULT_TOOL_PROFILE` ("restricted"), never to "build"/"infra" and never
+    to an unrestricted profile. Deliberately does NOT read the employee's
+    context.md/frontmatter at all — a name-only lookup so a compromised or
+    malformed desk file can never influence its own tool ceiling."""
+    key = str(name or "").strip().lower()
+    return CORE_TOOL_PROFILES.get(key, _DEFAULT_TOOL_PROFILE)
+
+
+def disallowed_tools_for(name):
+    """The concrete `--disallowedTools` argv tokens for employee `name` — the
+    ONE function `supervisor.py`'s `real_command` (Item 2) calls to build a
+    dispatched worker's argv. Empty tuple for build/infra (no flag appended,
+    unrestricted); `_MUTATING_TOOLS` for every other resolvable OR
+    unresolvable name (fail-closed). Always returns a tuple, never raises."""
+    return TOOL_PROFILES.get(tool_profile_for(name), _MUTATING_TOOLS)
+
+
 # ============================================================ Phase 32 discovery
 # hire-as-data (Item 1): a company's real roster is CORE_EMPLOYEES plus every
 # HIRED desk under org/employees/<id>/ that looks like a real desk. The id
