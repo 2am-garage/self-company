@@ -68,10 +68,12 @@ def _build_real_index(company):
 
 
 def _write_mem(company, tier_dir, name, *, body, tier="L2",
-               reinforce_count=1, status="active", category="preferences"):
+               reinforce_count=1, status="active", category="preferences",
+               core=None):
     d = os.path.join(company, "memory", tier_dir, category)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, name + ".md")
+    core_line = f"core: {core}\n" if core is not None else ""
     with open(path, "w", encoding="utf-8") as f:
         f.write(
             "---\n"
@@ -80,6 +82,7 @@ def _write_mem(company, tier_dir, name, *, body, tier="L2",
             f"category: {category}\n"
             f"reinforce_count: {reinforce_count}\n"
             f"status: {status}\n"
+            f"{core_line}"
             "---\n"
             f"{body}\n")
     return path
@@ -1117,6 +1120,299 @@ class TestRerankerClosesGymCase(unittest.TestCase):
         out = self._run_hook("can the company merge its own pull requests")
         self.assertNotEqual(out, "", "on-topic merge must still inject under the reranker")
         self.assertIn("merge", out)
+
+
+def _write_policy(company, rows):
+    """Write a scratch `org/policy.md` under `company` with one bold-value table
+    row per (name, value) pair — the exact shape `policy_config.py` parses:
+    "| `NAME` | **VALUE** | ... | tunable |"."""
+    d = os.path.join(company, "org")
+    os.makedirs(d, exist_ok=True)
+    lines = ["| Constant | Default | Meaning | tunable |", "|---|---|---|---|"]
+    for name, value in rows:
+        lines.append(f"| `{name}` | **{value}** | test override | tunable |")
+    with open(os.path.join(d, "policy.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+class TestCoreIdentityBlockSelection(unittest.TestCase):
+    """Mike 2026-07-16 Finding 2, deps-free unit tests (no subprocess): the
+    explicit opt-in selection signal, the deterministic ordering, and the
+    hard count/char caps for the always-on core identity block. Mirrors the
+    direct-function-call style already used by TestFreshnessTieBreak /
+    TestLoneTokenKeywordGate for hmi.rank()."""
+
+    @staticmethod
+    def _c(id_, body, tier="L2", rc=1, core=None):
+        fm = {"id": id_, "reinforce_count": rc}
+        if core is not None:
+            fm["core"] = core
+        return (tier, fm, body, f"/mem/{id_}.md")
+
+    # --- explicit opt-in flag is the PRIMARY signal ---------------------
+    def test_core_flag_selected_over_unflagged_high_rc(self):
+        flagged = self._c("chairman-name", "The Chairman is Uwe.", rc=1, core="true")
+        unflagged_high_rc = self._c("other-stable", "Some other stable fact.", rc=9)
+        out = hmi.select_core_facts([flagged, unflagged_high_rc], max_count=5)
+        # Flagged memories present -> ONLY the flagged pool is used, regardless
+        # of a higher reinforce_count on an unflagged memory.
+        self.assertEqual([c[3] for c in out], [flagged[3]])
+
+    def test_core_flag_variants_are_truthy(self):
+        for val in ("true", "True", "yes", "1", "on"):
+            c = self._c("x", "body", core=val)
+            self.assertEqual(hmi.select_core_facts([c], 5), [c], f"core: {val!r}")
+        for val in ("false", "no", "0", "off", ""):
+            c = self._c("x", "body", core=val, rc=1)  # rc below fallback floor too
+            self.assertEqual(hmi.select_core_facts([c], 5), [],
+                             f"core: {val!r} must not opt in")
+
+    # --- fallback: no flag anywhere -> highest-reinforce_count L2 ONLY at/above
+    #     the stable-trait bar (CORE_FALLBACK_MIN_RC) ----------------------
+    def test_fallback_requires_min_reinforce_count(self):
+        low = self._c("low", "Low-signal fact.", rc=hmi.CORE_FALLBACK_MIN_RC - 1)
+        high = self._c("high", "Stable well-reinforced fact.",
+                       rc=hmi.CORE_FALLBACK_MIN_RC)
+        out = hmi.select_core_facts([low, high], max_count=5)
+        self.assertEqual([c[3] for c in out], [high[3]],
+                         "only the memory at/above the stable-trait bar qualifies")
+
+    def test_no_flag_and_all_below_floor_selects_nothing(self):
+        cands = [self._c(f"m{i}", f"note {i}", rc=1) for i in range(5)]
+        self.assertEqual(hmi.select_core_facts(cands, max_count=5), [])
+
+    # --- L1 is never eligible for the core block (L2-only, per spec) -----
+    def test_l1_never_selected_even_if_flagged(self):
+        l1_flagged = self._c("l1x", "L1 fact.", tier="L1", rc=9, core="true")
+        out = hmi.select_core_facts([l1_flagged], max_count=5)
+        self.assertEqual(out, [], "L1 memories are out of scope for the core block")
+
+    # --- deterministic ordering: reinforce_count desc, then id asc -------
+    def test_ordering_is_reinforce_count_desc_then_id(self):
+        a = self._c("bbb", "b fact", rc=5, core="true")
+        b = self._c("aaa", "a fact", rc=9, core="true")
+        c = self._c("ccc", "c fact", rc=5, core="true")
+        out = hmi.select_core_facts([a, b, c], max_count=5)
+        self.assertEqual([o[3] for o in out], [b[3], a[3], c[3]])
+
+    # --- hard cap by COUNT -------------------------------------------------
+    def test_count_cap_enforced(self):
+        cands = [self._c(f"m{i}", f"fact {i}", rc=5, core="true") for i in range(9)]
+        out = hmi.select_core_facts(cands, max_count=3)
+        self.assertEqual(len(out), 3)
+
+    def test_zero_max_count_selects_nothing(self):
+        cands = [self._c("m", "fact", rc=5, core="true")]
+        self.assertEqual(hmi.select_core_facts(cands, max_count=0), [])
+
+    # --- hard cap by CHARS ---------------------------------------------
+    def test_char_cap_enforced_on_rendered_block(self):
+        long_body = ("identity fact " * 50).strip()   # well over the per-mem cap
+        cands = [self._c(f"m{i}", long_body, rc=5, core="true") for i in range(5)]
+        selected = hmi.select_core_facts(cands, max_count=5)
+        # Budget room for the header + exactly ONE (truncated) fact line, not two.
+        ctx = hmi.build_core_context(selected, char_cap=300)
+        self.assertLessEqual(len(ctx), 300)
+        self.assertIn(hmi.CORE_HEADER, ctx)
+        self.assertEqual(ctx.count("\n- "), 1,
+                         "the char cap must stop a second fact line from fitting")
+        # A much larger budget lets every selected fact through.
+        ctx_big = hmi.build_core_context(selected, char_cap=5000)
+        self.assertEqual(ctx_big.count("\n- "), len(selected))
+
+    def test_char_cap_zero_yields_nothing(self):
+        cands = [self._c("m", "fact", rc=5, core="true")]
+        selected = hmi.select_core_facts(cands, max_count=5)
+        self.assertEqual(hmi.build_core_context(selected, char_cap=0), "")
+
+    # --- empty-core degrades cleanly ---------------------------------------
+    def test_no_facts_selected_renders_empty_string(self):
+        self.assertEqual(hmi.build_core_context([], char_cap=500), "")
+
+
+class TestCoreIdentityBlockEndToEnd(unittest.TestCase):
+    """End-to-end (real hook subprocess): the core block is injected ALONGSIDE
+    the relevance-gated block, clearly separated, and never through it. The
+    critical regression lock: the Phase-24 relevance-gated path's "off-topic
+    injects nothing" guarantee must hold byte-for-byte even when a core block
+    IS present in the same output."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_no_rag(self):
+        env = {**os.environ, "SC_NO_RAG": "1"}
+        proc = subprocess.run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", self.transcript],
+            capture_output=True, text=True, input="", env=env)
+        # Return the DECODED additionalContext (real newlines) — the hook emits
+        # JSON where injected newlines are escaped as \\n, so multi-line
+        # assertions must match the decoded text, not the raw JSON string.
+        # Silence (nothing injected) -> "".
+        raw = proc.stdout.strip()
+        ctx = json.loads(raw)["hookSpecificOutput"]["additionalContext"] if raw else ""
+        return proc.returncode, ctx
+
+    def test_core_fact_injected_on_off_topic_prompt(self):
+        # The core block is UNGATED: it must appear even when the prompt has
+        # nothing to do with it and the relevance-gated section stays silent.
+        _write_mem(self.company, "L2-cold", "chairman-identity",
+                   body="The Chairman's name is Uwe.", core="true")
+        _write_transcript(self.transcript, ["What's a good recipe for risotto?"])
+        rc, out = self._run_no_rag()
+        self.assertEqual(rc, 0)
+        self.assertIn(hmi.CORE_HEADER, out)
+        self.assertIn("Uwe", out)
+        self.assertNotIn("Relevant Chairman memory", out,
+                         "off-topic prompt must not pull in the relevance-gated block")
+
+    def test_core_and_relevance_block_both_present_clearly_separated(self):
+        _write_mem(self.company, "L2-cold", "chairman-identity",
+                   body="The Chairman's name is Uwe.", core="true")
+        _write_mem(self.company, "L2-cold", "editor-preference",
+                   body="The Chairman prefers the Neovim editor with a dark theme.")
+        _write_transcript(self.transcript, ["set up my neovim colorscheme"])
+        rc, out = self._run_no_rag()
+        self.assertEqual(rc, 0)
+        self.assertIn(hmi.CORE_HEADER, out)
+        self.assertIn("Uwe", out)
+        self.assertIn("Relevant Chairman memory (advisory, not orders):", out)
+        self.assertIn("Neovim", out)
+        # Clearly separated: the core section ends before the relevance header
+        # starts, joined by a blank line, never interleaved into one block.
+        self.assertIn(hmi.CORE_HEADER + "\n- The Chairman's name is Uwe.\n\n"
+                      "Relevant Chairman memory", out)
+
+    def test_relevance_gate_byte_identical_regression_off_topic(self):
+        # LOCK: re-run the existing realistic-corpus off-topic keyword-path
+        # regression (Phase 24 MUST-FIX 1(b)) with the core feature live. No
+        # memory in this corpus is core-flagged and all sit at reinforce_count
+        # 2 (below CORE_FALLBACK_MIN_RC), so the core block must ALSO stay
+        # silent -- the overall output must be BYTE-IDENTICAL ("") to the
+        # pre-feature behavior, not just the relevance-gated section alone.
+        _write_corpus(self.company, _REALISTIC_CORPUS)
+        for prompt in _OFFTOPIC_EN:
+            _write_transcript(self.transcript, [prompt])
+            rc, out = self._run_no_rag()
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, "",
+                             f"off-topic English must inject NOTHING AT ALL "
+                             f"(core block included); leaked on: {prompt!r} -> {out[:160]}")
+
+    def test_relevance_gate_still_silent_when_core_block_fires(self):
+        # A stronger version of the same lock: even when the core block DOES
+        # fire (a flagged fact present), the relevance-gated section must stay
+        # exactly as silent on an off-topic prompt as it was pre-feature.
+        _write_corpus(self.company, _REALISTIC_CORPUS)
+        _write_mem(self.company, "L2-cold", "chairman-identity",
+                   body="The Chairman's name is Uwe.", core="true")
+        _write_transcript(self.transcript, ["How do I get a red wine stain out?"])
+        rc, out = self._run_no_rag()
+        self.assertEqual(rc, 0)
+        self.assertIn(hmi.CORE_HEADER, out, "core block should still fire")
+        self.assertNotIn("Relevant Chairman memory", out,
+                         "relevance-gated section must stay silent on an off-topic prompt")
+        # And on-topic still injects through the (untouched) relevance path.
+        _write_transcript(self.transcript, ["can the company merge its own PRs"])
+        rc2, out2 = self._run_no_rag()
+        self.assertEqual(rc2, 0)
+        self.assertIn("Relevant Chairman memory (advisory, not orders):", out2)
+        self.assertIn("merge", out2)
+
+    def test_empty_core_degrades_cleanly_leaves_relevance_output_unchanged(self):
+        # No core-eligible memory at all (no flag, rc below the fallback
+        # floor) -> the whole output is exactly what build_context() alone
+        # would have produced -- no CORE_HEADER anywhere.
+        _write_mem(self.company, "L2-cold", "editor-preference",
+                   body="The Chairman prefers the Neovim editor with a dark theme.")
+        _write_transcript(self.transcript, ["set up my neovim colorscheme"])
+        rc, out = self._run_no_rag()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(hmi.CORE_HEADER, out)
+        self.assertTrue(out.startswith("Relevant Chairman memory (advisory, not orders):"))
+
+    def test_count_and_char_cap_hold_end_to_end(self):
+        for i in range(9):
+            _write_mem(self.company, "L2-cold", f"core{i}",
+                       body=("identity fact number " + str(i) + " " * 5) * 10,
+                       core="true")
+        _write_transcript(self.transcript, ["totally unrelated off-topic prompt"])
+        rc, out = self._run_no_rag()
+        self.assertEqual(rc, 0)
+        self.assertIn(hmi.CORE_HEADER, out)
+        core_section = out.split("\n\n", 1)[0]
+        self.assertLessEqual(len(core_section), hmi.DEFAULT_CORE_CHAR_CAP)
+        # at most cap 5 fact lines + 1 header line
+        self.assertLessEqual(len(core_section.split("\n")), hmi.DEFAULT_CORE_MAX_COUNT + 1)
+
+
+class TestCoreIdentityBlockPolicyConfig(unittest.TestCase):
+    """Mike 2026-07-16 Finding 2: ENABLE/MAX_COUNT/CHAR_CAP are tunable via
+    org/policy.md through the shared policy_config resolver (decay.py's own
+    convention), with an env-var override on top. Direct calls to the private
+    `_core_config()` resolver -- deps-free, no subprocess needed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_defaults_with_no_policy_file(self):
+        enable, max_count, char_cap = hmi._core_config(self.company)
+        self.assertEqual(enable, hmi.DEFAULT_CORE_ENABLE)
+        self.assertEqual(max_count, hmi.DEFAULT_CORE_MAX_COUNT)
+        self.assertEqual(char_cap, hmi.DEFAULT_CORE_CHAR_CAP)
+
+    def test_policy_md_overrides_max_count_and_char_cap(self):
+        _write_policy(self.company, [("CORE_MEMORY_MAX_COUNT", 2),
+                                     ("CORE_MEMORY_CHAR_CAP", 123)])
+        enable, max_count, char_cap = hmi._core_config(self.company)
+        self.assertTrue(enable)
+        self.assertEqual(max_count, 2)
+        self.assertEqual(char_cap, 123)
+
+    def test_policy_md_disables_core_block(self):
+        _write_policy(self.company, [("CORE_MEMORY_ENABLE", 0)])
+        enable, _max_count, _char_cap = hmi._core_config(self.company)
+        self.assertFalse(enable)
+
+    def test_env_override_wins_over_policy_md(self):
+        _write_policy(self.company, [("CORE_MEMORY_MAX_COUNT", 2)])
+        os.environ["SELF_COMPANY_INJECT_CORE_MAX_COUNT"] = "9"
+        try:
+            _enable, max_count, _char_cap = hmi._core_config(self.company)
+        finally:
+            os.environ.pop("SELF_COMPANY_INJECT_CORE_MAX_COUNT", None)
+        self.assertEqual(max_count, 9)
+
+    def test_disable_via_policy_end_to_end_suppresses_core_block(self):
+        _write_policy(self.company, [("CORE_MEMORY_ENABLE", 0)])
+        _write_mem(self.company, "L2-cold", "chairman-identity",
+                   body="The Chairman's name is Uwe.", core="true")
+        transcript = os.path.join(self.dir, "t.jsonl")
+        _write_transcript(transcript, ["unrelated off-topic prompt about wine stains"])
+        env = {**os.environ, "SC_NO_RAG": "1"}
+        proc = subprocess.run(
+            [__import__("sys").executable,
+             os.path.join(_helpers.SCRIPTS_DIR, "hook_memory_inject.py"),
+             "--company", self.company, "--transcript", transcript],
+            capture_output=True, text=True, input="", env=env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.strip(), "",
+                         "CORE_MEMORY_ENABLE=0 via policy.md must fully suppress the block")
 
 
 if __name__ == "__main__":
