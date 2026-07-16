@@ -477,6 +477,7 @@ DEFAULT_RETAIN_DAYS = 90
 
 _AGENT_LOG_RE = re.compile(r"^agent-(\d{4}-\d{2}-\d{2})\.log$")
 _DAILY_FILE_RE = re.compile(r"^daily-(\d{4}-\d{2}-\d{2})\.(md|jsonl)$")
+_MEMORY_AUDIT_RE = re.compile(r"^memory-audit-(\d{4}-\d{2}-\d{2})\.jsonl$")
 _AGENT_RUNS_RE = re.compile(r"^\.agent_runs_(\d{4}-\d{2}-\d{2})$")
 
 
@@ -523,7 +524,7 @@ def prune(company, retain_days=DEFAULT_RETAIN_DAYS, today=None, window_days=DEFA
             except OSError:
                 pass
             continue
-        m = _AGENT_LOG_RE.match(name) or _DAILY_FILE_RE.match(name)
+        m = _AGENT_LOG_RE.match(name) or _DAILY_FILE_RE.match(name) or _MEMORY_AUDIT_RE.match(name)
         if not m:
             continue
         try:

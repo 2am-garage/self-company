@@ -74,6 +74,12 @@ import corpus
 # also flag.
 from entropy import group_by_sources, compute_sources_overlap_candidates
 
+# Audit log writer (Phase 35): one os.write per event, best-effort.
+try:
+    import memory_audit
+except ImportError:
+    memory_audit = None
+
 try:
     import rag_embed
     import numpy as np
@@ -189,14 +195,15 @@ def _session_ids(items):
     return out
 
 
-def apply_reinforcement(canon_mem, absorbed_mem, today):
+def apply_reinforcement(canon_mem, absorbed_mem, today, company_dir=".company"):
     """Merge absorbed's sources into canonical, update last_reinforced, and
     TOMBSTONE the absorbed file (status: absorbed + invalid_at) — no longer a
     hard delete (Item 2 / BOB-F2). Phase 5 Item 1 (N1): rc bumps at most once
     per DISTINCT session id — the merge increments reinforce_count only when the
     absorbed memory contributes at least one session id the canonical didn't
     already have (same-session near-duplicates consolidate without inflating the
-    cross-session recurrence signal the promotion gates trust)."""
+    cross-session recurrence signal the promotion gates trust).
+    `company_dir` is the path to .company/ for audit logging."""
     lines = canon_mem["text"].split("\n")
     fm, close = parse_frontmatter(canon_mem["text"])
     absorbed_fm, _ = parse_frontmatter(absorbed_mem["text"])
@@ -240,10 +247,13 @@ def apply_reinforcement(canon_mem, absorbed_mem, today):
     if inserts:
         lines[close:close] = inserts   # insert before the closing fence
     _atomic_write(canon_mem["path"], "\n".join(lines), encoding="utf-8")
-    _tombstone_absorbed(absorbed_mem, today)
+    if memory_audit and adds_new_session:
+        memory_audit.audit_event(company_dir, "reinforce", canon_mem["id"],
+                                "reinforce_count", str(rc - 1), str(rc), "reinforce_memory")
+    _tombstone_absorbed(absorbed_mem, today, company_dir)
 
 
-def _tombstone_absorbed(absorbed_mem, today):
+def _tombstone_absorbed(absorbed_mem, today, company_dir=".company"):
     """Item 2 (BOB-F2): a merged-away duplicate is TOMBSTONED, not hard-deleted.
 
     Rewrite the absorbed L0's frontmatter to `status: absorbed` +
@@ -254,7 +264,8 @@ def _tombstone_absorbed(absorbed_mem, today):
     documented recovery window (a false-positive dedup on paraphrased-but-distinct
     facts is recoverable until the reap) and the previously-dead `absorbed` reap
     branch. Only ever called on an L0 (plan_reinforcements guarantees absorbed is
-    L0), so no L1/L2 file is ever tombstoned."""
+    L0), so no L1/L2 file is ever tombstoned.
+    `company_dir` is the path to .company/ for audit logging."""
     text = absorbed_mem.get("text")
     if text is None:
         text = Path(absorbed_mem["path"]).read_text(encoding="utf-8")
@@ -291,6 +302,10 @@ def _tombstone_absorbed(absorbed_mem, today):
     if inserts:
         lines[close:close] = inserts   # insert before the closing fence
     _atomic_write(absorbed_mem["path"], "\n".join(lines), encoding="utf-8")
+    if memory_audit:
+        old_status = (_fm or {}).get("status")
+        memory_audit.audit_event(company_dir, "absorb", absorbed_mem["id"],
+                                "status", old_status, "absorbed", "reinforce_memory")
 
 
 def nearest_pairs(mems, threshold):
@@ -335,9 +350,10 @@ def main(argv=None):
     reinforcements, skipped_l2, sources_overlap_candidates = plan_reinforcements(
         by_id, pairs, args.threshold, memories_list=mems)
 
+    company_dir = str(Path(args.memory_dir).parent) if Path(args.memory_dir).name == "memory" else ".company"
     if args.apply:
         for r in reinforcements:
-            apply_reinforcement(by_id[r["canonical"]], by_id[r["absorbed"]], today)
+            apply_reinforcement(by_id[r["canonical"]], by_id[r["absorbed"]], today, company_dir)
 
     print(json.dumps({
         "applied": args.apply, "threshold": args.threshold,
