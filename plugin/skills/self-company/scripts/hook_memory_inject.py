@@ -381,6 +381,10 @@ def rank(prompt, candidates):
     not to a false "recency == relevant" positive. Non-Latin-script relevance
     is the semantic/RAG path's job (tried first in run(), before this
     fallback); this is only the safety net when RAG is absent/degraded.
+
+    Freshness tie-break (decay_score, 0..1): when candidates have identical
+    keyword scores, the memory with the higher decay_score (fresher per the
+    decay model) ranks first. Missing decay_score degrades to the recency key.
     """
     if not prompt or not prompt.strip():
         # Recency fallback: newest durable memories, weighted by tier.
@@ -430,11 +434,17 @@ def rank(prompt, candidates):
         weight = TIER_WEIGHT.get(tier, 0.5)
         rc = _int(fm.get("reinforce_count"), 1)
         score = overlap * weight * max(rc, 1)
-        scored.append((score, overlap, _recency_key(fm), tier, fm, body, path))
-    # Highest score first; ties broken by overlap then recency (deterministic).
-    scored.sort(key=lambda s: (s[0], s[1], s[2]), reverse=True)
+        decay = fm.get("decay_score")
+        try:
+            decay_score = float(decay) if decay is not None else 0.0
+        except (TypeError, ValueError):
+            decay_score = 0.0
+        scored.append((score, overlap, _recency_key(fm), decay_score, tier, fm, body, path))
+    # Highest score first; ties broken by overlap then freshness (decay_score)
+    # then recency (deterministic).
+    scored.sort(key=lambda s: (s[0], s[1], s[3], s[2]), reverse=True)
     return [(t, fm, body, path)
-            for (_s, _o, _r, t, fm, body, path) in scored[:min(TOP_K, TOP_K_CAP)]]
+            for (_s, _o, _r, _d, t, fm, body, path) in scored[:min(TOP_K, TOP_K_CAP)]]
 
 
 def _debug(reason):

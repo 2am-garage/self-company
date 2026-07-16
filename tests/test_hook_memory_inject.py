@@ -621,6 +621,57 @@ class TestKeywordFallbackDistinguishesEmptyFromUnparseable(unittest.TestCase):
         self.assertEqual(out, [], "a real (non-Latin) prompt must never take the recency fallback")
 
 
+class TestFreshnessTieBreak(unittest.TestCase):
+    """Freshness tie-break (decay_score): when candidates have identical keyword
+    scores, rank by decay_score (higher = fresher). Degrade cleanly when missing."""
+
+    @staticmethod
+    def _c(id_, body, category="", rc=1, decay_score=None):
+        fm = {"id": id_, "reinforce_count": rc, "category": category,
+              "last_reinforced": "2026-01-01"}
+        if decay_score is not None:
+            fm["decay_score"] = decay_score
+        return ("L2", fm, body, f"/mem/{id_}.md")
+
+    def test_decay_score_tie_break_higher_first(self):
+        # Two memories with identical overlap/tier/rc -> decay_score tie-breaks,
+        # higher (fresher) ranks first.
+        a = self._c("a", "neovim editor setup tips", rc=1, decay_score=0.95)
+        b = self._c("b", "neovim editor configuration guide", rc=1, decay_score=0.60)
+        out = hmi.rank("neovim editor help", [a, b])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0][2], "neovim editor setup tips", "higher decay_score ranks first")
+        self.assertEqual(out[1][2], "neovim editor configuration guide")
+
+    def test_decay_score_missing_degrades_to_recency(self):
+        # One memory has decay_score, one doesn't; both have same overlap/tier.
+        # Missing decay_score degrades to recency key.
+        a = self._c("a", "neovim editor tips", rc=1)  # no decay_score
+        b = self._c("b", "neovim editor guide", rc=1, decay_score=0.50)
+        b = ("L2", {**b[1], "last_reinforced": "2026-01-02"}, b[2], b[3])  # newer
+        out = hmi.rank("neovim editor", [a, b])
+        self.assertEqual(len(out), 2)
+        # b has recency advantage (2026-01-02 > 2026-01-01)
+        self.assertEqual(out[0][2], "neovim editor guide")
+
+    def test_decay_score_zero_ranks_below_missing(self):
+        # decay_score=0 (old) ranks below missing/empty (treated as 0.0), then
+        # falls back to recency for final ordering.
+        a = self._c("a", "neovim editor tips", rc=1, decay_score=0.0)
+        b = self._c("b", "neovim editor guide", rc=1)  # no decay_score (0.0)
+        # Same recency, so order is stable (both fall through to recency tie)
+        out = hmi.rank("neovim editor", [a, b])
+        self.assertEqual(len(out), 2)
+
+    def test_decay_score_only_after_relevance_gates(self):
+        # A memory with high decay_score but no overlap -> gated out, never ranks.
+        high_decay = self._c("stale", "kubernetes deployment", rc=1, decay_score=0.99)
+        on_topic = self._c("on", "neovim editor setup", rc=1, decay_score=0.50)
+        out = hmi.rank("neovim editor help", [high_decay, on_topic])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][2], "neovim editor setup", "high decay_score does not bypass overlap gate")
+
+
 class TestLoneTokenKeywordGate(unittest.TestCase):
     """Phase 24 R3 MUST-FIX 1 (deps-free): the three-part lone-token gate that
     stops a single incidental word from injecting on the no-venv keyword path.
@@ -917,6 +968,55 @@ class TestOffTopicEnglishKeywordPath(unittest.TestCase):
             self.assertNotEqual(out, "",
                                 f"on-topic English must still inject on the keyword "
                                 f"path; went silent on: {prompt!r}")
+
+
+class TestByteIdenticalOffTopicRegressionWithDecay(unittest.TestCase):
+    """Byte-identical regression: off-topic prompts that inject nothing WITHOUT
+    decay_score still inject nothing WITH decay_score present on every memory.
+    Decay is a tie-break AFTER relevance gates; it must never weaken them."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.company = os.path.join(self.dir, ".company")
+        os.makedirs(self.company)
+        self.transcript = os.path.join(self.dir, "t.jsonl")
+        # A small corpus (same as the realistic one, with decay_score added).
+        for name, body in [
+            ("git-identity", "Keep the existing git identity; never add attribution."),
+            ("database-backups", "Maintains postgres databases with automated backups at 2am."),
+            ("merge-gate", "The company may merge its own PR when tests pass."),
+        ]:
+            _write_mem(self.company, "L2-cold", name, body=body, reinforce_count=1)
+            # Inject decay_score into the frontmatter.
+            path = os.path.join(self.company, "memory", "L2-cold", "preferences", name + ".md")
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # Insert decay_score after tier line.
+            lines = content.split("\n")
+            insert_idx = next((i for i, l in enumerate(lines) if l.startswith("tier:")), 1) + 1
+            lines.insert(insert_idx, "decay_score: 0.75")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_offtopic_still_silent_with_decay_score(self):
+        # "How do I cook pasta?" must still inject nothing, regardless of
+        # decay_score on memories. Decay only tie-breaks among gated-in matches.
+        _write_transcript(self.transcript, ["What's a good recipe for mushroom risotto?"])
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "", "off-topic must inject nothing even with decay_score present")
+
+    def test_ontopic_still_injects_with_decay_score(self):
+        # On-topic prompts still inject, with or without decay_score.
+        _write_transcript(self.transcript, ["can the company merge its own PRs"])
+        rc, parsed, raw = _run(company=self.company, transcript=self.transcript)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(parsed, "on-topic must still inject with decay_score present")
+        self.assertIn("merge", parsed["hookSpecificOutput"]["additionalContext"])
 
 
 @unittest.skipUnless(HAS_VENV, "RAG venv/deps unavailable")
