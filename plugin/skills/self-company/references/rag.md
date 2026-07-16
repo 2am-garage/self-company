@@ -10,6 +10,22 @@
 
 ---
 
+## Contents
+
+1. What RAG Is Here
+2. When RAG Activates
+3. One-Time Setup
+4. Index Refresh (Phase 13 A.1 — automatic)
+5. The Index Data Model
+6. Querying (ad-hoc CLI + live ask-time injection)
+7. Privacy & Security, and Hybrid Retrieval (Phase 24 Item 4)
+8. Graceful Degradation
+9. Troubleshooting
+10. RAG Lifecycle
+11. Integration with Company Workflow
+12. References
+13. Model Swaps, Stamping & Rollback (Phase 24 Item 1)
+
 ## 1. What RAG Is Here
 
 The memory substrate is **markdown truth** in `.company/memory/L1-warm/` and `.company/memory/L2-cold/` — readable, auditable, durable. RAG is a **vector index** on top, built from that markdown.

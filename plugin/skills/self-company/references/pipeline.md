@@ -8,6 +8,18 @@
 
 ---
 
+## Contents
+
+- Stage [1] CAPTURE — Lightweight observation capture
+- Observation Content
+- Stage [2] ORGANIZE — Decide placement, judge promotion
+- Stage [3] WRITE — Write to markdown
+- Stage [4] VERIFY — Track provenance loop (loop until clean)
+- Overall flow diagram
+- Division of labor: LLM judgment vs Python calculation
+- Appendix: Frontmatter quick reference
+- Terminology quick reference
+
 ## Stage [1] CAPTURE — Lightweight observation capture
 
 **Owner**: cross-departmental all staff (lightweight observation)  

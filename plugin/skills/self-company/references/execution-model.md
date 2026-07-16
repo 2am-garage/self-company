@@ -11,6 +11,17 @@ talk* to them; this says *how a worker is actually run*.
 
 ---
 
+## Contents
+
+1. Two Tiers
+2. What an Execution Worker Sub-Agent Sees
+3. Parallel vs Serial Dispatch (Phoebe decides)
+4. Implementation Mapping (Claude Code runtime)
+5. Boundaries Unchanged
+6. Tools: MCP servers and skills (least privilege)
+7. Per-employee memory: mode (rag/flat), recall at dispatch, capture at close (Phase 18 / 18b)
+8. Headless dispatch: model routing, live phases, and the shared prompt builder (Phase 29)
+
 ## 1. Two Tiers
 
 | Tier | Members | Context | Runs as |
