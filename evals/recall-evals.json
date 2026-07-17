@@ -1,0 +1,63 @@
+[
+  {
+    "query": "what language should I reply to the chairman in",
+    "expected_ids": [
+      "chairman-reply-language-chinese"
+    ]
+  },
+  {
+    "query": "how often should databases be backed up",
+    "expected_ids": [
+      "database-backups"
+    ]
+  },
+  {
+    "query": "can the company merge its own pull requests",
+    "expected_ids": [
+      "merge-gate"
+    ]
+  },
+  {
+    "query": "set up my neovim colorscheme",
+    "expected_ids": [
+      "editor-preference"
+    ]
+  },
+  {
+    "query": "what is the git identity rule",
+    "expected_ids": [
+      "git-identity"
+    ]
+  },
+  {
+    "query": "回覆董事長要用什麼語言",
+    "expected_ids": [
+      "chairman-reply-language-chinese"
+    ]
+  },
+  {
+    "query": "memory management and consolidation",
+    "expected_ids": [
+      "entropy-metric"
+    ]
+  },
+  {
+    "query": "how should I dispatch work to employees",
+    "expected_ids": [
+      "sub-agent-isolation",
+      "delegation-phoebe"
+    ]
+  },
+  {
+    "query": "test before committing",
+    "expected_ids": [
+      "verify-before-commit"
+    ]
+  },
+  {
+    "query": "should I get approval for changes",
+    "expected_ids": [
+      "approval-gate"
+    ]
+  }
+]

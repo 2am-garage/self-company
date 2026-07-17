@@ -6,6 +6,18 @@
 
 ---
 
+## Contents
+
+1. Three-Tier Definition
+2. Consolidation — Promotion Rules
+3. Decay — Decay Rules
+4. Decay and Promotion Interaction
+5. Alignment with decay.py / entropy.py
+6. Practical Workflow Overview
+7. FAQ
+8. Charter / Axiom Source Class (Item 6)
+9. Tombstone Vocabulary & Division of Labor (Phase 6)
+
 ## 1. Three-Tier Definition
 
 | Tier | Directory | Characteristics | Lifespan | Purpose |

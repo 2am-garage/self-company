@@ -376,6 +376,82 @@ class TestDutiesAndSteps(unittest.TestCase):
                                  name == owner, f"{name}.{step}")
 
 
+# --------------------------------------------------- Phase 34: duty -> tool profile
+class TestToolProfiles(unittest.TestCase):
+    """Item 1: the duty->tool-profile table (Layer B, code-locked next to
+    ALLOWED_DUTIES). Three tiers split on execution-vs-reasoning: the single
+    security invariant is that only the EXECUTION roles (bob=build, tom=infra,
+    gibby=attack/QA) may run code / mutate source; the five pure reason/
+    research/plan roles get NO mutation tools (Bash/Write/Edit/NotebookEdit) at
+    all — that is the tier the phase locks down so build work can't be silently
+    routed to a non-builder."""
+
+    EXECUTE = ("bob", "tom", "gibby")
+    RESTRICTED = ("tony", "mike", "elon", "phoebe", "july")
+
+    def test_execute_tier_is_unrestricted(self):
+        for name in self.EXECUTE:
+            self.assertEqual(employee.tool_profile_for(name), "execute", name)
+            self.assertEqual(employee.disallowed_tools_for(name), (), name)
+
+    def test_gibby_keeps_full_tools_for_dynamic_verification(self):
+        # Gibby is the VERIFIER (runs the suite, writes+runs repro/exploit
+        # scripts) — restricting it would cripple the red/blue loop for zero
+        # security gain (gibby forging its own verdict is meaningless; the
+        # forgery threat is BOB forging gibby's verdict, handled by the gate).
+        self.assertEqual(employee.tool_profile_for("gibby"), "execute")
+        self.assertEqual(employee.disallowed_tools_for("gibby"), ())
+
+    def test_reasoning_roles_are_restricted(self):
+        for name in self.RESTRICTED:
+            self.assertEqual(employee.tool_profile_for(name), "restricted", name)
+            tools = employee.disallowed_tools_for(name)
+            for mutating in ("Bash", "Write", "Edit", "NotebookEdit"):
+                self.assertIn(mutating, tools, f"{name} must deny {mutating}")
+
+    def test_only_execution_roles_may_mutate_source(self):
+        # The single security invariant, asserted directly against the whole
+        # core roster: exactly bob, tom, gibby have an EMPTY disallow list
+        # (unrestricted); the five reason/research/plan roles deny all four.
+        mutators = [n for n in employee.CORE_EMPLOYEES
+                    if employee.disallowed_tools_for(n) == ()]
+        self.assertEqual(sorted(mutators), ["bob", "gibby", "tom"])
+
+    def test_unknown_duty_or_hired_desk_is_most_restrictive(self):
+        for bogus in ("", None, "zzz-not-a-real-employee", "../../etc",
+                      "hired-researcher"):
+            self.assertEqual(employee.tool_profile_for(bogus), "restricted", repr(bogus))
+            tools = employee.disallowed_tools_for(bogus)
+            for mutating in ("Bash", "Write", "Edit", "NotebookEdit"):
+                self.assertIn(mutating, tools, repr(bogus))
+
+    def test_hired_desk_never_resolves_to_execute(self):
+        # A hired worker/manager desk (R7 forbids it from holding a build/
+        # attack duty in the first place) must never fall through to the
+        # unrestricted execute tier just because its name isn't recognized.
+        for hired_name in ("zara", "quinn-analyst", "newhire"):
+            self.assertNotEqual(employee.tool_profile_for(hired_name), "execute")
+            self.assertNotEqual(employee.disallowed_tools_for(hired_name), ())
+
+    def test_disallowed_tools_for_always_returns_tuple_or_list_never_raises(self):
+        for weird in (123, [], {}, object()):
+            try:
+                result = employee.disallowed_tools_for(weird)
+            except Exception as e:  # pragma: no cover - must never happen
+                self.fail(f"disallowed_tools_for({weird!r}) raised {e!r}")
+            self.assertIsInstance(result, (tuple, list))
+
+    def test_case_insensitive_lookup(self):
+        self.assertEqual(employee.tool_profile_for("BOB"), "execute")
+        self.assertEqual(employee.tool_profile_for("Bob"), "execute")
+        self.assertEqual(employee.tool_profile_for("  bob  "), "execute")
+        self.assertEqual(employee.tool_profile_for("GIBBY"), "execute")
+
+    def test_core_tool_profiles_covers_every_core_employee(self):
+        for name in employee.CORE_EMPLOYEES:
+            self.assertIn(name, employee.CORE_TOOL_PROFILES, name)
+
+
 # ------------------------------------------------------------------- should_run parity
 class TestShouldRunParity(unittest.TestCase):
     """Employee.should_run must match schedule_config.should_run everywhere — the

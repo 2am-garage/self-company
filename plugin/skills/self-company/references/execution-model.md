@@ -11,6 +11,17 @@ talk* to them; this says *how a worker is actually run*.
 
 ---
 
+## Contents
+
+1. Two Tiers
+2. What an Execution Worker Sub-Agent Sees
+3. Parallel vs Serial Dispatch (Phoebe decides)
+4. Implementation Mapping (Claude Code runtime)
+5. Boundaries Unchanged
+6. Tools: MCP servers and skills (least privilege)
+7. Per-employee memory: mode (rag/flat), recall at dispatch, capture at close (Phase 18 / 18b)
+8. Headless dispatch: model routing, live phases, and the shared prompt builder (Phase 29)
+
 ## 1. Two Tiers
 
 | Tier | Members | Context | Runs as |
@@ -23,6 +34,25 @@ five workers' desks and logs to tune them. She needs cross-worker visibility, so
 she sits on the orchestration side even though she is "half a tier above" the
 workers and not a manager. She still does not read code, memory internals, or
 infra — her least-privilege scope is unchanged.
+
+**Tool restriction (Phase 34):** dispatched workers are tool-fenced by a code-locked
+duty→profile table (`employee.py` `CORE_TOOL_PROFILES`), split **execution vs reasoning**:
+
+| Tier | Roles | Tools (when dispatched via `supervisor.py`) |
+|---|---|---|
+| **execute** | Bob (build), Tom (infra), Gibby (attack/QA) | full — all three legitimately execute |
+| **restricted** | Tony, Mike, Elon, Phoebe, July | `--disallowedTools Bash Write Edit NotebookEdit` |
+| **fail-closed** | hired / unknown / malformed name | → restricted |
+
+A restricted worker physically cannot run a shell or mutate files (the `--disallowedTools`
+bare-name form removes the tool from the model's schema, verified against a real `claude -p`;
+no Bash ⇒ no `/proc/<pid>/fd` write vector), so code work cannot be silently routed past the
+red/blue gate to a non-builder. Gibby stays in **execute** because it *issues* the verdict
+(restricting the verifier serves no threat — the forgery threat is the builder) and needs to
+run tests/repros. The table is a name-only lookup — a desk's own `context.md` cannot raise its
+ceiling. **Boundary:** this fences the supervisor-dispatch path; the cron/trigger/research
+spawns (`daily-run.sh`, `research-scan.sh`, `fire-trigger.sh`) run those personas with full
+tools for their own deliverables — see `status.md` Phase-34 for the deliberate scope note.
 
 **Hire-as-data (Phase 32):** the roster above is the code-known core, but a company
 can hire more via `scripts/hire.sh <id> --tier worker|manager` — each new desk is

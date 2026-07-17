@@ -92,6 +92,15 @@ except Exception:                                              # pragma: no cove
 # NOT eat the memory budget).
 _PERSONA_INLINE_CHARS = 2000
 
+# Phase 34 Item 2 fail-closed backstop: if `employee.py`'s own
+# `disallowed_tools_for` can't be resolved for ANY reason (import failure,
+# missing module), a dispatched worker STILL gets this hardcoded
+# most-restrictive list appended — never an unrestricted fallback. Kept as a
+# literal copy (not imported) so this backstop can't fail for the exact same
+# reason the primary lookup just did. See employee.py's Phase 34 table for the
+# full mechanism/spike record — this module only calls it.
+_FAILCLOSED_DISALLOWED_TOOLS = ("Bash", "Write", "Edit", "NotebookEdit")
+
 # Token usage daily marker — mirrors decay.py's .last-decay-run pattern.
 TOKEN_USAGE_MARKER = ".token-usage"
 
@@ -518,6 +527,25 @@ class Member:
         except Exception:
             return default_model, None
 
+    def _resolve_tool_profile(self):
+        """Phase 34 Item 2: the `--disallowedTools` argv tokens for THIS
+        dispatched worker, from employee.py's Layer-B duty->profile table
+        (`disallowed_tools_for`) — derived from THIS employee's id, never from
+        worker-supplied input. Unlike `_resolve_model` (which degrades OPEN to
+        a sane default on any trouble — model choice isn't a security
+        boundary), this degrades CLOSED: any import/lookup failure returns the
+        module's own `_FAILCLOSED_DISALLOWED_TOOLS` backstop instead of an
+        empty/unrestricted list, so a broken employee.py import can never
+        silently widen a worker's tools."""
+        try:
+            from employee import disallowed_tools_for
+            tools = disallowed_tools_for(self.id)
+            if isinstance(tools, (list, tuple)):
+                return list(tools)
+        except Exception:
+            pass
+        return list(_FAILCLOSED_DISALLOWED_TOOLS)
+
     def _load_persona(self):
         """P5 (Phase 29 fold-in): read THIS employee's persona.md BODY, capped
         to _PERSONA_INLINE_CHARS, so real_command can inline it directly
@@ -623,6 +651,14 @@ class Member:
         cmd = ["claude", "-p", prompt, "--model", model]
         if os.environ.get("SELF_COMPANY_AGENT_STREAM", "1") != "0":
             cmd += ["--output-format", "stream-json", "--verbose"]
+        # Phase 34 Item 2: append the resolved tool-restriction profile LAST —
+        # a bare `--disallowedTools <Tool>` list (never a path/command
+        # pattern; see employee.py's Phase 34 table for why). Empty list
+        # (build/infra) appends nothing, so bob/tom's argv is byte-identical
+        # to pre-Phase-34 dispatch.
+        disallowed = self._resolve_tool_profile()
+        if disallowed:
+            cmd += ["--disallowedTools", *disallowed]
         return cmd
 
 

@@ -393,7 +393,19 @@ RAG degrades to the keyword floor when the venv is absent:
 - Never crash the company; never raise uncaught tracebacks.
 - `rag_query.py` unavailable → stderr hint fallback: `grep -ri '<keywords>' .company/memory`.
 
+### 8.2 Ask-time Core Identity Block (Mike 2026-07-16 Finding 2)
+
+Letta/MemGPT keeps a tiny "core memory" block (persona + user facts) PERMANENTLY in context, distinct from its retrieval-gated recall/archival tiers. `hook_memory_inject.py` adds the equivalent: a SEPARATE, ADDITIVE, ungated block of the Chairman's most-stable L2 identity/preference facts, injected every turn alongside (never merged into, never gating) §8's relevance-gated path above — that path's "off-topic injects nothing" guarantee is untouched.
+
+Selection is an explicit opt-in signal, never a relevance guess: prefer any L2 memory carrying a `core: true` frontmatter flag; if none exist in the corpus, fall back to L2 memories at/above `CORE_FALLBACK_MIN_RC` reinforce_count (default 10 — deliberately far above the routine L1→L2 promotion bar so an ordinary L2 memory never leaks into the always-on block). No qualifying memory → inject nothing extra (clean degrade).
+
+| Constant | Default | Meaning | tunable |
+|---|---|---|---|
+| `CORE_MEMORY_ENABLE` | **1** (on) | Master on/off switch for the core block. Set to `0` to disable — the relevance-gated path is unaffected either way. | ✓ (env override) |
+| `CORE_MEMORY_MAX_COUNT` | **5** | Hard cap on the NUMBER of core facts injected, regardless of how many qualify. | ✓ (env override) |
+| `CORE_MEMORY_CHAR_CAP` | **500** | Hard cap on the core block's total rendered characters (own budget, separate from the relevance-gated block's `SELF_COMPANY_INJECT_CONTEXT_CHAR_CAP`) — whichever cap (count or chars) binds first stops the block from growing further. | ✓ (env override) |
+
 ---
 
-Version: v5 (RAG wired, venv-gated; §7.7 scheduling cadence + CAPTURE throttle; §7.8 durability: BACKUP_KEEP + OFFLINE_GAP_DAYS; §7.9 fleet: FLEET_AGENT_BUDGET)  
-Last updated: 2026-07-07
+Version: v6 (§8.2 always-on core identity block: CORE_MEMORY_ENABLE / CORE_MEMORY_MAX_COUNT / CORE_MEMORY_CHAR_CAP)  
+Last updated: 2026-07-16

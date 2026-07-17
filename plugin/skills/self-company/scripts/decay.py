@@ -68,6 +68,12 @@ from frontmatter import (split as _fm_split, parse as _fm_parse,
 # consumer) entirely unchanged; only the walk moves.
 import corpus
 
+# Audit log writer (Phase 35): one os.write per event, best-effort.
+try:
+    import memory_audit
+except ImportError:
+    memory_audit = None
+
 
 # ============================================================================
 # BUILT-IN DEFAULTS (== manifest §1, tunable via --config / policy.md)
@@ -399,11 +405,13 @@ def classify_record(mem: Dict[str, Any], now: datetime,
 
 
 def apply_action(path: Path, action: str, mem: Dict[str, Any],
-                info: Dict[str, Any], now_str: Optional[str] = None) -> bool:
+                info: Dict[str, Any], now_str: Optional[str] = None,
+                company_dir: str = ".company") -> bool:
     """
     Apply action to file (only if --apply is set, but this gets called only then).
 
     `now_str` (YYYY-MM-DD) stamps `invalid_at` on a drop tombstone.
+    `company_dir` is the path to .company/ for audit logging.
     Returns True if successful, False if error.
     """
     try:
@@ -415,6 +423,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             # physically reaped only by the reap pass once the grace window
             # has elapsed from the later of last_reinforced / invalid_at.
             body = mem.get("_body", "")
+            old_status = mem.get("status")
             mem["status"] = "archived"
             if not mem.get("invalid_at"):     # idempotent: never reset the anchor
                 mem["invalid_at"] = now_str
@@ -425,6 +434,8 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                                          "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
             _atomic_write(path, new_content, encoding="utf-8")
+            if memory_audit:
+                memory_audit.audit_event(company_dir, "drop", mem["id"], "status", old_status, "archived", "decay")
             return True
 
         elif action == "demote":
@@ -432,6 +443,7 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             # Persist the freshly-computed decay_score so the demoted memory
             # doesn't carry a stale high score into the next decay sweep.
             body = mem.get("_body", "")
+            old_tier = mem.get("tier")
             mem["tier"] = "L0"
             if info.get("decay_score") is not None:
                 mem["decay_score"] = info["decay_score"]
@@ -455,6 +467,8 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             # actually moves to a genuinely different path.
             if new_path.resolve() != path.resolve():
                 path.unlink()
+            if memory_audit:
+                memory_audit.audit_event(company_dir, "demote", mem["id"], "tier", old_tier, "L0", "decay")
             return True
 
         elif action == "promote":
@@ -512,11 +526,14 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
             # (never delete the file we just wrote).
             if new_path.resolve() != path.resolve():
                 path.unlink()
+            if memory_audit:
+                memory_audit.audit_event(company_dir, "promote", mem["id"], "tier", from_tier, to_tier, "decay")
             return True
 
         elif action == "archive":
             # Rewrite frontmatter: status=archived, update decay_score
             body = mem.get("_body", "")
+            old_status = mem.get("status")
             mem["status"] = "archived"
             mem["decay_score"] = info["decay_score"]
             meta = {k: mem[k] for k in ["id", "tier", "category", "owner", "provenance", "sources",
@@ -524,6 +541,8 @@ def apply_action(path: Path, action: str, mem: Dict[str, Any],
                                          "decay_score", "status", "invalid_at", "verified_date", "verified_by"]}
             new_content = serialize_frontmatter(meta) + '\n' + body
             _atomic_write(path, new_content, encoding="utf-8")
+            if memory_audit:
+                memory_audit.audit_event(company_dir, "archive", mem["id"], "status", old_status, "archived", "decay")
             return True
 
         elif action in ["keep", "upgrade-candidate", "l2-keep"]:
@@ -596,7 +615,8 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                    l1_to_l2_rc: int,
                    reap_grace_days: int,
                    apply: bool,
-                   defer_reap: bool = False) -> Dict[str, Any]:
+                   defer_reap: bool = False,
+                   company_dir: str = ".company") -> Dict[str, Any]:
     """
     Scan memory_dir recursively for .md files, compute decay, optionally apply actions.
 
@@ -790,7 +810,8 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             # drop / archive / demote mutate the file (delete / move / status).
             if apply and action in ("drop", "archive", "demote"):
                 if not apply_action(path, action, mem, info,
-                                    now_str=now.strftime("%Y-%m-%d")):
+                                    now_str=now.strftime("%Y-%m-%d"),
+                                    company_dir=company_dir):
                     report["warnings"].append(f"{path}: failed to apply {action}")
                     continue
 
@@ -801,14 +822,14 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
             # file per run (the D5 cap above downgrades a same-id second promote
             # to keep), so a memory cannot cross two tiers in a single run.
             elif apply and action == "upgrade-candidate":
-                if not apply_action(path, "promote", mem, info):
+                if not apply_action(path, "promote", mem, info, company_dir=company_dir):
                     report["warnings"].append(f"{path}: failed to apply promote")
                     continue
 
             # keep / l2-keep don't change tier or status, but we still persist the
             # freshly-computed decay_score.
             elif apply and action in ("keep", "l2-keep"):
-                apply_action(path, action, mem, info)
+                apply_action(path, action, mem, info, company_dir=company_dir)
 
             # Record action
             if action == "drop":
@@ -949,6 +970,7 @@ def main():
                   f"reaps this run", file=sys.stderr)
 
     # Scan and report
+    company_dir = str(memory_dir.parent) if memory_dir.name == "memory" else ".company"
     report = scan_memory_dir(
         memory_dir, effective_now,
         hl_base, hl_growth,
@@ -959,7 +981,8 @@ def main():
         l1_to_l2_rc,
         reap_grace_days,
         apply=args.apply,
-        defer_reap=defer_reap
+        defer_reap=defer_reap,
+        company_dir=company_dir
     )
     report["now"] = now.strftime("%Y-%m-%d")   # real now; effective in gap_damper
     report["gap_damper"] = gap_damper

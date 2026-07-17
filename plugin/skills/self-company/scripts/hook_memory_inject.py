@@ -31,6 +31,16 @@ Hard rules (all enforced below):
   * Token-capped output (~600 chars).
   * Robust: ANY error -> exit 0 silently. Never break the Chairman's prompt.
 
+Mike 2026-07-16 Finding 2: alongside the relevance-gated block above, an
+always-on, SEPARATE, tiny "core identity" block (Letta/MemGPT's core-memory
+concept) is also injected every turn — a handful of explicitly opted-in
+(`core: true`) or well-reinforced L2 identity/preference facts, hard-capped by
+count and chars, so a session whose opening prompt brushes no L2 fact still
+starts knowing the basics. It is ADDITIVE and UNGATED (no relevance check
+against the prompt) but fully separate from, and never able to weaken, the
+relevance-gated path's "off-topic injects nothing" guarantee — see
+select_core_facts()/build_core_context()/_core_config().
+
 CLI (for tests, no real hook env needed):
   hook_memory_inject.py [--company DIR] [--transcript FILE]
 Reads the documented stdin JSON when present; explicit flags override it.
@@ -77,6 +87,16 @@ from frontmatter import parse as _fm_parse
 # Phase 22: the `.rag-venv/bin/python` interpreter path is resolved by the ONE
 # shared helper (rag_venv.py), never open-coded here.
 from rag_venv import venv_python
+
+# Mike 2026-07-16 Finding 2 / policy_config: the core-identity block's
+# ENABLE/MAX_COUNT/CHAR_CAP are tunable via org/policy.md (§8.2), same
+# resolver decay.py uses. Best-effort import: absent module -> the built-in
+# defaults below are used directly (matches every other best-effort import
+# in this file — never crash the always-on hook over a missing sibling).
+try:
+    from policy_config import resolve as _resolve_policy_config
+except Exception:  # pragma: no cover - defensive
+    _resolve_policy_config = None
 
 EVENT = "UserPromptSubmit"
 
@@ -198,6 +218,111 @@ RAG_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RAG_MIN_SCORE", 0.40, float)
 # load pressure), this gate is skipped and the cosine floor alone decides —
 # byte-identical to the pre-Item-5 behavior (precision-only, never load-bearing).
 RERANK_MIN_SCORE = _env_num("SELF_COMPANY_INJECT_RERANK_MIN_SCORE", -2.75, float)
+
+# --- Mike 2026-07-16 Finding 2: always-on identity CORE block -----------------
+# Letta/MemGPT keeps a tiny "core memory" block (persona + user facts)
+# PERMANENTLY in context, distinct from its retrieval-gated recall/archival
+# tiers. Everything above this line (rank/semantic_top/RAG_MIN_SCORE/
+# RERANK_MIN_SCORE) is the Phase 24 relevance-gated path and is HARD-OFF-LIMITS
+# to this feature — untouched, byte-identical, "off-topic injects nothing"
+# still holds through it. The core block is a SEPARATE, ADDITIVE section built
+# and capped independently, then concatenated onto (never merged into) the
+# relevance-gated output in run().
+#
+# Selection is an EXPLICIT opt-in signal, never a relevance guess:
+#   1. any L2 memory with a truthy `core:` frontmatter flag (author opted it in
+#      by hand) — the primary, EXPECTED signal for a real install (Tony/Phoebe
+#      tag the handful of true Chairman-identity facts once);
+#   2. else (nothing anywhere is flagged yet), L2 memories at/above
+#      CORE_FALLBACK_MIN_RC reinforce_count — a rare safety net, deliberately
+#      set far ABOVE the routine L1->L2 promotion bar (policy.md L1_TO_L2_RC,
+#      default 4) so an ordinary/incidental L2 memory near the promotion floor
+#      never leaks into the always-on block; only a fact reinforced far beyond
+#      routine qualifies without being asked to.
+# "No core facts qualify" (neither signal present) is a normal, common state —
+# degrade to injecting nothing extra, never fabricate a block from thin air.
+DEFAULT_CORE_ENABLE = True
+DEFAULT_CORE_MAX_COUNT = 5              # hard cap by COUNT
+DEFAULT_CORE_CHAR_CAP = 500             # hard cap by CHARS (Mike's proposal: ~500)
+CORE_FALLBACK_MIN_RC = 10               # deliberately conservative rare-safety-net bar
+CORE_PER_MEM_CHARS = 200                # each core fact is meant to be a short one-liner
+CORE_HEADER = "Chairman identity (core, always on):"
+
+
+def _truthy(raw):
+    """Loose boolean parse for a frontmatter flag (e.g. `core: true`). Unknown/
+    absent/malformed -> False; this NEVER guesses a memory into the core block."""
+    return str(raw or "").strip().lower() in ("true", "yes", "1", "on")
+
+
+def _core_config(company):
+    """Resolve (enable, max_count, char_cap) for the core block.
+
+    Layering (highest precedence first): env var override (matches every other
+    tunable in this file, and is what the tests flip) > org/policy.md §8.2 (via
+    the shared policy_config resolver, matching decay.py's convention) >
+    built-in default. Never raises: a missing/malformed policy.md or a garbage
+    env var both degrade silently to the next layer down."""
+    defaults = {
+        "CORE_MEMORY_ENABLE": 1 if DEFAULT_CORE_ENABLE else 0,
+        "CORE_MEMORY_MAX_COUNT": DEFAULT_CORE_MAX_COUNT,
+        "CORE_MEMORY_CHAR_CAP": DEFAULT_CORE_CHAR_CAP,
+    }
+    values = dict(defaults)
+    if _resolve_policy_config is not None:
+        try:
+            policy_path = Path(company) / "org" / "policy.md"
+            resolved, _sources = _resolve_policy_config(defaults, policy_path)
+            values.update(resolved)
+        except Exception:
+            pass
+    enable = bool(_env_num("SELF_COMPANY_INJECT_CORE_ENABLE",
+                           values["CORE_MEMORY_ENABLE"], int))
+    max_count = max(0, _env_num("SELF_COMPANY_INJECT_CORE_MAX_COUNT",
+                                values["CORE_MEMORY_MAX_COUNT"], int))
+    char_cap = max(0, _env_num("SELF_COMPANY_INJECT_CORE_CHAR_CAP",
+                               values["CORE_MEMORY_CHAR_CAP"], int))
+    return enable, max_count, char_cap
+
+
+def select_core_facts(candidates, max_count):
+    """Pick up to `max_count` core-block memories from the L2 slice of
+    `candidates` via the explicit opt-in signal documented above. Deterministic
+    order (reinforce_count desc, then id asc) so output is stable across runs.
+    Returns [] when nothing qualifies (empty-core degrades cleanly)."""
+    if max_count <= 0:
+        return []
+    l2 = [c for c in candidates if c[0] == "L2"]
+    flagged = [c for c in l2 if _truthy(c[1].get("core"))]
+    pool = flagged if flagged else [
+        c for c in l2 if _int(c[1].get("reinforce_count"), 1) >= CORE_FALLBACK_MIN_RC]
+    if not pool:
+        return []
+    pool = sorted(pool, key=lambda c: (-_int(c[1].get("reinforce_count"), 1),
+                                       str(c[1].get("id", ""))))
+    return pool[:max_count]
+
+
+def build_core_context(core_facts, char_cap):
+    """The core block's own compact, token-capped rendering — same
+    collapse-whitespace + per-line-cap shape as build_context(), a DISTINCT
+    header, and its OWN char budget so it can never eat into (or be eaten by)
+    the relevance-gated block's cap. "" if nothing fits (including no facts)."""
+    if not core_facts or char_cap <= 0:
+        return ""
+    lines, used = [CORE_HEADER], len(CORE_HEADER)
+    for _tier, _fm, body, _path in core_facts:
+        snippet = " ".join(body.split())
+        if len(snippet) > CORE_PER_MEM_CHARS:
+            snippet = snippet[:CORE_PER_MEM_CHARS - 1].rstrip() + "…"
+        line = "- " + snippet
+        if used + 1 + len(line) > char_cap:
+            break
+        lines.append(line)
+        used += 1 + len(line)
+    if len(lines) == 1:                            # header only -> nothing fit
+        return ""
+    return "\n".join(lines)
 
 # Stopword set: the closed-class FUNCTION WORDS (articles, pronouns, prepositions,
 # conjunctions, auxiliaries, degree adverbs) plus a few ubiquitous light verbs.
@@ -381,6 +506,10 @@ def rank(prompt, candidates):
     not to a false "recency == relevant" positive. Non-Latin-script relevance
     is the semantic/RAG path's job (tried first in run(), before this
     fallback); this is only the safety net when RAG is absent/degraded.
+
+    Freshness tie-break (decay_score, 0..1): when candidates have identical
+    keyword scores, the memory with the higher decay_score (fresher per the
+    decay model) ranks first. Missing decay_score degrades to the recency key.
     """
     if not prompt or not prompt.strip():
         # Recency fallback: newest durable memories, weighted by tier.
@@ -430,11 +559,17 @@ def rank(prompt, candidates):
         weight = TIER_WEIGHT.get(tier, 0.5)
         rc = _int(fm.get("reinforce_count"), 1)
         score = overlap * weight * max(rc, 1)
-        scored.append((score, overlap, _recency_key(fm), tier, fm, body, path))
-    # Highest score first; ties broken by overlap then recency (deterministic).
-    scored.sort(key=lambda s: (s[0], s[1], s[2]), reverse=True)
+        decay = fm.get("decay_score")
+        try:
+            decay_score = float(decay) if decay is not None else 0.0
+        except (TypeError, ValueError):
+            decay_score = 0.0
+        scored.append((score, overlap, _recency_key(fm), decay_score, tier, fm, body, path))
+    # Highest score first; ties broken by overlap then freshness (decay_score)
+    # then recency (deterministic).
+    scored.sort(key=lambda s: (s[0], s[1], s[3], s[2]), reverse=True)
     return [(t, fm, body, path)
-            for (_s, _o, _r, t, fm, body, path) in scored[:min(TOP_K, TOP_K_CAP)]]
+            for (_s, _o, _r, _d, t, fm, body, path) in scored[:min(TOP_K, TOP_K_CAP)]]
 
 
 def _debug(reason):
@@ -674,6 +809,21 @@ def run(company_arg, transcript_arg):
     candidates = load_candidates(company)
     if not candidates:
         return ""
+
+    # Mike 2026-07-16 Finding 2: the always-on core identity block. SEPARATE
+    # from, and computed independently of, the relevance-gated section below —
+    # it never reads `prompt`, never influences semantic_top()/rank(), and a
+    # failure here can never take down the relevance-gated injection (or vice
+    # versa). Best-effort: any exception degrades to no core block.
+    core_ctx = ""
+    try:
+        enable, max_count, char_cap = _core_config(company)
+        if enable:
+            core_ctx = build_core_context(
+                select_core_facts(candidates, max_count), char_cap)
+    except Exception:
+        core_ctx = ""
+
     prompt = latest_prompt(transcript_arg)
     # Semantic first. Phase 24 MUST-FIX 1(a): three outcomes —
     #  * INJECT_NOTHING => the semantic layer ran and found nothing above the
@@ -683,10 +833,15 @@ def run(company_arg, transcript_arg):
     #  * a list => inject it.
     top = semantic_top(company, prompt, candidates)
     if top is INJECT_NOTHING:
-        return ""
-    if top is None:
+        top = []                                    # byte-identical verdict: nothing
+    elif top is None:
         top = rank(prompt, candidates)
-    return build_context(top)
+    rel_ctx = build_context(top)
+
+    # Concatenate, clearly separated — never merged into one block/header.
+    if core_ctx and rel_ctx:
+        return core_ctx + "\n\n" + rel_ctx
+    return core_ctx or rel_ctx
 
 
 def _read_stdin_hook():

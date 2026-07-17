@@ -254,8 +254,13 @@ def _apply_rerank(query_text, results, top_k):
 
 def _row_out(row, score, include_text):
     """Build one result dict. `text` (the stored body) is included ONLY when a
-    caller needs it for reranking (Item 5) — the normal output never ships bodies."""
+    caller needs it for reranking (Item 5) — the normal output never ships bodies.
+    `decay_score` (freshness, 0..1) is included for tie-breaking when present."""
     out = {"id": row["id"], "tier": row["tier"], "path": row["path"], "score": score}
+    if "decay_score" in row:
+        decay = row.get("decay_score")
+        if decay is not None and _finite(decay):
+            out["decay_score"] = float(decay)
     if include_text:
         out["text"] = row.get("text") or ""
     return out

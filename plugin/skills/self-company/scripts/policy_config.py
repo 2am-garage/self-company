@@ -56,6 +56,12 @@ CONSTANT_SPECS = {
     "BACKUP_KEEP": int,
     "OFFLINE_GAP_DAYS": int,
     "FLEET_AGENT_BUDGET": int,
+    # Ask-time core identity block (Mike 2026-07-16 Finding 2 / hook_memory_inject.py).
+    # CORE_MEMORY_ENABLE is 0/1 (this module has no bool caster; callers treat
+    # any nonzero int as "on", matching the file's existing numeric-tunable style).
+    "CORE_MEMORY_ENABLE": int,
+    "CORE_MEMORY_MAX_COUNT": int,
+    "CORE_MEMORY_CHAR_CAP": int,
 }
 
 # Candidate numeric token. We deliberately capture an optional sign and any
