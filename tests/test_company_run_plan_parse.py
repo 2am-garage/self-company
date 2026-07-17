@@ -45,24 +45,39 @@ def _company(d, ids=("elon", "phoebe", "bob", "gibby", "tom")):
 # (non-demo) dispatch contains a builder — which every plan fixture below does
 # (a named bob plan or the heuristic bob+gibby fallback). Gibby's dispatch
 # prompt now carries a MANDATORY output-contract clause requiring it to print
-# a `@qa-verdict {json}` sentinel ON ITS OWN STDOUT (NOT a shared-fs file that
-# Bob could forge — that was Gibby's break). supervisor.py reads it off
-# Gibby's pipe fd and re-loops on a missing/failing verdict. A fake `claude`
-# that never emits it would turn every `rc == 0` fixture into a 3-round
-# UNRESOLVED — so this snippet, in the dispatch branch, detects the contract
-# in its OWN prompt (only Gibby's prompt carries `@qa-verdict`) and emits a
-# PASS sentinel as a stream-json assistant-text event, mirroring a real Gibby
-# that found nothing on round 1. Bob's prompt has no such clause, so Bob never
-# emits it — matching production, where only Gibby's fd is the trusted channel.
+# a `@qa-verdict <NONCE> {json}` sentinel ON ITS OWN STDOUT (NOT a shared-fs
+# file that Bob could forge — that was Gibby's break). supervisor.py reads it
+# off Gibby's pipe fd and re-loops on a missing/failing/wrong-nonce verdict. A
+# fake `claude` that never emits it would turn every `rc == 0` fixture into a
+# 3-round UNRESOLVED — so this snippet, in the dispatch branch, detects the
+# contract in its OWN prompt (only Gibby's prompt carries `@qa-verdict`),
+# PULLS THE NONCE BACK OUT of that same prompt argument (exactly what a real
+# Gibby does by reading its own dispatch prompt — the fixture has no other way
+# to learn it, matching production where Bob's prompt never contains it), and
+# emits a PASS sentinel carrying that nonce as a stream-json assistant-text
+# event, mirroring a real Gibby that found nothing on round 1. Bob's prompt
+# has no such clause, so Bob never emits it — matching production, where only
+# Gibby's fd is the trusted channel.
 _EMIT_VERDICT_SNIPPET = r"""
   emit_verdict=false
+  verdict_prompt=""
   for a in "$@"; do
     case "$a" in
-      *@qa-verdict*) emit_verdict=true ;;
+      *@qa-verdict*) emit_verdict=true; verdict_prompt="$a" ;;
     esac
   done
   if $emit_verdict; then
-    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"@qa-verdict {\"verdict\":\"pass\",\"target\":\"x\",\"checked\":[\"fake\"]}"}]}}'
+    nonce="$(printf '%s\n' "$verdict_prompt" | sed -n 's/.*@qa-verdict \([^ ]*\).*/\1/p' | head -1)"
+    # Build the payload by bash CONCATENATION (nonce spliced between two
+    # single-quoted, escape-untouched halves) rather than a printf FORMAT
+    # string — printf itself interprets `\"` in its format argument (turning
+    # it into a bare `"` and corrupting the embedded JSON), but never touches
+    # a `%s` substitution's own content. So the whole payload is built first,
+    # then emitted via '%s\n' as a substitution argument, exactly like the
+    # pre-nonce version of this fixture did for its static payload.
+    payload_head='{"type":"assistant","message":{"content":[{"type":"text","text":"@qa-verdict '
+    payload_tail=' {\"verdict\":\"pass\",\"target\":\"x\",\"checked\":[\"fake\"]}"}]}}'
+    printf '%s\n' "${payload_head}${nonce}${payload_tail}"
   fi
 """
 
@@ -412,20 +427,27 @@ class TestLedgerForgeryResisted(Base):
         self.assertEqual(cells[-1], "unresolved")   # NOT the forged "clean"
 
 
-class TestNonBuilderBuildWorkRefused(Base):
-    def test_phoebe_routing_build_work_to_non_builder_is_refused(self):
-        # FIX 3 (Finding 1 defense-in-depth): a plan routing code-mutation work
-        # to a non-builder (tom) is REFUSED at the supervisor — company-run
-        # exits non-zero and ledgers the refusal, never a silent unverified run.
+class TestNonBuilderMutationWorkNoLongerRefused(Base):
+    def test_phoebe_routing_mutation_worded_work_to_non_builder_dispatches_normally(self):
+        # FIX 3, SUPERSEDED (finalization pass): the old content-heuristic
+        # refusal (a plan routing mutation-worded work to a non-builder like
+        # tom was REFUSED, rc nonzero) is REMOVED. Phase 34's per-worker tool
+        # fence is the real, structural stop now (tom is spawned with
+        # --disallowedTools Bash Write Edit NotebookEdit, so it is physically
+        # unable to touch scripts/foo.sh regardless of what its task SAYS) —
+        # this end-to-end path simply dispatches, rc 0, no gate arms (no
+        # builder present), and the ledger keeps the ordinary "-"/"-"
+        # placeholder, exactly like any other non-builder lone task.
         _fake_claude(self.bindir, '{"tom":"refactor the backup logic in scripts/foo.sh"}')
         r = self._run()
-        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("REFUSED", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("REFUSED", r.stderr)
         body = self._ledger_body()
         rows = [ln for ln in body.splitlines() if ln.startswith("| 20")]
         self.assertEqual(len(rows), 1)
         cells = [c.strip() for c in rows[0].strip("|").split("|")]
-        self.assertEqual(cells[-1], "refused")
+        self.assertEqual(cells[-2], "-")
+        self.assertEqual(cells[-1], "-")
 
 
 if __name__ == "__main__":
