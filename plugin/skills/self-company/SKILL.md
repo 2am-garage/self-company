@@ -1,13 +1,9 @@
 ---
 name: self-company
 description: |
-  Multi-agent personal company that learns the Chairman (Uwe)'s habits, preferences, and background across sessions, and continuously fights entropy through structured tiered memory, a verification loop, and decay. On install it creates a git-ignored, project-scoped .company/ skeleton in the current repo (private, not shared across projects).
-  TRIGGER — use this skill proactively for the situations below EVEN WHEN the user never says "self-company" or names a persona:
-  - The user addresses or asks about our internal company personas — Elon (our CEO), Phoebe, July, Bob, Gibby, Tony, Tom, or Mike — by name or by role (CEO/PM/HR/Build/QA/Improvement/IT/R&D).
-  - The user wants an agent to REMEMBER their habits, preferences, decisions, or project context across sessions / long-term, or to set up a personal agent org/assistant that captures what they care about and fights knowledge, context, or memory rot over time.
-  - The user asks for memory maintenance on this agent's own long-term memory: consolidate or dedupe memories, decay/prune stale or contradictory records, verify memories against sources, capture/organize/reinforce, or compute a memory-entropy score/report.
-  - The user wants a company/org status readout: health or entropy report, which employees did what work, upgrades or improvements Tony proposes, Chairman habit records, or memory tiers.
-  DO NOT trigger when: "Elon"/"Musk" refers to the real person or an external company (only fire when the name maps to OUR CEO persona in this self-company context); the request is Taiwan stock trading (shioaji, e.g. "buy 2330"); the user wants to CREATE, build, make, edit, or optimize a NEW skill or slash-command (e.g. "create a new skill that…" — that is the skill-creator skill's job, never this one); it's payroll/email/dashboards/cron/PR-review for the user's REAL company or codebase; or "entropy/duplicates/cleanup" targets a CODEBASE, Obsidian notes, or a document rather than THIS company's memory.
+  Multi-agent personal company that learns the Chairman (Uwe)'s habits, preferences, and background across sessions and fights entropy via tiered memory, a verification loop, and decay. On install it creates a git-ignored, project-scoped .company/ in the current repo.
+  Use proactively (even when the user never says "self-company" or names a persona) when the user: addresses or asks about our personas — Elon (CEO), Phoebe (PM), July (HR), Bob (Build), Gibby (QA), Tony (Improvement), Tom (IT), Mike (R&D) — by name or role; wants an agent to REMEMBER their habits/preferences/decisions/context across sessions or to set up such a personal agent org; asks for memory maintenance on this agent's own long-term memory (consolidate/dedupe, decay stale or contradictory records, verify against sources, capture/reinforce, or a memory-entropy report); or wants a company/org status readout (health/entropy, who did what, Tony's proposed upgrades, memory tiers).
+  Do NOT trigger when "Elon"/"Musk" means the real person or an external company; for Taiwan stock trading (shioaji, e.g. "buy 2330"); to CREATE, edit, or optimize a NEW skill or slash-command ("create a new skill that…" — that is skill-creator's job); for payroll/email/dashboards/cron/PR-review of the user's REAL company or codebase; or when "entropy/duplicates/cleanup" targets a CODEBASE, Obsidian notes, or a document rather than THIS company's memory. Full itemized detail: references/triggering.md.
 ---
 
 ## What This Is
@@ -262,6 +258,7 @@ Load these on demand — none is needed to ACT until you're doing the specific t
 - [operations.md](references/operations.md) — triggers, scheduling/config, hooks, catch-up push, ledger, views, supervisor.
 - [red-blue-protocol.md](references/red-blue-protocol.md) — Bob (Blue) ⚔ Gibby (Red) build-and-attack loop.
 - [rag.md](references/rag.md) — RAG index (LanceDB + fastembed, local/offline); wired into the pipeline (index refresh + ask-time injection), venv-gated — `rag_setup.sh install` to activate the semantic path.
+- [triggering.md](references/triggering.md) — full itemized TRIGGER / DO-NOT list (the frontmatter description carries a compact version).
 - [status.md](references/status.md) — completion checklists + deferred items.
 
 **Scripts** (canonical in `scripts/`, run in place — never copied into `.company/`; stdlib only EXCEPT the `rag_*.py` family below, which needs the opt-in `.company/.rag-venv` — LanceDB + fastembed — created by `rag_setup.sh install`; everything else runs on a bare Python)
