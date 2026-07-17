@@ -1,5 +1,52 @@
 # Completion Status
 
+### v0.1.19 Phase 33 finalization — verdict nonce, capture timeout, heuristic removed (2026-07-17)
+
+_Lands `phase33-verification-gate` on `main`. Closes the three items the interim Phase-33 design
+(shipped onto the Phase-34 foundation, see below) left open._
+
+- ✅ **Verdict NONCE closes the builder-echo forgery.** Pipe identity alone proves WHICH worker's
+  fd a `@qa-verdict` line arrived on, not that Gibby genuinely AUTHORED it — Bob could plant a pass
+  sentinel somewhere Gibby's own transcript is likely to quote back verbatim, and first-wins+locked
+  does nothing if the planted text is the FIRST thing Gibby ever prints. `_dispatch_redblue` now
+  mints a fresh `secrets.token_hex(8)` nonce once per gate run and embeds it in **Gibby's dispatch
+  prompt ONLY** (`_verdict_contract`); the sentinel shape becomes `@qa-verdict <NONCE> {json}`, and
+  `_extract_qa_verdict` requires the token right after the sentinel to match exactly (plain `==`,
+  not a timing-safe compare — the nonce is single-use, never brute-forced live off this comparison,
+  and plain equality can't raise on a hostile non-ASCII token). Applies to both the mid-stream and
+  the authoritative `result`-event path, so an echoed pass without the nonce in Gibby's own final
+  answer still cannot override a genuine locked fail.
+- ✅ **Capture timeout closes the `/proc` DoS.** `company-run.sh`'s `$(...)` capture of the
+  supervisor's stderr had no bound — a worker (full Bash, Phase 34's execute tier) opening
+  `/proc/<supervisor-pid>/fd/2` and holding it open keeps that command substitution from ever
+  seeing EOF, hanging the session forever regardless of the supervisor's own in-process per-worker
+  budgets (those bound the WORKER, not the capture pipe). `timeout` (env-tunable
+  `SELF_COMPANY_GATE_CAPTURE_TIMEOUT`, default ~900s, `SELF_COMPANY_TIMEOUT_KILL_AFTER` SIGKILL
+  grace, via `agent_spawn.sh`'s shared `sc_tmo`) now wraps the whole capture. A fired timeout is
+  classified explicitly: `verdict=unresolved`, `rounds=timeout` in the ledger — never the "-"/"-"
+  no-gate-armed placeholder and never "clean" — with the script's own exit staying non-zero
+  (124/137).
+- ✅ **Non-builder content-refusal REMOVED, superseded by Phase 34.** The interim design's
+  `_looks_like_code_mutation` tripwire (a mutation verb + code-path signal in the task text, used
+  to REFUSE build work routed to a non-builder) is deleted along with its regexes and the
+  `dispatch()` refusal branch — not merely disabled. Phase 34's per-worker `--disallowedTools Bash
+  Write Edit NotebookEdit` fence already makes a non-builder structurally unable to mutate source,
+  closing the class of finding the heuristic guessed at with no task text to evade — and the
+  heuristic had a real cost: it false-refused legitimate read-only tasks worded like "audit/review
+  Bob's patch to X.py". Builder-presence ARMING (auto-inject Gibby whenever a builder is in the
+  plan) is unchanged.
+- ⚠️ **Honest remaining limit (documented, out of scope to close here).** A builder (bob/tom, which
+  must keep full tools) can still write to `/proc/<supervisor-pid>/fd/2` and forge what
+  company-run.sh's capture sees, including a fake `@redblue-gate {...}` line — but this is a
+  **ledger-DISPLAY** risk, not an enforcement one: the verdict that actually gates the re-loop is
+  decided by nonce-authenticated pipe identity entirely inside the supervisor process, before
+  anything reaches the capture. A forged line downstream cannot flip a decision already made; it
+  could only make the human-facing `company-runs.md` row claim something that disagrees with what
+  really happened. Fully closing the display surface needs OS-level uid/namespace isolation between
+  the supervisor and its workers — out of scope; enforcement (rc + pipe-identity verdict) stays
+  sound either way.
+- Full detail + design rationale: `references/red-blue-protocol.md` "Finalization pass" section.
+
 ### Fold-in — always-on core identity block (Mike 2026-07-16 Finding 2)
 
 - ✅ **`hook_memory_inject.py` gains a SEPARATE, ADDITIVE "core identity" block, alongside (never through) the Phase-24 relevance-gated path.** Letta/MemGPT keeps a tiny always-in-context "core memory" block distinct from retrieval-gated recall; before this, the hook was 100% relevance-gated, so a session whose opening prompt brushed no L2 fact started knowing nothing about the Chairman. `select_core_facts()` picks up to `CORE_MEMORY_MAX_COUNT` (default 5) L2 memories by an EXPLICIT opt-in signal — a `core: true` frontmatter flag first, falling back (only if none are flagged anywhere in the corpus) to L2 memories at/above `CORE_FALLBACK_MIN_RC` reinforce_count (default 10 — a deliberately conservative safety-net bar set FAR above the routine L1→L2 promotion bar so an ordinary/incidental L2 memory never leaks into the always-on block) — never a relevance guess. `build_core_context()` renders it under its own header (`Chairman identity (core, always on):`) and its own hard char cap (`CORE_MEMORY_CHAR_CAP`, default 500, separate from the relevance-gated block's budget); no qualifying memory degrades to injecting nothing extra. Both knobs plus `CORE_MEMORY_ENABLE` are tunable via `org/policy.md` §8.2 (`policy_config.py`, matching decay.py's convention) with an env-var override on top, matching this file's existing knobs. The relevance-gated path (`rank`/`semantic_top`/`RAG_MIN_SCORE`/reranker) is untouched — its "off-topic injects nothing" guarantee is regression-tested explicitly (`TestCoreIdentityBlockEndToEnd.test_relevance_gate_byte_identical_regression_off_topic` in `tests/test_hook_memory_inject.py`) to stay byte-identical; the core block is concatenated on top, clearly separated by a blank line and its own header, never merged into the relevance-gated block's text.
@@ -10,15 +57,13 @@
 - ✅ **The `--disallowedTools <bare name>` form removes the tool structurally** (empirically proven against a real `claude -p`: the denied tools are absent from the `system/init` `tools` schema, not merely discouraged — and the denial propagates through Task-subagent delegation). No Bash ⇒ no shell ⇒ the `/proc/<pid>/fd` write vector (Phase-33 Gibby finding) is closed for restricted roles. `--allowedTools` alone is NOT a ceiling; path/command-pattern scoping is bypassable via shell chaining — so Bash is treated as binary (full or absent), which is why gibby (needs execution) stays in the execute tier.
 - ✅ **Why this is the foundation Phase 33 needs:** a non-builder physically cannot mutate source, so code-mutation work cannot be silently routed past the red/blue gate to a non-builder. Verified by Gibby's adversarial pass (no exploit: correct argv form, fail-closed on every malformed/unknown/wrong-type input, no config/frontmatter/name-collision escalation, no argv injection) plus an independent CEO check.
 - ⚠️ **Coverage boundary (deliberate, documented — Gibby's caveat):** the fence covers **supervisor-dispatched** workers only. Four other `claude -p` spawn sites (`daily-run.sh`'s AGENT step as Tony, `research-scan.sh` as Mike, `fire-trigger.sh` as Phoebe, `company-run.sh`'s Phoebe planning spawn) run those same restricted personas with **full tools** — by necessity, because there they produce their own deliverables (memory consolidation, research briefs, plans) into `.company/` data, not gated build work, and headless path-scoped Write is unreliable so it's Write-all-or-nothing. In a **usage** repo, source mutation there is still blocked by the skeleton guard; in the **dev** repo it is intended self-improvement. **Follow-up (logged, not blocking):** decide whether to extend the fence into the shared `agent_spawn.sh` seam vs. keep cron/trigger personas deliberately privileged.
-- ⏭️ **Phase 33 (the verification gate) returns next**, on top of this foundation, to be finalized with a per-run verdict **nonce** (closes the builder-echo forgery) + a company-run capture timeout (closes the `/proc` DoS). Its branch `phase33-verification-gate` is kept unmerged for that.
+- ✅ **Phase 33 (the verification gate) is finalized on top of this foundation** — see the v0.1.19 entry above.
 
-### Phase 33 (IN PROGRESS on `phase33-verification-gate`) — machine-enforced Bob⚔Gibby verification gate
-
-_Merged onto the Phase-34 foundation; being finalized with the verdict nonce + capture timeout before it lands on main. Summary of what the branch already has:_
+### Phase 33 — machine-enforced Bob⚔Gibby verification gate (merged, v0.1.19)
 
 - ✅ **Sign-off is machine-required at the supervisor layer** (NOT a `SubagentStop` hook — workers are `claude -p` subprocesses, so that hook never fires). Missing/malformed/`fail` verdict ⇒ re-dispatch Bob(fix)+Gibby(re-attack) up to `SELF_COMPANY_REDBLUE_MAX_ROUNDS` (default 3, clamped); cap-without-pass ⇒ **UNRESOLVED** (loud, rc≠0).
-- ✅ **Verdict attribution by PIPE IDENTITY** — the verdict rides on Gibby's own stdout (`@qa-verdict` sentinel), read off Gibby's fd; a sentinel on any other worker's fd is ignored. First-wins + locked.
-- ⏳ **Finalization (this pass):** a per-run **nonce** in Gibby's prompt so a builder-echoed `@qa-verdict` (Gibby quoting planted text) can't flip the verdict; a **capture timeout** in `company-run.sh` closing the `/proc/<pid>/fd` DoS; with Phase 34 merged, the fragile non-builder content-refusal heuristic is superseded by tool restriction (a non-builder physically cannot mutate). Ledger-DISPLAY forgery by a builder writing `/proc` is documented as an audit-integrity limit (enforcement via rc/pipe-identity is sound).
+- ✅ **Verdict attribution by PIPE IDENTITY + NONCE** — the verdict rides on Gibby's own stdout (`@qa-verdict <nonce> {json}` sentinel), read off Gibby's fd, and is accepted only when the nonce matches the run's secret (minted once per gate run, embedded only in Gibby's prompt). A sentinel on any other worker's fd, or missing/wrong the nonce, is ignored. First-wins + locked.
+- ✅ **Finalized** (v0.1.19, see above): the verdict nonce, the company-run capture timeout, and removal of the superseded non-builder content-refusal heuristic (Phase 34's tool fence is the structural fix now).
 
 ### v0.1.16 Hire-as-data: worker AND manager tiers (Phase 32, 2026-07-13)
 

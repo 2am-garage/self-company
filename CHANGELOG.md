@@ -10,6 +10,34 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.19] — 2026-07-17: Phase 33 finalization — verdict nonce, capture timeout, heuristic removed
+
+- Closes the echo-forgery Gibby's adversarial pass found in the interim Phase-33 design: pipe
+  identity alone proved WHICH worker's fd a `@qa-verdict` line arrived on, not that Gibby genuinely
+  authored it. `_dispatch_redblue` now mints a fresh `secrets.token_hex(8)` nonce once per gate run
+  and embeds it in **Gibby's dispatch prompt only**; the sentinel becomes `@qa-verdict <NONCE>
+  {json}` and `_extract_qa_verdict` rejects any line whose nonce is missing or wrong (plain `==`,
+  not a timing-safe compare — deliberate, so a hostile non-ASCII token can't raise instead of
+  compare-fail). Applies on both the mid-stream and the authoritative `result`-event path.
+- Closes the `/proc` DoS: `company-run.sh`'s stderr capture of the supervisor dispatch had no
+  bound, so a worker holding `/proc/<supervisor-pid>/fd/2` open could hang the session forever
+  regardless of the supervisor's own in-process budgets. `timeout` (env-tunable
+  `SELF_COMPANY_GATE_CAPTURE_TIMEOUT`, default 900s, `SELF_COMPANY_TIMEOUT_KILL_AFTER` grace, via
+  `agent_spawn.sh`'s shared `sc_tmo`) now wraps the whole capture; a fired timeout ledgers
+  explicitly as `verdict=unresolved`, `rounds=timeout`, rc stays non-zero.
+- Removed the non-builder content-mutation-refusal heuristic (`_looks_like_code_mutation` +
+  regexes + the `dispatch()` refusal branch) now that Phase 34's per-worker `--disallowedTools`
+  fence is merged: a non-builder is structurally unable to mutate source, so the heuristic's guess
+  is redundant — and it had cost, false-refusing legitimate read-only tasks. Builder-presence
+  arming (auto-inject Gibby whenever a builder is in the plan) is unchanged.
+- Documented, not closed: a builder (bob/tom) can still write to `/proc/<supervisor-pid>/fd/2` and
+  forge the human-facing ledger **display** row — the enforcement decision itself (rc +
+  pipe-identity+nonce verdict) is decided inside the supervisor before the capture, so this is an
+  audit-display risk, not an enforcement one. Fully closing it needs OS-level uid/namespace
+  isolation, out of scope.
+- +30 regression tests across `tests/test_redblue_gate.py`, `tests/test_company_run.py`,
+  `tests/test_company_run_plan_parse.py`.
+
 ## [0.1.17] — 2026-07-13: Phase 32 hotfix (Gibby's second adversarial pass)
 
 - Fix a deterministic red test the 0.1.16 docs sweep introduced:

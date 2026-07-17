@@ -132,16 +132,66 @@ Gibby's verdict on every dispatched build. Key design points (so they are not re
   non-positive/absurd value). Cap-without-pass ⇒ **UNRESOLVED** (loud, non-zero exit), never a
   silent "done".
 - **Arming is enforced, not the planner's discretion.** If a plan contains any builder-duty
-  assignee, Gibby is required; if absent, Gibby is **auto-injected**. A plan routing code-mutation
-  work to a **non-builder** (which would skip arming) is **refused loudly** by a conservative
-  content check (a code-mutation verb + a code-file/path signal in the task) — read-only tasks are
-  never refused.
+  assignee, Gibby is required; if absent, Gibby is **auto-injected**. Arming is a pure
+  builder-presence check — the task's TEXT plays no part in it (see the superseded-heuristic note
+  below).
 
-**Known limitation → follow-up (Phase 34):** the non-builder refusal is **defense-in-depth, not
-airtight** — a cleverly-worded build task can evade the text heuristic. The sound fix is
-**per-worker `--allowedTools` tool restriction** (fence each worker to the tools its role needs, so
-a non-builder physically cannot mutate source), tracked as **Phase 34**. Until then the content
-check is a tripwire, not a wall.
+**Finalization pass (closes the three findings the interim design above still had open):**
+
+- **Verdict NONCE — closes echo-forgery.** Pipe identity (above) proves WHICH worker's fd a line
+  arrived on, but not that Gibby genuinely AUTHORED it: Bob (full Bash+Write, the execute tier)
+  could plant a `@qa-verdict {"verdict":"pass"}` string somewhere Gibby's own transcript is likely
+  to quote back verbatim (a source comment, a file it cats while investigating), and first-wins+
+  locked alone does not stop this if the planted text is the FIRST thing Gibby ever prints.
+  `supervisor.py`'s `_dispatch_redblue` now mints a fresh `secrets.token_hex(8)` **nonce once per
+  gate run** and embeds it in **Gibby's dispatch prompt ONLY** (via `_verdict_contract`) — Bob's
+  prompt never contains it, and Bob cannot read Gibby's prompt (separate `claude -p` subprocesses).
+  The sentinel shape is now `@qa-verdict <NONCE> {json}`; the parser (`_extract_qa_verdict`)
+  **requires** the token immediately after the sentinel to match the run's nonce exactly (plain
+  string equality, not a timing-safe compare — the nonce is single-use and never brute-forced live
+  off this comparison, and plain `==` can't raise on a hostile non-ASCII token the way
+  `secrets.compare_digest` would). A `@qa-verdict` line with no nonce token, or the wrong one, is
+  **ignored** — same as malformed. Applies on both the mid-stream path and the authoritative
+  `result`-event path, so an echoed pass **without** the nonce in Gibby's own final answer still
+  cannot override a genuine locked fail.
+- **Capture timeout — closes the `/proc` DoS.** `company-run.sh` captures the supervisor's stderr
+  via a command substitution (`gate_err="$(... 2>&1 1>&3)"`). A dispatched worker still has full
+  Bash (Phase 34's execute tier — bob/gibby/tom, by necessity) and can open
+  `/proc/<supervisor-pid>/fd/2` and hold it open, grabbing a second reference to the write end of
+  that pipe — so even once the supervisor process fully exits, the command substitution never sees
+  EOF and hangs the session forever. `timeout` (env-tunable `SELF_COMPANY_GATE_CAPTURE_TIMEOUT`,
+  default ~900s — comfortably above one full multi-round gate cycle — with a `SELF_COMPANY_
+  TIMEOUT_KILL_AFTER` SIGKILL grace, via `agent_spawn.sh`'s shared `sc_tmo`) now wraps the WHOLE
+  capture. If it fires, the cycle is **never** treated as clean or as the "-"/"-" no-gate-armed
+  placeholder — the ledger records it explicitly as `verdict=unresolved`, `rounds=timeout`, and the
+  script's own exit code stays non-zero (124/137 from `timeout`), loud like the supervisor's own
+  cap-without-pass path.
+- **Non-builder content-refusal REMOVED — superseded by Phase 34.** The interim design above also
+  **refused** (rc non-zero) a plan that routed code-mutation-worded work to a non-builder, via a
+  task-text heuristic (`_looks_like_code_mutation`: a mutation verb + a code-path signal). That
+  heuristic is now **removed**, not merely disabled: Phase 34's per-worker `--disallowedTools Bash
+  Write Edit NotebookEdit` fence (`employee.py`'s `CORE_TOOL_PROFILES` / `disallowed_tools_for`)
+  makes a non-builder **structurally unable to mutate source** — Bash/Write/Edit are absent from
+  its tool schema, not merely discouraged (verified against a real `claude -p`). The class of
+  finding the heuristic guessed at is closed by construction, with no task text to evade — and the
+  heuristic itself had a real usability cost: it false-refused legitimate READ-only tasks whose
+  phrasing brushed a mutation verb (e.g. "audit/review Bob's patch to X.py"). Builder-presence
+  ARMING (a plan with a builder present still auto-injects Gibby) is unchanged; only the redundant
+  refusal is gone.
+
+**Honest remaining limit (documented, not closed — genuinely needs OS-level isolation):** a
+**builder** (bob/tom — which must keep full tools to do its job) can still write to
+`/proc/<supervisor-pid>/fd/2` and inject an arbitrary line into what company-run.sh's capture sees,
+including a forged `@redblue-gate {...}` **display** line. This is a **ledger-display** risk, not
+an **enforcement** one: the verdict that actually GATES the re-loop (whether Bob's fix is accepted
+as "clean") is decided by nonce-authenticated pipe identity entirely inside the supervisor's own
+process, before anything reaches company-run.sh's capture at all — a forged stderr line arriving
+downstream cannot flip a decision the supervisor already made. What it COULD do is make the
+**human-facing row in `company-runs.md`** claim a rounds/verdict that disagrees with what actually
+happened. Fully closing that display surface needs OS-level uid/namespace isolation between the
+supervisor and its workers (so a worker cannot open the supervisor's `/proc` entry at all) — out of
+scope here; the enforcement decision (return code + the pipe-identity verdict) stays sound either
+way.
 
 ---
 
@@ -161,3 +211,4 @@ Memory Pipeline B's VERIFY (§3 design) is a "lightweight version" of this adver
 
 ## Version
 - v2.5: 2026-06-24, red/blue protocol, N=3. Full build pipeline implementation (Bob really writes code, Gibby really attacks) pending later activation; this protocol is its behavioral spec.
+- v2.6: 2026-07-17, Phase 33 finalization (v0.1.19). Verdict nonce closes the builder-echo forgery; a bounded `timeout` around company-run.sh's stderr capture closes the `/proc` DoS; the non-builder content-refusal heuristic is removed, superseded by Phase 34's structural tool fence. See "Finalization pass" above.
