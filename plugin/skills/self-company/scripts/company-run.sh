@@ -240,21 +240,56 @@ fi
 # trick). A worker's own stderr is merged into ITS stdout pipe (consumed by
 # the supervisor), so no worker can write the supervisor's fd 2: the captured
 # stream is parent-trusted, and there is no filesystem path to target.
+#
+# Finalization pass (closes the DoS Gibby found): the CAPTURE ITSELF has no
+# bound. A dispatched worker still has full Bash (Phase 34's execute tier —
+# bob/gibby/tom, by necessity) and can open `/proc/<supervisor-pid>/fd/2` and
+# hold it open; that grabs a SECOND reference to the write end of THIS pipe,
+# so even once the supervisor process fully exits, this `$(...)` command
+# substitution never sees EOF — it hangs forever, wedging the whole session
+# (not merely the one worker; the supervisor's own in-process per-worker
+# budget is irrelevant here, since it's the CAPTURE PIPE, not the worker,
+# that's stuck). `timeout` wraps the whole capture so it is bounded no matter
+# WHY it fails to return — env-tunable via SELF_COMPANY_GATE_CAPTURE_TIMEOUT
+# (default 900s, comfortably above one full multi-round gate cycle at the
+# supervisor's own default per-worker budget so a legitimately slow gate is
+# never cut short) with a SIGKILL grace (SELF_COMPANY_TIMEOUT_KILL_AFTER,
+# default 30s, the same knob the planning spawn above already uses) via
+# agent_spawn.sh's shared `sc_tmo` — one lever, not a second hand-rolled
+# timeout wrapper. If it fires we do NOT fall through to a "clean"/placeholder
+# ledger row: no `@redblue-gate` line was ever captured, so `gate_line` stays
+# empty and `gate_capture_timed_out` is set — the ledger step below records
+# this EXPLICITLY as verdict `unresolved` (never silently "-", which would
+# read as "no gate armed" rather than "gate outcome unknown, capture killed"),
+# and `rc` (124/137 from `timeout`) stays the script's own non-zero exit —
+# loud, exactly like the supervisor's own cap-without-pass path.
+GATE_CAPTURE_TIMEOUT="${SELF_COMPANY_GATE_CAPTURE_TIMEOUT:-900}"
+GATE_CAPTURE_KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
 gate_line=""
+gate_capture_timed_out=false
 if $DEMO; then
   python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --demo
   rc=$?
 else
+  sc_tmo "$GATE_CAPTURE_KILL_AFTER"
   exec 3>&1
-  gate_err="$(python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" \
+  gate_err="$("${SC_TMO[@]}" "$GATE_CAPTURE_TIMEOUT" \
+    python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" \
     --dispatch "$plan_json" 2>&1 1>&3)"
   rc=$?
   exec 3>&-
-  # Replay the supervisor's diagnostics to the terminal (its loud UNRESOLVED /
-  # auto-arm / refusal messages), minus the machine `@redblue-gate` sentinel.
-  printf '%s\n' "$gate_err" | grep -v '^@redblue-gate ' >&2 || true
-  gate_line="$(printf '%s\n' "$gate_err" | grep '^@redblue-gate ' | tail -1 \
-    | sed 's/^@redblue-gate //')"
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+    gate_capture_timed_out=true
+    echo "[company-run] GATE CAPTURE TIMEOUT after ${GATE_CAPTURE_TIMEOUT}s — the" \
+         "supervisor's stderr never reached EOF (a worker may be holding its pipe" \
+         "open via /proc). Treating this cycle as UNRESOLVED — never clean." >&2
+  else
+    # Replay the supervisor's diagnostics to the terminal (its loud UNRESOLVED /
+    # auto-arm messages), minus the machine `@redblue-gate` sentinel.
+    printf '%s\n' "$gate_err" | grep -v '^@redblue-gate ' >&2 || true
+    gate_line="$(printf '%s\n' "$gate_err" | grep '^@redblue-gate ' | tail -1 \
+      | sed 's/^@redblue-gate //')"
+  fi
 fi
 
 # --- 4. LEDGER -------------------------------------------------------------
@@ -267,8 +302,15 @@ task_short="${TASK:0:40}"; task_cell="${task_short//|//}"
 # stderr sentinel. "-"/"-" for a lone-worker (non-builder) dispatch or a --demo
 # run — the gate never arms there, so nothing is emitted and this stays exactly
 # a pre-Phase-33 ledger row except for the two trailing columns.
+#
+# Finalization pass: a capture-timeout is EXPLICITLY "timeout"/"unresolved" —
+# never the "-"/"-" placeholder (which means "gate never armed"; this cycle's
+# gate DID arm, its outcome is simply unknown because the capture was killed)
+# and never a value borrowed from a stale $gate_line (there isn't one).
 gate_rounds="-"; gate_verdict="-"
-if [[ -n "$gate_line" ]]; then
+if $gate_capture_timed_out; then
+  gate_rounds="timeout"; gate_verdict="unresolved"
+elif [[ -n "$gate_line" ]]; then
   gate_rounds="$(printf '%s' "$gate_line" | python3 -c "
 import json, sys
 try:
