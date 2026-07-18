@@ -481,9 +481,15 @@ class TestSharedMemoryAtDispatch(unittest.TestCase):
 class TestDispatchBudget(unittest.TestCase):
     """Phase 19 Item 3 (TOM-1) — the live dispatch path is BOUNDED: a worker that
     never reaches EOF is killed at its wall-clock budget, dispatch returns cleanly,
-    and the session-triggered company-run.sh can never hang."""
+    and the session-triggered company-run.sh can never hang.
 
-    def _company(self, d, ids=("bob",)):
+    Uses NON-builder ids (tom/elon) so these primitive-level timeout checks stay
+    on the plain non-gated dispatch path — a builder would (correctly) route
+    through the Phase-33 verification gate's multi-round loop, whose boundedness
+    is covered in test_redblue_gate; the per-worker deadline itself is what's
+    under test here and it lives in the shared `_dispatch_once` primitive."""
+
+    def _company(self, d, ids=("tom",)):
         base = os.path.join(d, ".company", "org", "employees")
         for i in ids:
             os.makedirs(os.path.join(base, i))
@@ -504,14 +510,14 @@ class TestDispatchBudget(unittest.TestCase):
             try:
                 sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
                 t0 = time.monotonic()
-                workers = sup.dispatch({"bob": "hang please"}, demo=False)
+                workers = sup.dispatch({"tom": "hang please"}, demo=False)
                 elapsed = time.monotonic() - t0
             finally:
                 sv.Member.real_command = orig
                 os.environ.pop("SELF_COMPANY_DISPATCH_TIMEOUT", None)
                 os.environ.pop("SELF_COMPANY_DISPATCH_KILL_AFTER", None)
             self.assertLess(elapsed, 15, "dispatch must not hang on a stalled worker")
-            self.assertEqual(workers["bob"].status, sv.Status.FAILED)  # killed -> failed
+            self.assertEqual(workers["tom"].status, sv.Status.FAILED)  # killed -> failed
 
     def test_partial_line_stall_does_not_block_deadline_or_siblings(self):
         # Item C1 (Phase 26 fold-in / Gibby #4): a worker that emits a PARTIAL
@@ -521,11 +527,11 @@ class TestDispatchBudget(unittest.TestCase):
         # manual buffer assembly means the stalled worker is still killed on
         # schedule, and a normal sibling keeps running/finishing unaffected.
         with tempfile.TemporaryDirectory() as d:
-            c = self._company(d, ids=("bob", "elon"))
+            c = self._company(d, ids=("tom", "elon"))
             orig = sv.Member.real_command
 
             def _cmd(self, task, model="m"):
-                if self.id == "bob":
+                if self.id == "tom":
                     # partial line, no newline, then hang (ignoring TERM)
                     return ["bash", "-c",
                             "trap '' TERM; printf '@status working-partial'; "
@@ -538,7 +544,7 @@ class TestDispatchBudget(unittest.TestCase):
             try:
                 sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
                 t0 = time.monotonic()
-                workers = sup.dispatch({"bob": "hang please", "elon": "quick"},
+                workers = sup.dispatch({"tom": "hang please", "elon": "quick"},
                                        demo=False)
                 elapsed = time.monotonic() - t0
             finally:
@@ -547,8 +553,8 @@ class TestDispatchBudget(unittest.TestCase):
                 os.environ.pop("SELF_COMPANY_DISPATCH_KILL_AFTER", None)
             self.assertLess(elapsed, 15,
                             "a partial-line stall must not block the deadline check")
-            self.assertEqual(workers["bob"].status, sv.Status.FAILED)
-            self.assertTrue(workers["bob"].timed_out)
+            self.assertEqual(workers["tom"].status, sv.Status.FAILED)
+            self.assertTrue(workers["tom"].timed_out)
             self.assertEqual(workers["elon"].status, sv.Status.DONE)
 
     def test_normal_fast_worker_unaffected(self):
@@ -560,12 +566,12 @@ class TestDispatchBudget(unittest.TestCase):
             os.environ["SELF_COMPANY_DISPATCH_TIMEOUT"] = "30"
             try:
                 sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
-                workers = sup.dispatch({"bob": "quick"}, demo=False)
+                workers = sup.dispatch({"tom": "quick"}, demo=False)
             finally:
                 sv.Member.real_command = orig
                 os.environ.pop("SELF_COMPANY_DISPATCH_TIMEOUT", None)
-            self.assertEqual(workers["bob"].status, sv.Status.DONE)
-            self.assertFalse(workers["bob"].timed_out)
+            self.assertEqual(workers["tom"].status, sv.Status.DONE)
+            self.assertFalse(workers["tom"].timed_out)
 
     def test_wrap_timeout_shape(self):
         # real workers are spawned under `timeout -k <grace> <budget>` (Item-1 parity)
@@ -607,9 +613,9 @@ class TestDispatchBudget(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             c = self._company(d)
             sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()))
-            workers = sup.dispatch({"bob": "demo"}, demo=True, demo_delay=0.0)
-            self.assertIsNone(workers["bob"].budget)
-            self.assertEqual(workers["bob"].status, sv.Status.DONE)
+            workers = sup.dispatch({"tom": "demo"}, demo=True, demo_delay=0.0)
+            self.assertIsNone(workers["tom"].budget)
+            self.assertEqual(workers["tom"].status, sv.Status.DONE)
 
     def test_stream_json_args_present_by_default(self):
         m = sv.Member("bob")
@@ -773,39 +779,45 @@ class TestModelRouting(unittest.TestCase):
     def test_two_employees_show_different_models_in_event_log(self):
         # Acceptance (e): a before/after two-employee dispatch shows TWO
         # DIFFERENT --model values in the event log where today it shows one.
+        # Uses non-builder employees (tony/elon) so this model-routing check
+        # stays on the plain non-gated dispatch path — a builder (bob) would
+        # correctly route through the Phase-33 verification gate (FIX B),
+        # which is exercised in test_redblue_gate, not here.
         with tempfile.TemporaryDirectory() as d:
-            c = self._company_with_model(d, {"bob": "haiku", "elon": "fable"})
+            c = self._company_with_model(d, {"tony": "haiku", "elon": "fable"})
             events = []
             orig = sv.Member.real_command
             sv.Member.real_command = self._fast_real_command
             try:
                 sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()),
                                     event_log=events)
-                sup.dispatch({"bob": "build", "elon": "decide"}, demo=False)
+                sup.dispatch({"tony": "improve", "elon": "decide"}, demo=False)
             finally:
                 sv.Member.real_command = orig
             starts = {e["emp"]: e.get("model") for e in events if e["kind"] == "start"}
-            self.assertEqual(starts["bob"], "claude-haiku-4-5")
+            self.assertEqual(starts["tony"], "claude-haiku-4-5")
             self.assertEqual(starts["elon"], "claude-fable-5")
-            self.assertNotEqual(starts["bob"], starts["elon"])
+            self.assertNotEqual(starts["tony"], starts["elon"])
 
     def test_invalid_model_warning_surfaces_on_event_log(self):
+        # Non-builder (tony) keeps this on the non-gated path — see the note in
+        # test_two_employees_show_different_models_in_event_log.
         with tempfile.TemporaryDirectory() as d:
-            c = self._company_with_model(d, {"bob": "haiku → sonnet"})
+            c = self._company_with_model(d, {"tony": "haiku → sonnet"})
             events = []
             orig = sv.Member.real_command
             sv.Member.real_command = self._fast_real_command
             try:
                 sup = sv.Supervisor(c, renderer=sv.LiveTree([], stream=io.StringIO()),
                                     event_log=events)
-                sup.dispatch({"bob": "build"}, demo=False)
+                sup.dispatch({"tony": "improve"}, demo=False)
             finally:
                 sv.Member.real_command = orig
-            starts = [e for e in events if e["kind"] == "start" and e["emp"] == "bob"]
+            starts = [e for e in events if e["kind"] == "start" and e["emp"] == "tony"]
             self.assertEqual(len(starts), 1)
             self.assertEqual(starts[0]["model"], sv.DEFAULT_MODEL)
             self.assertIn("model_warning", starts[0])
-            self.assertIn("bob", starts[0]["model_warning"])
+            self.assertIn("tony", starts[0]["model_warning"])
 
     def test_real_command_records_warning_on_member_for_emit(self):
         with tempfile.TemporaryDirectory() as d:

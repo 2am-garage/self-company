@@ -10,6 +10,35 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.19] — 2026-07-18: Phase 33 finalization — verdict nonce + capture timeout (DEFENSE-IN-DEPTH), heuristic removed
+
+Gibby's adversarial pass proved the nonce and timeout **raise the bar but do NOT close**
+forgery/DoS against an actively-malicious builder (same-uid sibling processes + live `/proc`).
+Shipped as **labeled defense-in-depth**, not a security guarantee; the sound fixes are documented
+as future work. What IS genuinely closed: the non-builder heuristic, and the phase's real purpose —
+Gibby can no longer silently rubber-stamp.
+
+- Verdict nonce (`_dispatch_redblue` mints `secrets.token_hex(8)` into **Gibby's prompt only**;
+  `@qa-verdict <NONCE> {json}`; `_extract_qa_verdict` requires the exact nonce). Parser + fd
+  attribution are sound. **But the nonce leaks**: the prompt is a `claude -p` **argv** element,
+  readable by any same-uid process via `/proc/<pid>/cmdline` — Gibby lifted it in <1s and forged an
+  accepted **enforcement** verdict. Sound fix (future): deliver Gibby's prompt via stdin, not argv.
+- Capture timeout on `company-run.sh`'s stderr capture (env `SELF_COMPANY_GATE_CAPTURE_TIMEOUT`,
+  default **2400s** — raised from 900s, which was below the legit 3×600s worst case and could
+  false-kill a real multi-round gate). Bounds an **accidental** hang; does NOT bound a deliberate
+  DoS — a `setsid`-detached worker holding `/proc/<sup>/fd/2` escapes timeout's group-kill. Sound
+  fix (future): file-based gate result + `wait` on the supervisor PID.
+- Removed the non-builder content-mutation-refusal heuristic (`_looks_like_code_mutation` + regexes
+  + the `dispatch()` refusal branch) — genuinely superseded by Phase 34's per-worker
+  `--disallowedTools` fence (a non-builder is structurally unable to mutate source), and it had a
+  real cost (false-refused legitimate read-only tasks). Builder-presence arming unchanged.
+- What the gate reliably provides: Gibby can't silently rubber-stamp (re-loop on a genuine fail,
+  UNRESOLVED loud rc≠0, sound parser/pipe-identity). Not closed (documented): a `/proc`-scanning
+  malicious builder can forge the enforcement verdict (via the nonce leak), DoS the capture, or
+  forge the ledger display — needs stdin delivery + file-based result + OS uid/namespace isolation.
+- +30 regression tests across `tests/test_redblue_gate.py`, `tests/test_company_run.py`,
+  `tests/test_company_run_plan_parse.py`.
+
 ## [0.1.17] — 2026-07-13: Phase 32 hotfix (Gibby's second adversarial pass)
 
 - Fix a deterministic red test the 0.1.16 docs sweep introduced:

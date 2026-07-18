@@ -232,12 +232,71 @@ if command -v python3 >/dev/null 2>&1 && [[ -f "$VALIDATOR_RT" ]]; then
 fi
 
 # --- 3. DISPATCH (supervisor spawns the assigned employees, live) ----------
+# Phase 33 FIX 2 (Finding 3): the gate's rounds/verdict come from the
+# supervisor's OWN stderr (`@redblue-gate {json}`), NOT a shared-fs marker a
+# Bob worker could overwrite to forge a "clean" ledger cell. We capture the
+# supervisor's stderr via an anonymous pipe (command substitution) while its
+# stdout — the live tree — passes straight through to the terminal (fd 3
+# trick). A worker's own stderr is merged into ITS stdout pipe (consumed by
+# the supervisor), so no worker can write the supervisor's fd 2: the captured
+# stream is parent-trusted, and there is no filesystem path to target.
+#
+# Finalization pass (closes the DoS Gibby found): the CAPTURE ITSELF has no
+# bound. A dispatched worker still has full Bash (Phase 34's execute tier —
+# bob/gibby/tom, by necessity) and can open `/proc/<supervisor-pid>/fd/2` and
+# hold it open; that grabs a SECOND reference to the write end of THIS pipe,
+# so even once the supervisor process fully exits, this `$(...)` command
+# substitution never sees EOF — it hangs forever, wedging the whole session
+# (not merely the one worker; the supervisor's own in-process per-worker
+# budget is irrelevant here, since it's the CAPTURE PIPE, not the worker,
+# that's stuck). `timeout` wraps the whole capture so it is bounded no matter
+# WHY it fails to return — env-tunable via SELF_COMPANY_GATE_CAPTURE_TIMEOUT
+# (default 900s, comfortably above one full multi-round gate cycle at the
+# supervisor's own default per-worker budget so a legitimately slow gate is
+# never cut short) with a SIGKILL grace (SELF_COMPANY_TIMEOUT_KILL_AFTER,
+# default 30s, the same knob the planning spawn above already uses) via
+# agent_spawn.sh's shared `sc_tmo` — one lever, not a second hand-rolled
+# timeout wrapper. If it fires we do NOT fall through to a "clean"/placeholder
+# ledger row: no `@redblue-gate` line was ever captured, so `gate_line` stays
+# empty and `gate_capture_timed_out` is set — the ledger step below records
+# this EXPLICITLY as verdict `unresolved` (never silently "-", which would
+# read as "no gate armed" rather than "gate outcome unknown, capture killed"),
+# and `rc` (124/137 from `timeout`) stays the script's own non-zero exit —
+# loud, exactly like the supervisor's own cap-without-pass path.
+# Default 2400s: must exceed a LEGIT worst-case gate cycle so a real multi-round
+# run isn't false-killed — rounds (default 3) x per-worker dispatch budget
+# (default 600s) = 1800s, plus margin. (Gibby 2026-07-18: the old 900s was below
+# 1800s and would UNRESOLVED-kill a legit 3-round gate.) NOTE: this bounds an
+# ACCIDENTAL hang only; a setsid-detached worker holding the supervisor's fd
+# escapes timeout's process-group kill — see red-blue-protocol.md's honest limit.
+GATE_CAPTURE_TIMEOUT="${SELF_COMPANY_GATE_CAPTURE_TIMEOUT:-2400}"
+GATE_CAPTURE_KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
+gate_line=""
+gate_capture_timed_out=false
 if $DEMO; then
   python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --demo
+  rc=$?
 else
-  python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" --dispatch "$plan_json"
+  sc_tmo "$GATE_CAPTURE_KILL_AFTER"
+  exec 3>&1
+  gate_err="$("${SC_TMO[@]}" "$GATE_CAPTURE_TIMEOUT" \
+    python3 "$SCRIPTS_RT/supervisor.py" --company "$COMPANY" \
+    --dispatch "$plan_json" 2>&1 1>&3)"
+  rc=$?
+  exec 3>&-
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+    gate_capture_timed_out=true
+    echo "[company-run] GATE CAPTURE TIMEOUT after ${GATE_CAPTURE_TIMEOUT}s — the" \
+         "supervisor's stderr never reached EOF (a worker may be holding its pipe" \
+         "open via /proc). Treating this cycle as UNRESOLVED — never clean." >&2
+  else
+    # Replay the supervisor's diagnostics to the terminal (its loud UNRESOLVED /
+    # auto-arm messages), minus the machine `@redblue-gate` sentinel.
+    printf '%s\n' "$gate_err" | grep -v '^@redblue-gate ' >&2 || true
+    gate_line="$(printf '%s\n' "$gate_err" | grep '^@redblue-gate ' | tail -1 \
+      | sed 's/^@redblue-gate //')"
+  fi
 fi
-rc=$?
 
 # --- 4. LEDGER -------------------------------------------------------------
 # Store the FULL assignment JSON (no truncation) so org-status.py can attribute
@@ -245,8 +304,36 @@ rc=$?
 # string can't break the markdown table (JSON itself has none). Task stays short.
 assign_cell="${plan_json//|//}"          # sanitize pipes; keep the FULL json
 task_short="${TASK:0:40}"; task_cell="${task_short//|//}"
-[[ -f "$LEDGER" ]] || printf '# Company Runs (session-triggered)\n\n_Each row: a company work cycle started from the session. See MISSION.md._\n\n| time | task | planned by | assignments | rc |\n|---|---|---|---|---|\n' > "$LEDGER"
-printf '| %s | %s | %s | `%s` | %s |\n' "$TS" "$task_cell" "$planned_by" "$assign_cell" "$rc" >> "$LEDGER"
+# Phase 33: rounds used + final verdict, parsed from the trusted supervisor
+# stderr sentinel. "-"/"-" for a lone-worker (non-builder) dispatch or a --demo
+# run — the gate never arms there, so nothing is emitted and this stays exactly
+# a pre-Phase-33 ledger row except for the two trailing columns.
+#
+# Finalization pass: a capture-timeout is EXPLICITLY "timeout"/"unresolved" —
+# never the "-"/"-" placeholder (which means "gate never armed"; this cycle's
+# gate DID arm, its outcome is simply unknown because the capture was killed)
+# and never a value borrowed from a stale $gate_line (there isn't one).
+gate_rounds="-"; gate_verdict="-"
+if $gate_capture_timed_out; then
+  gate_rounds="timeout"; gate_verdict="unresolved"
+elif [[ -n "$gate_line" ]]; then
+  gate_rounds="$(printf '%s' "$gate_line" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('rounds', '-'))
+except Exception:
+    print('-')
+" 2>/dev/null || echo '-')"
+  gate_verdict="$(printf '%s' "$gate_line" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('verdict', '-'))
+except Exception:
+    print('-')
+" 2>/dev/null || echo '-')"
+fi
+[[ -f "$LEDGER" ]] || printf '# Company Runs (session-triggered)\n\n_Each row: a company work cycle started from the session. See MISSION.md._\n\n| time | task | planned by | assignments | rc | rounds | verdict |\n|---|---|---|---|---|---|---|\n' > "$LEDGER"
+printf '| %s | %s | %s | `%s` | %s | %s | %s |\n' "$TS" "$task_cell" "$planned_by" "$assign_cell" "$rc" "$gate_rounds" "$gate_verdict" >> "$LEDGER"
 
 echo "[company-run] done (rc $rc) — logged to ops/reports/company-runs.md"
 exit "$rc"

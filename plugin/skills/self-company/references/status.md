@@ -1,5 +1,56 @@
 # Completion Status
 
+### v0.1.19 Phase 33 finalization — verdict nonce + capture timeout (DEFENSE-IN-DEPTH), heuristic removed (2026-07-18)
+
+_Lands `phase33-verification-gate` on `main`. Gibby's adversarial pass proved the nonce and timeout
+RAISE the bar but do NOT close forgery/DoS against an actively-malicious builder — shipped as
+labeled defense-in-depth, with the sound fixes documented as future work (see `red-blue-protocol.md`
+"Finalization pass"). What IS genuinely closed: the non-builder heuristic (superseded by Phase 34),
+and — the phase's actual purpose — Gibby can no longer silently rubber-stamp._
+
+- ⚠️ **Verdict NONCE — raises the bar, does NOT close echo-forgery vs. a malicious builder.**
+  `_dispatch_redblue` mints a `secrets.token_hex(8)` nonce per run into **Gibby's prompt only**; the
+  sentinel is `@qa-verdict <NONCE> {json}` and `_extract_qa_verdict` requires the exact nonce (plain
+  `==`; won't raise on a non-ASCII hostile token). **Parser + fd-attribution are sound** (wrong/
+  absent/other-fd cases all correctly ignored). **But the nonce DELIVERY leaks:** the prompt is a
+  `claude -p` **argv** element, and any same-uid process reads it from `/proc/<pid>/cmdline` — Gibby
+  proved a concurrent full-Bash Bob lifts the nonce in <1s and forges an accepted **enforcement**
+  verdict. **Sound fix (future):** deliver Gibby's prompt via stdin, never argv.
+- ⚠️ **Capture timeout — bounds the accidental hang, does NOT bound a deliberate DoS.** `timeout`
+  (env `SELF_COMPANY_GATE_CAPTURE_TIMEOUT`, default raised to 2400s so it exceeds a legit
+  rounds×per-worker-budget cycle — 3×600s — instead of the old 900s that could false-kill; plus
+  `SELF_COMPANY_TIMEOUT_KILL_AFTER`) wraps `company-run.sh`'s stderr capture, and a fired timeout is
+  classified `verdict=unresolved`/`rounds=timeout` (never "-"/"-" or "clean"), rc non-zero. **But**
+  `timeout` only signals its direct child (the supervisor); Gibby proved a worker that
+  `setsid`-detaches and holds `/proc/<supervisor-pid>/fd/2` escapes the process-group kill, and in
+  the common case (supervisor exits, rogue worker persists) the capture still hangs for the worker's
+  lifetime at rc=0. **Sound fix (future):** deliver the gate result via a file + `wait` on the
+  supervisor PID, not a pipe-EOF `$(...)`.
+- ✅ **Non-builder content-refusal REMOVED, superseded by Phase 34.** The interim design's
+  `_looks_like_code_mutation` tripwire (a mutation verb + code-path signal in the task text, used
+  to REFUSE build work routed to a non-builder) is deleted along with its regexes and the
+  `dispatch()` refusal branch — not merely disabled. Phase 34's per-worker `--disallowedTools Bash
+  Write Edit NotebookEdit` fence already makes a non-builder structurally unable to mutate source,
+  closing the class of finding the heuristic guessed at with no task text to evade — and the
+  heuristic had a real cost: it false-refused legitimate read-only tasks worded like "audit/review
+  Bob's patch to X.py". Builder-presence ARMING (auto-inject Gibby whenever a builder is in the
+  plan) is unchanged.
+- ✅ **What the gate reliably provides (its actual, delivered value).** Gibby can no longer silently
+  **rubber-stamp**: a genuine `fail` forces bounded Bob-fix/Gibby-reattack re-loops (cap 3,
+  `SELF_COMPANY_REDBLUE_MAX_ROUNDS`), cap-without-pass is **UNRESOLVED** (loud, rc≠0), and the
+  parser / pipe-identity / first-wins-lock all hold. That closes the "Gibby waved it through while
+  real defects remained" failure this phase was built for (and which recurred live during the
+  Phase-32/33 work).
+- ⚠️ **Honest remaining limit — needs the sound fixes above + OS isolation.** An actively-malicious
+  or prompt-injected **builder** scanning `/proc` can (a) lift the verdict nonce from Gibby's argv
+  and forge an accepted **enforcement** verdict, (b) `setsid`-wedge the capture (DoS), and (c) forge
+  the human-facing **ledger-display** row. (c) alone can't flip the in-process decision, but (a)
+  can. Closing (a)/(b)/(c) needs stdin prompt delivery + a file-based gate result + ultimately
+  OS-level uid/namespace isolation between supervisor and workers. **Shipped as defense-in-depth,
+  not a security guarantee, and labeled as such so no one over-trusts it.**
+- Full detail + design rationale + the sound-fix directions: `references/red-blue-protocol.md`
+  "Finalization pass" section.
+
 ### Fold-in — always-on core identity block (Mike 2026-07-16 Finding 2)
 
 - ✅ **`hook_memory_inject.py` gains a SEPARATE, ADDITIVE "core identity" block, alongside (never through) the Phase-24 relevance-gated path.** Letta/MemGPT keeps a tiny always-in-context "core memory" block distinct from retrieval-gated recall; before this, the hook was 100% relevance-gated, so a session whose opening prompt brushed no L2 fact started knowing nothing about the Chairman. `select_core_facts()` picks up to `CORE_MEMORY_MAX_COUNT` (default 5) L2 memories by an EXPLICIT opt-in signal — a `core: true` frontmatter flag first, falling back (only if none are flagged anywhere in the corpus) to L2 memories at/above `CORE_FALLBACK_MIN_RC` reinforce_count (default 10 — a deliberately conservative safety-net bar set FAR above the routine L1→L2 promotion bar so an ordinary/incidental L2 memory never leaks into the always-on block) — never a relevance guess. `build_core_context()` renders it under its own header (`Chairman identity (core, always on):`) and its own hard char cap (`CORE_MEMORY_CHAR_CAP`, default 500, separate from the relevance-gated block's budget); no qualifying memory degrades to injecting nothing extra. Both knobs plus `CORE_MEMORY_ENABLE` are tunable via `org/policy.md` §8.2 (`policy_config.py`, matching decay.py's convention) with an env-var override on top, matching this file's existing knobs. The relevance-gated path (`rank`/`semantic_top`/`RAG_MIN_SCORE`/reranker) is untouched — its "off-topic injects nothing" guarantee is regression-tested explicitly (`TestCoreIdentityBlockEndToEnd.test_relevance_gate_byte_identical_regression_off_topic` in `tests/test_hook_memory_inject.py`) to stay byte-identical; the core block is concatenated on top, clearly separated by a blank line and its own header, never merged into the relevance-gated block's text.
@@ -10,7 +61,13 @@
 - ✅ **The `--disallowedTools <bare name>` form removes the tool structurally** (empirically proven against a real `claude -p`: the denied tools are absent from the `system/init` `tools` schema, not merely discouraged — and the denial propagates through Task-subagent delegation). No Bash ⇒ no shell ⇒ the `/proc/<pid>/fd` write vector (Phase-33 Gibby finding) is closed for restricted roles. `--allowedTools` alone is NOT a ceiling; path/command-pattern scoping is bypassable via shell chaining — so Bash is treated as binary (full or absent), which is why gibby (needs execution) stays in the execute tier.
 - ✅ **Why this is the foundation Phase 33 needs:** a non-builder physically cannot mutate source, so code-mutation work cannot be silently routed past the red/blue gate to a non-builder. Verified by Gibby's adversarial pass (no exploit: correct argv form, fail-closed on every malformed/unknown/wrong-type input, no config/frontmatter/name-collision escalation, no argv injection) plus an independent CEO check.
 - ⚠️ **Coverage boundary (deliberate, documented — Gibby's caveat):** the fence covers **supervisor-dispatched** workers only. Four other `claude -p` spawn sites (`daily-run.sh`'s AGENT step as Tony, `research-scan.sh` as Mike, `fire-trigger.sh` as Phoebe, `company-run.sh`'s Phoebe planning spawn) run those same restricted personas with **full tools** — by necessity, because there they produce their own deliverables (memory consolidation, research briefs, plans) into `.company/` data, not gated build work, and headless path-scoped Write is unreliable so it's Write-all-or-nothing. In a **usage** repo, source mutation there is still blocked by the skeleton guard; in the **dev** repo it is intended self-improvement. **Follow-up (logged, not blocking):** decide whether to extend the fence into the shared `agent_spawn.sh` seam vs. keep cron/trigger personas deliberately privileged.
-- ⏭️ **Phase 33 (the verification gate) returns next**, on top of this foundation, to be finalized with a per-run verdict **nonce** (closes the builder-echo forgery) + a company-run capture timeout (closes the `/proc` DoS). Its branch `phase33-verification-gate` is kept unmerged for that.
+- ✅ **Phase 33 (the verification gate) is finalized on top of this foundation** — see the v0.1.19 entry above.
+
+### Phase 33 — machine-enforced Bob⚔Gibby verification gate (merged, v0.1.19)
+
+- ✅ **Sign-off is machine-required at the supervisor layer** (NOT a `SubagentStop` hook — workers are `claude -p` subprocesses, so that hook never fires). Missing/malformed/`fail` verdict ⇒ re-dispatch Bob(fix)+Gibby(re-attack) up to `SELF_COMPANY_REDBLUE_MAX_ROUNDS` (default 3, clamped); cap-without-pass ⇒ **UNRESOLVED** (loud, rc≠0).
+- ✅ **Verdict attribution by PIPE IDENTITY + NONCE** — the verdict rides on Gibby's own stdout (`@qa-verdict <nonce> {json}` sentinel), read off Gibby's fd, and is accepted only when the nonce matches the run's secret (minted once per gate run, embedded only in Gibby's prompt). A sentinel on any other worker's fd, or missing/wrong the nonce, is ignored. First-wins + locked.
+- ✅ **Finalized** (v0.1.19, see above): the verdict nonce, the company-run capture timeout, and removal of the superseded non-builder content-refusal heuristic (Phase 34's tool fence is the structural fix now).
 
 ### v0.1.16 Hire-as-data: worker AND manager tiers (Phase 32, 2026-07-13)
 
