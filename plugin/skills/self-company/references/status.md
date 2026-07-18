@@ -1,31 +1,31 @@
 # Completion Status
 
-### v0.1.19 Phase 33 finalization — verdict nonce, capture timeout, heuristic removed (2026-07-17)
+### v0.1.19 Phase 33 finalization — verdict nonce + capture timeout (DEFENSE-IN-DEPTH), heuristic removed (2026-07-18)
 
-_Lands `phase33-verification-gate` on `main`. Closes the three items the interim Phase-33 design
-(shipped onto the Phase-34 foundation, see below) left open._
+_Lands `phase33-verification-gate` on `main`. Gibby's adversarial pass proved the nonce and timeout
+RAISE the bar but do NOT close forgery/DoS against an actively-malicious builder — shipped as
+labeled defense-in-depth, with the sound fixes documented as future work (see `red-blue-protocol.md`
+"Finalization pass"). What IS genuinely closed: the non-builder heuristic (superseded by Phase 34),
+and — the phase's actual purpose — Gibby can no longer silently rubber-stamp._
 
-- ✅ **Verdict NONCE closes the builder-echo forgery.** Pipe identity alone proves WHICH worker's
-  fd a `@qa-verdict` line arrived on, not that Gibby genuinely AUTHORED it — Bob could plant a pass
-  sentinel somewhere Gibby's own transcript is likely to quote back verbatim, and first-wins+locked
-  does nothing if the planted text is the FIRST thing Gibby ever prints. `_dispatch_redblue` now
-  mints a fresh `secrets.token_hex(8)` nonce once per gate run and embeds it in **Gibby's dispatch
-  prompt ONLY** (`_verdict_contract`); the sentinel shape becomes `@qa-verdict <NONCE> {json}`, and
-  `_extract_qa_verdict` requires the token right after the sentinel to match exactly (plain `==`,
-  not a timing-safe compare — the nonce is single-use, never brute-forced live off this comparison,
-  and plain equality can't raise on a hostile non-ASCII token). Applies to both the mid-stream and
-  the authoritative `result`-event path, so an echoed pass without the nonce in Gibby's own final
-  answer still cannot override a genuine locked fail.
-- ✅ **Capture timeout closes the `/proc` DoS.** `company-run.sh`'s `$(...)` capture of the
-  supervisor's stderr had no bound — a worker (full Bash, Phase 34's execute tier) opening
-  `/proc/<supervisor-pid>/fd/2` and holding it open keeps that command substitution from ever
-  seeing EOF, hanging the session forever regardless of the supervisor's own in-process per-worker
-  budgets (those bound the WORKER, not the capture pipe). `timeout` (env-tunable
-  `SELF_COMPANY_GATE_CAPTURE_TIMEOUT`, default ~900s, `SELF_COMPANY_TIMEOUT_KILL_AFTER` SIGKILL
-  grace, via `agent_spawn.sh`'s shared `sc_tmo`) now wraps the whole capture. A fired timeout is
-  classified explicitly: `verdict=unresolved`, `rounds=timeout` in the ledger — never the "-"/"-"
-  no-gate-armed placeholder and never "clean" — with the script's own exit staying non-zero
-  (124/137).
+- ⚠️ **Verdict NONCE — raises the bar, does NOT close echo-forgery vs. a malicious builder.**
+  `_dispatch_redblue` mints a `secrets.token_hex(8)` nonce per run into **Gibby's prompt only**; the
+  sentinel is `@qa-verdict <NONCE> {json}` and `_extract_qa_verdict` requires the exact nonce (plain
+  `==`; won't raise on a non-ASCII hostile token). **Parser + fd-attribution are sound** (wrong/
+  absent/other-fd cases all correctly ignored). **But the nonce DELIVERY leaks:** the prompt is a
+  `claude -p` **argv** element, and any same-uid process reads it from `/proc/<pid>/cmdline` — Gibby
+  proved a concurrent full-Bash Bob lifts the nonce in <1s and forges an accepted **enforcement**
+  verdict. **Sound fix (future):** deliver Gibby's prompt via stdin, never argv.
+- ⚠️ **Capture timeout — bounds the accidental hang, does NOT bound a deliberate DoS.** `timeout`
+  (env `SELF_COMPANY_GATE_CAPTURE_TIMEOUT`, default raised to 2400s so it exceeds a legit
+  rounds×per-worker-budget cycle — 3×600s — instead of the old 900s that could false-kill; plus
+  `SELF_COMPANY_TIMEOUT_KILL_AFTER`) wraps `company-run.sh`'s stderr capture, and a fired timeout is
+  classified `verdict=unresolved`/`rounds=timeout` (never "-"/"-" or "clean"), rc non-zero. **But**
+  `timeout` only signals its direct child (the supervisor); Gibby proved a worker that
+  `setsid`-detaches and holds `/proc/<supervisor-pid>/fd/2` escapes the process-group kill, and in
+  the common case (supervisor exits, rogue worker persists) the capture still hangs for the worker's
+  lifetime at rc=0. **Sound fix (future):** deliver the gate result via a file + `wait` on the
+  supervisor PID, not a pipe-EOF `$(...)`.
 - ✅ **Non-builder content-refusal REMOVED, superseded by Phase 34.** The interim design's
   `_looks_like_code_mutation` tripwire (a mutation verb + code-path signal in the task text, used
   to REFUSE build work routed to a non-builder) is deleted along with its regexes and the
@@ -35,17 +35,21 @@ _Lands `phase33-verification-gate` on `main`. Closes the three items the interim
   heuristic had a real cost: it false-refused legitimate read-only tasks worded like "audit/review
   Bob's patch to X.py". Builder-presence ARMING (auto-inject Gibby whenever a builder is in the
   plan) is unchanged.
-- ⚠️ **Honest remaining limit (documented, out of scope to close here).** A builder (bob/tom, which
-  must keep full tools) can still write to `/proc/<supervisor-pid>/fd/2` and forge what
-  company-run.sh's capture sees, including a fake `@redblue-gate {...}` line — but this is a
-  **ledger-DISPLAY** risk, not an enforcement one: the verdict that actually gates the re-loop is
-  decided by nonce-authenticated pipe identity entirely inside the supervisor process, before
-  anything reaches the capture. A forged line downstream cannot flip a decision already made; it
-  could only make the human-facing `company-runs.md` row claim something that disagrees with what
-  really happened. Fully closing the display surface needs OS-level uid/namespace isolation between
-  the supervisor and its workers — out of scope; enforcement (rc + pipe-identity verdict) stays
-  sound either way.
-- Full detail + design rationale: `references/red-blue-protocol.md` "Finalization pass" section.
+- ✅ **What the gate reliably provides (its actual, delivered value).** Gibby can no longer silently
+  **rubber-stamp**: a genuine `fail` forces bounded Bob-fix/Gibby-reattack re-loops (cap 3,
+  `SELF_COMPANY_REDBLUE_MAX_ROUNDS`), cap-without-pass is **UNRESOLVED** (loud, rc≠0), and the
+  parser / pipe-identity / first-wins-lock all hold. That closes the "Gibby waved it through while
+  real defects remained" failure this phase was built for (and which recurred live during the
+  Phase-32/33 work).
+- ⚠️ **Honest remaining limit — needs the sound fixes above + OS isolation.** An actively-malicious
+  or prompt-injected **builder** scanning `/proc` can (a) lift the verdict nonce from Gibby's argv
+  and forge an accepted **enforcement** verdict, (b) `setsid`-wedge the capture (DoS), and (c) forge
+  the human-facing **ledger-display** row. (c) alone can't flip the in-process decision, but (a)
+  can. Closing (a)/(b)/(c) needs stdin prompt delivery + a file-based gate result + ultimately
+  OS-level uid/namespace isolation between supervisor and workers. **Shipped as defense-in-depth,
+  not a security guarantee, and labeled as such so no one over-trusts it.**
+- Full detail + design rationale + the sound-fix directions: `references/red-blue-protocol.md`
+  "Finalization pass" section.
 
 ### Fold-in — always-on core identity block (Mike 2026-07-16 Finding 2)
 

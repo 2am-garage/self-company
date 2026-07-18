@@ -263,7 +263,13 @@ fi
 # read as "no gate armed" rather than "gate outcome unknown, capture killed"),
 # and `rc` (124/137 from `timeout`) stays the script's own non-zero exit —
 # loud, exactly like the supervisor's own cap-without-pass path.
-GATE_CAPTURE_TIMEOUT="${SELF_COMPANY_GATE_CAPTURE_TIMEOUT:-900}"
+# Default 2400s: must exceed a LEGIT worst-case gate cycle so a real multi-round
+# run isn't false-killed — rounds (default 3) x per-worker dispatch budget
+# (default 600s) = 1800s, plus margin. (Gibby 2026-07-18: the old 900s was below
+# 1800s and would UNRESOLVED-kill a legit 3-round gate.) NOTE: this bounds an
+# ACCIDENTAL hang only; a setsid-detached worker holding the supervisor's fd
+# escapes timeout's process-group kill — see red-blue-protocol.md's honest limit.
+GATE_CAPTURE_TIMEOUT="${SELF_COMPANY_GATE_CAPTURE_TIMEOUT:-2400}"
 GATE_CAPTURE_KILL_AFTER="${SELF_COMPANY_TIMEOUT_KILL_AFTER:-30}"
 gate_line=""
 gate_capture_timed_out=false

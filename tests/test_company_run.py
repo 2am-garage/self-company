@@ -144,10 +144,12 @@ class TestGateCaptureTimeout(unittest.TestCase):
         # accidentally unbounded — but this test only needs to prove the knob
         # reads back sanely, not wait 900s. Covered functionally by the
         # explicit-override test above; this just locks the documented
-        # default so a future edit can't silently drop the ~900s figure.
+        # default so a future edit can't silently drop it. 2400s (raised from
+        # 900s on 2026-07-18) must exceed a legit rounds×per-worker-budget cycle
+        # (3×600s=1800s) so a real multi-round gate isn't false-killed.
         with open(SCRIPT, encoding="utf-8") as f:
             script = f.read()
-        self.assertIn("SELF_COMPANY_GATE_CAPTURE_TIMEOUT:-900", script)
+        self.assertIn("SELF_COMPANY_GATE_CAPTURE_TIMEOUT:-2400", script)
 
 
 if __name__ == "__main__":
