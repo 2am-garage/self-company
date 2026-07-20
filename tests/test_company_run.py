@@ -137,7 +137,12 @@ class TestGateCaptureTimeout(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         cells = [c.strip() for c in rows[0].strip("|").split("|")]
         # Never "-"/"-" (that means "gate never armed") and never "clean".
-        self.assertEqual(cells[-1], "unresolved")
+        # Diagnostic UNRESOLVED (2026-07-21): the verdict carries a reason
+        # suffix, e.g. "unresolved (capture_timeout)" — still unresolved, never
+        # clean. Assert the prefix so the security intent (not "clean") holds.
+        self.assertTrue(cells[-1].startswith("unresolved"),
+                        f"expected an unresolved verdict, got {cells[-1]!r}")
+        self.assertIn("capture_timeout", cells[-1])
 
     def test_default_timeout_is_bounded_but_generous(self):
         # The default (no override) must still be a real ceiling, not

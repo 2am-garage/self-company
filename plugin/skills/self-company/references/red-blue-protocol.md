@@ -193,6 +193,50 @@ guarantee, and labeled as such so no one over-trusts it.**
 
 ---
 
+## Robustness follow-up (2026-07-21) — tolerant extractor, simpler contract, diagnostic UNRESOLVED
+
+**What happened.** The gate's first real dispatch (the verified-decay task, `3a4a630`) came back
+**UNRESOLVED** even though the work was correct (CEO-verified: functional proof, full suite green,
+code review). Not a security failure — the nonce and pipe-identity design held exactly as designed.
+The problem was the opposite: the real `claude -p` Gibby's genuine verdict did not reproduce the
+strict `@qa-verdict <NONCE> {json}` sentinel closely enough for `_extract_qa_verdict` to recognize
+it, so the supervisor saw no valid verdict and failed closed — a **false negative**, over-blocking
+correct work. Asking an LLM to reproduce a 16-hex-char secret AND hand-build well-formed JSON
+verbatim, as the literal last line of its response, turned out to be brittle in practice.
+
+**The fix — format tolerance, not a security change.** The nonce requirement is completely
+unchanged: a line with a wrong or absent nonce, or a nonce-bearing line on a non-attacker fd, is
+still ignored exactly as before (every pre-existing security test in `tests/test_redblue_gate.py`
+stays green, unmodified). What changed is what's accepted **once the nonce authenticates a line**:
+
+- **Tolerant extractor.** `_extract_qa_verdict` (via `_parse_qa_payload`) now accepts a bare
+  `pass`/`fail` keyword, case-insensitive, tolerant of surrounding whitespace and trailing prose on
+  the same line (`pass`, `PASS`, `fail - two edge cases found`, `pass.`) — the new CANONICAL,
+  easiest-to-emit form — in addition to the original `{"verdict": "pass"|"fail", ...}` JSON object
+  (kept for back-compat). Both forms require the exact nonce first; neither is accepted without it.
+- **Simpler, must-emit contract.** `_verdict_contract` now leads with the literal copy-paste line
+  (the actual nonce substituted in) — `@qa-verdict <NONCE> pass` or `@qa-verdict <NONCE> fail` — as
+  the mandatory, ONLY-thing-read-as-verdict last line of Gibby's response, spelled out verbatim so
+  there's nothing left to compose. The JSON form is still mentioned as an accepted alternative, but
+  is no longer what Gibby is steered toward reproducing exactly.
+- **Diagnostic UNRESOLVED.** A nonce-AUTHENTICATED line whose trailing content is neither recognized
+  form (`_qa_verdict_format_miss`) — the exact shape of the live false negative — is classified
+  DISTINCTLY from "no authenticated line at all," and never silently read as a pass (fail-closed is
+  unchanged). `_unresolved_reason` labels a cap-reached cycle as one of `genuine_fail` (Gibby really
+  failed it), `format_miss` (an authenticated but unparseable line — likely a sentinel-format miss,
+  not a real fail), or `no_verdict` (nothing authenticated was ever captured — most likely a
+  dispatch/harness problem). Surfaced in the supervisor's stderr UNRESOLVED message and folded into
+  the `company-run.sh` ledger's verdict cell (`unresolved (format_miss)`, etc.) so a human/CEO
+  reading a stalled cycle can tell a genuine fail from a format miss at a glance, without re-reading
+  the worker transcripts.
+
+**What did NOT change:** the nonce is still required end to end; pipe-identity attribution,
+first-wins+locking, and the bounded re-loop cap are all untouched. This is purely a
+format-recognition widening on the ALREADY-authenticated channel, not a relaxation of who can
+satisfy the gate.
+
+---
+
 ## Relationship with Memory Pipeline VERIFY
 
 Memory Pipeline B's VERIFY (§3 design) is a "lightweight version" of this adversarial approach: Gibby makes a single attack surface against each memory record — **provenance attack** (can't point back to real source, reject), send back to CAPTURE, discard after `VERIFY_MAX_RETRY=2`. Pipeline A is the full multi-surface, N=3 red/blue adversarial.
@@ -210,3 +254,4 @@ Memory Pipeline B's VERIFY (§3 design) is a "lightweight version" of this adver
 ## Version
 - v2.5: 2026-06-24, red/blue protocol, N=3. Full build pipeline implementation (Bob really writes code, Gibby really attacks) pending later activation; this protocol is its behavioral spec.
 - v2.6: 2026-07-18, Phase 33 finalization (v0.1.19). Verdict nonce + capture timeout added as DEFENSE-IN-DEPTH (they raise the bar but do NOT close forgery/DoS vs. an actively-malicious builder — the nonce leaks via `/proc/<pid>/cmdline` argv, the timeout is escapable via `setsid`; sound fixes = stdin prompt delivery + file-based gate result + OS isolation, documented as future work). The non-builder content-refusal heuristic IS genuinely removed, superseded by Phase 34's structural tool fence. What the gate reliably provides: Gibby can't silently rubber-stamp (re-loop + UNRESOLVED + pipe-identity). See "Finalization pass" above for the honest limits.
+- v2.7: 2026-07-21, robustness follow-up (v0.1.20). Fixes the gate's first live FALSE-NEGATIVE (a correct build came back UNRESOLVED because the real Gibby's genuine verdict didn't reproduce the JSON-only sentinel closely enough). `_extract_qa_verdict` now also accepts a bare `pass`/`fail` keyword after the nonce (still REQUIRED, unchanged); `_verdict_contract` leads with the literal copy-paste keyword line instead of hand-built JSON; a nonce-authenticated-but-unparseable line is classified distinctly (`format_miss`) from no-authenticated-line-at-all (`no_verdict`), surfaced in the UNRESOLVED message and ledger so a human can tell a genuine fail from a format miss. Pure format tolerance on the already-authenticated channel — no security change; every prior security test stays green unmodified. See "Robustness follow-up (2026-07-21)" above.

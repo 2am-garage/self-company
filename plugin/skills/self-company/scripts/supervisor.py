@@ -264,14 +264,104 @@ def _wrap_timeout(cmd, budget, kill_after):
 # and ONLY when immediately followed by the run's matching nonce token.
 _QA_VERDICT_SENTINEL = "@qa-verdict "
 
+# ROBUSTNESS FOLLOW-UP (2026-07-21, first live dispatch — the verified-decay
+# task): the gate's FIRST real cycle returned UNRESOLVED even though Bob's
+# work was correct. Root cause was never the nonce or the pipe-identity
+# design (those held) — it was the STRUCTURED JSON contract itself: asking an
+# LLM to reproduce a 16-hex-char secret AND hand-build well-formed JSON
+# verbatim, as its literal last line, is brittle. The real Gibby's genuine
+# verdict didn't match `@qa-verdict <NONCE> {json}` closely enough for the
+# strict parser, so a CORRECT run was over-blocked as a false negative — the
+# gate failing exactly the way it's supposed to on a forgery attempt, but
+# tripping on its own legitimate user instead.
+#
+# The fix is a TOLERANT extractor, not a weaker one: the nonce requirement is
+# UNCHANGED (still the exact security boundary — a wrong/absent nonce is
+# still rejected outright, same as before). What's now accepted, once the
+# nonce authenticates the line, is a wider set of REAL-WORLD shapes for what
+# comes after it: a bare `pass`/`fail` keyword (case-insensitive, tolerant of
+# trailing punctuation/prose on the same line) — the new CANONICAL,
+# easiest-to-emit form the contract now leads with — or the original JSON
+# object, kept for back-compat. A nonce-authenticated line whose payload is
+# NEITHER of those (the near-miss shape that caused the live false negative)
+# is classified distinctly by `_qa_verdict_format_miss` below — never
+# silently treated as a pass, and still not clean — so a human/CEO reading an
+# UNRESOLVED cycle can tell "Gibby genuinely failed it" from "Gibby answered
+# but the sentinel line didn't parse" (see `_unresolved_reason`).
+_QA_KEYWORD_STRIP = ".,;:!\"'"
+
+
+def _parse_qa_payload(payload):
+    """Parse the trailing content of an ALREADY nonce-authenticated
+    `@qa-verdict <NONCE> ...` line into a verdict dict, or None if neither
+    recognized form is present. Two forms are accepted:
+
+      1. CANONICAL — a bare `pass`/`fail` keyword (case-insensitive) as the
+         first word, with arbitrary trailing prose tolerated on the same
+         line (`pass`, `PASS`, `fail - two edge cases found`, ...). This is
+         the form the contract (`_verdict_contract`) now leads with, since
+         it is the easiest for an LLM to reproduce verbatim.
+      2. LEGACY/STRUCTURED — a JSON object `{"verdict": "pass"|"fail", ...}`,
+         exactly as the pre-2026-07-21 contract required. Still accepted so
+         a model that emits the structured form is not penalized.
+
+    Anything else (empty payload, unrecognized prose, malformed JSON, a JSON
+    value that isn't a dict or lacks a pass/fail `verdict` field) returns
+    None — fail-LOUD-never-fail-open, same discipline as before this
+    tolerance was added."""
+    payload = payload.strip()
+    if not payload:
+        return None
+    first_word = payload.split(None, 1)[0].strip(_QA_KEYWORD_STRIP).lower()
+    if first_word in ("pass", "fail"):
+        return {"verdict": first_word}
+    try:
+        data = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(data, dict) and data.get("verdict") in ("pass", "fail"):
+        return dict(data)
+    return None
+
+
+def _scan_qa_verdict_lines(text, nonce):
+    """Shared line-scanner behind `_extract_qa_verdict` and
+    `_qa_verdict_format_miss`. Yields `(authenticated, parsed)` for every
+    line in `text` that carries the `@qa-verdict` sentinel:
+
+      * `authenticated` — True ONLY when the token immediately after the
+        sentinel matches `nonce` EXACTLY (plain `==`, never a substring or
+        prefix match) — the unchanged security boundary. A falsy `nonce`
+        yields nothing at all (fail-closed, mirrors `_extract_qa_verdict`'s
+        own defensive falsy-nonce handling).
+      * `parsed` — the verdict dict from `_parse_qa_payload`, or None. Only
+        ever attempted when `authenticated` is True — an unauthenticated
+        line's payload is never even parsed, so a wrong/absent nonce can
+        never surface a verdict OR a format-miss diagnostic."""
+    if not nonce:
+        return
+    for ln in str(text).splitlines():
+        s = ln.strip()
+        if not s.startswith(_QA_VERDICT_SENTINEL):
+            continue
+        rest = s[len(_QA_VERDICT_SENTINEL):].strip()
+        parts = rest.split(None, 1)
+        if not parts:
+            continue                       # no token at all -> not authenticated
+        token = parts[0]
+        payload = parts[1] if len(parts) > 1 else ""
+        authenticated = (token == nonce)
+        parsed = _parse_qa_payload(payload) if authenticated else None
+        yield authenticated, parsed
+
 
 def _extract_qa_verdict(text, nonce):
     """Scan `text` (one bare line, or a whole stream-json assistant-text
     block) for the reserved verdict sentinel and return the parsed verdict
-    dict, or None. Fail-LOUD-never-fail-open (spec §3): a line that isn't
-    well-formed `@qa-verdict <NONCE> {json-with-verdict:pass|fail}` yields
-    None (the caller treats None as NOT clean), never a crash. Only a dict
-    whose `verdict` is exactly "pass"/"fail" is accepted.
+    dict, or None. Fail-LOUD-never-fail-open (spec §3): a line that isn't a
+    nonce-authenticated `@qa-verdict <NONCE> pass|fail` (or the legacy
+    `{json}` form) yields None (the caller treats None as NOT clean), never a
+    crash. Only a dict whose `verdict` is exactly "pass"/"fail" is accepted.
 
     `nonce` is the run's secret verdict nonce (see the FINALIZATION note
     above) — the token immediately after the sentinel MUST match it EXACTLY
@@ -283,27 +373,36 @@ def _extract_qa_verdict(text, nonce):
     timing side-channel buys an attacker nothing here — and plain `==` can
     never raise on the attacker-controlled (possibly non-ASCII) token, unlike
     `secrets.compare_digest`, which would (this parser must never crash the
-    supervisor's select loop on hostile input)."""
-    if not nonce:
-        return None
-    for ln in str(text).splitlines():
-        s = ln.strip()
-        if not s.startswith(_QA_VERDICT_SENTINEL):
-            continue
-        rest = s[len(_QA_VERDICT_SENTINEL):].strip()
-        parts = rest.split(None, 1)
-        if len(parts) != 2:
-            continue                       # no nonce token before the JSON
-        token, payload = parts
-        if token != nonce:
-            continue                       # wrong/absent nonce -> ignored
-        try:
-            data = json.loads(payload)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(data, dict) and data.get("verdict") in ("pass", "fail"):
-            return dict(data)
+    supervisor's select loop on hostile input).
+
+    2026-07-21 robustness follow-up: once the nonce authenticates a line, the
+    trailing content is parsed by `_parse_qa_payload`, which now ALSO accepts
+    a bare `pass`/`fail` keyword — not just the original JSON object. This is
+    a FORMAT tolerance, not a security change: an unauthenticated line is
+    still rejected exactly as before, and a nonce-authenticated line that
+    still doesn't parse to pass/fail still returns None here (see
+    `_qa_verdict_format_miss` for surfacing THAT case distinctly, so it never
+    silently reads as a pass)."""
+    for authenticated, parsed in _scan_qa_verdict_lines(text, nonce):
+        if authenticated and parsed is not None:
+            return parsed
     return None
+
+
+def _qa_verdict_format_miss(text, nonce):
+    """True iff `text` contains a line carrying the sentinel with the EXACT
+    matching nonce (proof the line is genuinely the attacker's own — the
+    same authentication `_extract_qa_verdict` requires) whose trailing
+    content did NOT parse into a recognized pass/fail form. This is the
+    diagnostic signal for item 3: an AUTHENTICATED near-miss — Gibby was
+    genuinely talking to us on its own fd, it just didn't land in a shape the
+    parser recognizes — as opposed to no authenticated line existing at all
+    (missing sentinel, or one with a wrong/absent nonce, which this returns
+    False for). Never treated as a verdict itself (fail-closed is
+    unchanged); used only to label an UNRESOLVED cycle's likely cause for a
+    human/CEO (`_unresolved_reason`)."""
+    return any(authenticated and parsed is None
+               for authenticated, parsed in _scan_qa_verdict_lines(text, nonce))
 
 
 def classify_verdict(raw):
@@ -322,6 +421,48 @@ def classify_verdict(raw):
     return result
 
 
+def _unresolved_reason(verdict, format_miss):
+    """Item 3 — WHY a gate round is not clean, for the diagnostic UNRESOLVED
+    surfacing (`_dispatch_redblue`'s cap-reached message + ledger). `verdict`
+    is a `classify_verdict()` result; `format_miss` is the attacker Worker's
+    `nonce_format_miss` flag for that same round. Three distinct outcomes,
+    so a human/CEO reading a stalled cycle can tell them apart at a glance:
+
+      'genuine_fail' — Gibby emitted a valid nonce-authenticated FAIL. The
+                        work genuinely did not clear verification.
+      'format_miss'  — Gibby's own fd carried a nonce-AUTHENTICATED line
+                        (proving it's genuinely Gibby's, not planted), but
+                        its content wasn't a recognized pass/fail form. This
+                        is the live 2026-07-21 false-negative's exact shape —
+                        almost certainly a sentinel-format miss, not a real
+                        finding.
+      'no_verdict'   — no nonce-authenticated line was captured on Gibby's fd
+                        AT ALL (no sentinel, or one with a wrong/absent
+                        nonce). Most likely a dispatch/harness problem.
+
+    Never auto-passes on either miss case — fail-closed is unchanged; this
+    only labels WHY the gate didn't clear."""
+    if verdict.get("verdict") == "fail":
+        return "genuine_fail"
+    if format_miss:
+        return "format_miss"
+    return "no_verdict"
+
+
+# Human-facing detail for each `_unresolved_reason` value — shared by main()'s
+# stderr message (below) and available to any other caller that wants the
+# same wording (e.g. company-run.sh's ledger, which pulls `reason` straight
+# out of the `@redblue-gate {json}` line rather than re-deriving text).
+_UNRESOLVED_REASON_TEXT = {
+    "genuine_fail": "Gibby genuinely attacked it and reported FAIL",
+    "format_miss": "Gibby's fd carried a nonce-authenticated line that wasn't "
+                    "a recognized pass/fail form — likely a sentinel-FORMAT "
+                    "miss, not a real fail",
+    "no_verdict": "no nonce-authenticated verdict was ever captured on "
+                   "Gibby's fd (no sentinel, or one with a wrong/absent nonce)",
+}
+
+
 def _verdict_contract(nonce):
     """The output-contract clause Gibby's dispatch prompt gains, composed via
     the SAME `prompt_builder.output_contract` every other dispatch contract
@@ -336,23 +477,43 @@ def _verdict_contract(nonce):
     quote from somewhere Bob could plant it (a comment, a file it cats while
     investigating). Returns None if prompt_builder couldn't be imported
     (real_command already degrades to a plain prompt then; the gate simply
-    appends nothing)."""
+    appends nothing).
+
+    2026-07-21 robustness follow-up (the gate's first live false negative —
+    a correct build came back UNRESOLVED because the real Gibby's genuine
+    verdict didn't reproduce the old JSON-only sentinel closely enough): this
+    contract now LEADS with the simplest possible copy-paste line — a bare
+    `pass`/`fail` keyword right after the nonce — spelled out verbatim with
+    the actual nonce substituted in, so there is nothing left to compose or
+    get subtly wrong. The nonce itself is UNCHANGED and still MANDATORY —
+    this is a format simplification, not a security relaxation. The
+    structured JSON shape is still mentioned as an accepted fallback
+    (`_extract_qa_verdict` parses both), but is no longer what Gibby is
+    steered toward reproducing exactly."""
     if _pb is None:                                        # pragma: no cover
         return None
-    where = "your OWN stdout, printed as the LAST thing you output"
+    pass_line = f"@qa-verdict {nonce} pass"
+    fail_line = f"@qa-verdict {nonce} fail"
+    where = "your OWN stdout"
     fmt = (
-        f'a SINGLE line beginning with the exact sentinel `@qa-verdict {nonce} ` '
-        f'— the token `{nonce}` right after the sentinel is this run\'s secret '
-        f'verdict nonce; you MUST reproduce it EXACTLY as given, immediately '
-        f'after the sentinel and before the JSON, or your verdict will NOT be '
-        f'accepted (this proves the line is genuinely your own conclusion, not '
-        f'text quoted from a file or comment) — followed by one JSON object '
-        '{"verdict": "pass"|"fail", "target": "...", "checked": ["attack '
-        'surface 1", "..."]} — verdict is "pass" ONLY if you genuinely '
-        'attacked this and found nothing. This line is MANDATORY; the round '
-        f'is not complete without it. Do NOT write it to any file — print it '
-        f'on stdout. Never mention or quote the nonce `{nonce}` anywhere else '
-        f'in your output.'
+        f'EXACTLY ONE line, copied verbatim, as the VERY LAST thing you '
+        f'output — nothing after it. If you genuinely attacked this and '
+        f'found nothing, that line is literally:\n\n'
+        f'    {pass_line}\n\n'
+        f'If you found a genuine problem, that line is literally:\n\n'
+        f'    {fail_line}\n\n'
+        f'`{nonce}` is this run\'s secret verdict nonce — copy it EXACTLY, '
+        f'character for character, right after `@qa-verdict `; a wrong or '
+        f'missing nonce means your verdict is NOT accepted (this proves the '
+        f'line is genuinely your own conclusion, not text quoted from a '
+        f'file or comment). This line is MANDATORY — the round is not '
+        f'complete without it, and it is the ONLY line read as your '
+        f'verdict; nothing else you write is parsed for one. Do NOT write '
+        f'it to any file — print it on stdout. Never mention or quote the '
+        f'nonce `{nonce}` anywhere else in your output. (A structured form, '
+        f'`@qa-verdict {nonce} {{"verdict": "pass"|"fail", "checked": '
+        f'[...]}}`, is also accepted if you prefer it, but the plain '
+        f'pass/fail line above is simpler and preferred.)'
     )
     return _pb.output_contract(where, fmt)
 
@@ -769,6 +930,13 @@ class Worker:
         # bare pipe-identity check alone did not.
         self.verdict_nonce = verdict_nonce
         self.verdict = None           # the parsed verdict dict, once seen on this fd
+        # Item 3 (2026-07-21 robustness follow-up): True once a nonce-
+        # AUTHENTICATED `@qa-verdict` line has been seen on this fd whose
+        # content did NOT parse into pass/fail (see `_qa_verdict_format_miss`).
+        # Diagnostic only — never treated as a verdict, never clears once set
+        # (one authenticated near-miss is enough to tell a human "Gibby WAS
+        # talking to us, just not in a recognized shape").
+        self.nonce_format_miss = False
         # Phase 33 FIX 1 (Finding 2 — echo/last-wins forgery): the verdict is
         # FIRST-WINS and LOCKED. Once a well-formed sentinel is recorded, a
         # LATER sentinel on this same fd is ignored — so if Gibby's transcript
@@ -858,7 +1026,7 @@ class Worker:
         # worker's fd it is NOT consumed here — it falls through to a plain log
         # line, so Bob printing this sentinel can never satisfy the gate.
         if self.capture_verdict and line.startswith(_QA_VERDICT_SENTINEL):
-            self._record_verdict(_extract_qa_verdict(line, self.verdict_nonce))
+            self._capture_verdict_line(line)
             return
         if line.startswith("@status "):
             self.phase = line[len("@status "):].strip()
@@ -904,7 +1072,7 @@ class Worker:
                     # never scanned for a verdict. FIRST-wins (FIX 1): a later
                     # mid-stream sentinel can't overwrite the first.
                     if self.capture_verdict:
-                        self._record_verdict(_extract_qa_verdict(text, self.verdict_nonce))
+                        self._capture_verdict_line(text)
                     matches = _EMBEDDED_STATUS_RE.findall(text)
                     if matches:
                         word = matches[-1].strip()
@@ -932,12 +1100,27 @@ class Worker:
             if self.capture_verdict:
                 rtext = event.get("result")
                 if isinstance(rtext, str):
-                    self._record_verdict(_extract_qa_verdict(rtext, self.verdict_nonce),
-                                          authoritative=True)
+                    self._capture_verdict_line(rtext, authoritative=True)
         # else: "system" / "user" / any other recognized JSON shape — valid
         # stream-json, no new phase information; consumed without touching
         # self.last (raw JSON is never shown as the human-readable detail line).
         return True
+
+    def _capture_verdict_line(self, text, authoritative=False):
+        """The ONE call site (Item 3, 2026-07-21 follow-up) all three
+        verdict-capture points (bare sentinel line, stream-json assistant
+        text, the final `result` event's text) now go through, so the
+        nonce-authenticated-but-unrecognized-format diagnostic is derived
+        from the EXACT SAME scan `_extract_qa_verdict` uses, never a second
+        hand-rolled check that could drift from it. Extracts + records a
+        verdict as before, AND separately notes (`nonce_format_miss`) when
+        `text` carried a line the nonce authenticated but whose content
+        wasn't a recognized pass/fail form — diagnostic only, never a
+        substitute for a genuine verdict."""
+        found = _extract_qa_verdict(text, self.verdict_nonce)
+        if found is None and _qa_verdict_format_miss(text, self.verdict_nonce):
+            self.nonce_format_miss = True
+        self._record_verdict(found, authoritative=authoritative)
 
     def _record_verdict(self, found, authoritative=False):
         """FIX 1 (Finding 2): record a captured verdict FIRST-wins + LOCKED.
@@ -1270,7 +1453,14 @@ class Supervisor:
         and mirrors `run_id`'s own once-per-run scope) and threaded through
         every round's `_dispatch_once` call as `verdict_nonce` — only the
         attacker Worker ever receives it, so only a sentinel on Gibby's own fd
-        carrying THIS exact nonce can ever satisfy the gate."""
+        carrying THIS exact nonce can ever satisfy the gate.
+
+        Item 3 (2026-07-21 robustness follow-up): each round's verdict is
+        also tagged with the attacker Worker's `nonce_format_miss` flag, so
+        the cap-reached `self.last_gate` can carry a `reason`
+        (`_unresolved_reason`) distinguishing a GENUINE fail from Gibby never
+        landing a recognizable pass/fail on its authenticated fd at all —
+        surfaced to `main()`'s UNRESOLVED message and the ledger."""
         max_rounds = _redblue_max_rounds()
         other = {k: v for k, v in assignments.items()
                  if k not in (builder_id, attacker_id)}
@@ -1307,7 +1497,8 @@ class Supervisor:
             attacker_worker = workers.get(attacker_id)
             raw = attacker_worker.verdict if attacker_worker else None
             verdict = classify_verdict(raw)
-            self._emit_gate_round(run_id, round_no, verdict)
+            format_miss = bool(attacker_worker and attacker_worker.nonce_format_miss)
+            self._emit_gate_round(run_id, round_no, verdict, format_miss)
             if verdict["clean"]:
                 self.last_gate = {"run_id": run_id, "rounds": rounds_used,
                                   "verdict": "clean", "builder": builder_id,
@@ -1318,17 +1509,25 @@ class Supervisor:
         # (spec §2/§3). The trusted record is `self.last_gate` (in-process) +
         # the `@redblue-gate` line main() prints on the supervisor's own
         # stderr; there is NO shared-fs marker a worker could forge (FIX 2).
+        # Item 3: `reason` is derived from the LAST round's verdict/format-miss
+        # pair — distinguishing a genuine fail from a sentinel-format miss
+        # from Gibby never producing an authenticated verdict at all, so
+        # `main()`'s UNRESOLVED message and the ledger can tell a human which
+        # one actually happened.
         self.last_gate = {"run_id": run_id, "rounds": rounds_used,
-                          "verdict": "unresolved", "builder": builder_id,
+                          "verdict": "unresolved",
+                          "reason": _unresolved_reason(verdict, format_miss),
+                          "builder": builder_id,
                           "attacker": attacker_id, "auto_injected": auto_injected}
         return workers
 
-    def _emit_gate_round(self, run_id, round_no, verdict):
+    def _emit_gate_round(self, run_id, round_no, verdict, format_miss=False):
         if self.event_log is not None:
             self.event_log.append({
                 "ts": datetime.now().replace(microsecond=0).isoformat(),
                 "kind": "redblue_round", "run_id": run_id, "round": round_no,
                 "verdict": verdict.get("verdict"), "clean": verdict.get("clean"),
+                "format_miss": format_miss,
             })
 
 
@@ -1362,9 +1561,12 @@ def main(argv=None):
         verdict = gate.get("verdict") if gate else None
         # Fail LOUD, never silent-done.
         if verdict == "unresolved":
-            print(f"[supervisor] UNRESOLVED: {gate['builder']}/{gate['attacker']} "
-                  f"did not clear verification in {gate['rounds']} round(s) "
-                  f"(run_id={gate['run_id']})", file=sys.stderr)
+            reason = gate.get("reason", "no_verdict")
+            detail = _UNRESOLVED_REASON_TEXT.get(reason, reason)
+            print(f"[supervisor] UNRESOLVED ({reason}): {gate['builder']}/"
+                  f"{gate['attacker']} did not clear verification in "
+                  f"{gate['rounds']} round(s) — {detail} (run_id={gate['run_id']})",
+                  file=sys.stderr)
             return 1
         return 0
     ap.print_help()

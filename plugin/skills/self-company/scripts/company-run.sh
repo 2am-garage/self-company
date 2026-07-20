@@ -313,9 +313,19 @@ task_short="${TASK:0:40}"; task_cell="${task_short//|//}"
 # never the "-"/"-" placeholder (which means "gate never armed"; this cycle's
 # gate DID arm, its outcome is simply unknown because the capture was killed)
 # and never a value borrowed from a stale $gate_line (there isn't one).
+#
+# Item 3 (2026-07-21 robustness follow-up): an "unresolved" verdict now
+# carries a `reason` from the supervisor's own `_unresolved_reason` —
+# 'genuine_fail' (Gibby really failed it) vs 'format_miss' (an authenticated
+# but unparseable verdict line — likely a sentinel-format miss, not a real
+# fail) vs 'no_verdict' (no authenticated line at all). Folded into the SAME
+# verdict cell as "unresolved (reason)" rather than a new table column, so an
+# existing local ledger file (its header written once, on first run) never
+# goes out of sync with a later row that has one more column than the header
+# it already committed to.
 gate_rounds="-"; gate_verdict="-"
 if $gate_capture_timed_out; then
-  gate_rounds="timeout"; gate_verdict="unresolved"
+  gate_rounds="timeout"; gate_verdict="unresolved (capture_timeout)"
 elif [[ -n "$gate_line" ]]; then
   gate_rounds="$(printf '%s' "$gate_line" | python3 -c "
 import json, sys
@@ -327,7 +337,10 @@ except Exception:
   gate_verdict="$(printf '%s' "$gate_line" | python3 -c "
 import json, sys
 try:
-    print(json.load(sys.stdin).get('verdict', '-'))
+    d = json.load(sys.stdin)
+    v = d.get('verdict', '-')
+    r = d.get('reason')
+    print(f'{v} ({r})' if v == 'unresolved' and r else v)
 except Exception:
     print('-')
 " 2>/dev/null || echo '-')"

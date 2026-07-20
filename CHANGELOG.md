@@ -10,6 +10,30 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.20] — 2026-07-21: Robustness follow-up — tolerant verdict extractor, simpler contract, diagnostic UNRESOLVED
+
+Fixes the gate's first live FALSE-NEGATIVE: on its first real dispatch (the verified-decay task,
+`3a4a630`) the gate returned UNRESOLVED even though the work was correct — the real `claude -p`
+Gibby's genuine verdict didn't reproduce the strict `@qa-verdict <NONCE> {json}` sentinel closely
+enough. This is a FORMAT-robustness fix, not a security change: the nonce stays REQUIRED end to
+end, and every prior security test in `tests/test_redblue_gate.py` stays green unmodified.
+
+- `_extract_qa_verdict` (via new `_parse_qa_payload`) now also accepts a bare `pass`/`fail`
+  keyword — case-insensitive, tolerant of surrounding whitespace and trailing prose — after the
+  correct nonce, alongside the original JSON form (kept for back-compat). A wrong/absent nonce is
+  still rejected identically to before.
+- `_verdict_contract` now leads with the literal, copy-paste `@qa-verdict <NONCE> pass`/`fail` line
+  (the actual nonce substituted in) as the mandatory, only-thing-read last line — simpler for an
+  LLM to reproduce verbatim than hand-building JSON. The JSON form is still mentioned as an accepted
+  fallback.
+- New diagnostic: a nonce-authenticated line whose content isn't a recognized pass/fail form
+  (`_qa_verdict_format_miss`, tracked as `Worker.nonce_format_miss`) is classified distinctly from
+  no authenticated line at all — never silently a pass. `_unresolved_reason` labels a cap-reached
+  cycle `genuine_fail` / `format_miss` / `no_verdict`, surfaced in the supervisor's UNRESOLVED
+  stderr message and folded into `company-run.sh`'s ledger verdict cell.
+- +37 tests across `tests/test_redblue_gate.py` (tolerant-form acceptance/rejection, format-miss
+  classification, diagnostic UNRESOLVED reasons, the new contract text).
+
 ## [0.1.19] — 2026-07-18: Phase 33 finalization — verdict nonce + capture timeout (DEFENSE-IN-DEPTH), heuristic removed
 
 Gibby's adversarial pass proved the nonce and timeout **raise the bar but do NOT close**

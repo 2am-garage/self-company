@@ -367,7 +367,11 @@ class TestRedBlueUnresolved(Base):
         self.assertEqual(len(rows), 1)
         cells = [c.strip() for c in rows[0].strip("|").split("|")]
         self.assertEqual(cells[-2], "2")            # cap respected exactly
-        self.assertEqual(cells[-1], "unresolved")
+        # Diagnostic UNRESOLVED (2026-07-21): "unresolved (<reason>)" — still
+        # unresolved, rc stays non-zero; the reason distinguishes a real fail
+        # from a format-miss no-verdict.
+        self.assertTrue(cells[-1].startswith("unresolved"),
+                        f"expected unresolved, got {cells[-1]!r}")
 
 
 def _fake_claude_forges_ledger_marker(bindir):
@@ -424,7 +428,10 @@ class TestLedgerForgeryResisted(Base):
         rows = [ln for ln in body.splitlines() if ln.startswith("| 20")]
         self.assertEqual(len(rows), 1)
         cells = [c.strip() for c in rows[0].strip("|").split("|")]
-        self.assertEqual(cells[-1], "unresolved")   # NOT the forged "clean"
+        # Diagnostic UNRESOLVED (2026-07-21) adds a reason suffix, e.g.
+        # "unresolved (no_verdict)" — still unresolved, NEVER the forged "clean".
+        self.assertTrue(cells[-1].startswith("unresolved"),
+                        f"expected unresolved (not the forged 'clean'), got {cells[-1]!r}")
 
 
 class TestNonBuilderMutationWorkNoLongerRefused(Base):

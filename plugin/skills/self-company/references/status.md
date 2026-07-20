@@ -1,5 +1,36 @@
 # Completion Status
 
+### v0.1.20 Robustness follow-up — tolerant verdict extractor + simpler contract + diagnostic UNRESOLVED (2026-07-21)
+
+_Fixes the gate's first live FALSE-NEGATIVE (see the v0.1.19 entry below): the verified-decay task
+came back UNRESOLVED even though the work was correct, because the real Gibby's genuine verdict
+didn't reproduce the JSON-only sentinel closely enough. This is a FORMAT-robustness change, not a
+security change — the nonce stays REQUIRED end to end and every prior security test
+(`tests/test_redblue_gate.py`) stays green unmodified._
+
+- ✅ **Tolerant extractor — the nonce requirement is unchanged, what's accepted after it widened.**
+  `_extract_qa_verdict` (via the new `_parse_qa_payload`) now accepts a bare `pass`/`fail` keyword,
+  case-insensitive, tolerant of surrounding whitespace and trailing prose on the same line (`pass`,
+  `PASS`, `fail - two edge cases found`), alongside the original `{"verdict": "pass"|"fail", ...}`
+  JSON object (kept for back-compat). Both forms still require the token immediately after the
+  sentinel to match the run's secret nonce EXACTLY — a wrong/absent nonce, or a nonce-bearing line
+  on a non-attacker fd, is still rejected outright, identical to before this change.
+- ✅ **Simpler, must-emit contract.** `_verdict_contract` now leads with the literal, copy-paste
+  line — the actual nonce substituted in — `@qa-verdict <NONCE> pass` / `@qa-verdict <NONCE> fail`
+  — spelled out as the mandatory, ONLY-thing-read-as-verdict last line of Gibby's response, so there
+  is nothing left for the model to compose or get subtly wrong. The JSON form is still mentioned as
+  an accepted fallback, but Gibby is no longer steered toward reproducing it exactly.
+- ✅ **Diagnostic UNRESOLVED — distinguishes a genuine fail from a format miss from no verdict at
+  all.** A nonce-AUTHENTICATED line whose content isn't a recognized pass/fail form
+  (`_qa_verdict_format_miss`, tracked per-worker as `Worker.nonce_format_miss`) — the exact shape of
+  the live false negative — is classified DISTINCTLY, never silently read as a pass (fail-closed is
+  unchanged). `_unresolved_reason` labels a cap-reached cycle `genuine_fail` / `format_miss` /
+  `no_verdict`; surfaced in `main()`'s stderr UNRESOLVED message (`[supervisor] UNRESOLVED
+  (format_miss): ...`) and folded into `company-run.sh`'s ledger verdict cell (`unresolved
+  (format_miss)`), so a human/CEO reading a stalled cycle can tell them apart without re-reading
+  worker transcripts.
+- Full detail: `references/red-blue-protocol.md` "Robustness follow-up (2026-07-21)".
+
 ### v0.1.19 Phase 33 finalization — verdict nonce + capture timeout (DEFENSE-IN-DEPTH), heuristic removed (2026-07-18)
 
 _Lands `phase33-verification-gate` on `main`. Gibby's adversarial pass proved the nonce and timeout
@@ -48,15 +79,16 @@ and — the phase's actual purpose — Gibby can no longer silently rubber-stamp
   can. Closing (a)/(b)/(c) needs stdin prompt delivery + a file-based gate result + ultimately
   OS-level uid/namespace isolation between supervisor and workers. **Shipped as defense-in-depth,
   not a security guarantee, and labeled as such so no one over-trusts it.**
-- ⚠️ **Live-observed FALSE-NEGATIVE (2026-07-21, the gate's first real dispatch).** The
-  verified-decay task (`3a4a630`) came back **UNRESOLVED** even though the work was correct
-  (CEO-verified: functional proof + full suite green + code review) — the real `claude -p` Gibby
-  did not emit the exact `@qa-verdict <nonce> {json}` machine sentinel, so the supervisor saw no
-  valid verdict and failed closed. So the gate's practical failure mode is BOTH ways: it can
+- ⚠️ **Live-observed FALSE-NEGATIVE (2026-07-21, the gate's first real dispatch) — FIXED in
+  v0.1.20.** The verified-decay task (`3a4a630`) came back **UNRESOLVED** even though the work was
+  correct (CEO-verified: functional proof + full suite green + code review) — the real `claude -p`
+  Gibby did not emit the exact `@qa-verdict <nonce> {json}` machine sentinel, so the supervisor saw
+  no valid verdict and failed closed. So the gate's practical failure mode is BOTH ways: it can
   over-block legitimate work (an LLM that doesn't hit the exact sentinel format), not just
-  under-block a malicious builder. A robust fix wants a tolerant verdict extractor and/or a
-  clearer must-emit contract, tracked with the sound-fix follow-ups. Until then the CEO green-gate
-  (human-in-loop) remains the real enforcement; the automated gate is advisory defense-in-depth.
+  under-block a malicious builder. Addressed by the v0.1.20 robustness follow-up (tolerant
+  extractor + simpler keyword contract + diagnostic UNRESOLVED, see the entry above) — the nonce
+  itself is unchanged, only the accepted format after it widened. The CEO green-gate (human-in-loop)
+  remains the backstop regardless.
 - Full detail + design rationale + the sound-fix directions: `references/red-blue-protocol.md`
   "Finalization pass" section.
 
