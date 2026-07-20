@@ -26,7 +26,8 @@ def mem(**kw):
 
 
 DEF = dict(hl_base=7.0, hl_growth=0.5, l0_drop_threshold=0.25,
-           l1_archive_threshold=0.15, l1_demote_rc=2, l0_to_l1_rc=2, l1_to_l2_rc=4)
+           l1_archive_threshold=0.15, l1_demote_rc=2, l0_to_l1_rc=2, l1_to_l2_rc=4,
+           verified_hl_bonus=1.5)
 
 
 def classify(m, now="2026-06-15"):
@@ -53,6 +54,68 @@ class TestDecayMath(unittest.TestCase):
     def test_rc_below_one_treated_as_one(self):
         self.assertEqual(decay.compute_decay_score(7.0, 0, 7.0, 0.5),
                          decay.compute_decay_score(7.0, 1, 7.0, 0.5))
+
+    def test_verified_memory_outlives_equal_rc_unverified(self):
+        # A verified memory with the same age/rc as an unverified one decays slower.
+        age, rc = 7.0, 1  # One half-life
+        unverified = decay.compute_decay_score(age, rc, 7.0, 0.5,
+                                               verified_date=None, verified_by=None,
+                                               verified_hl_bonus=1.5)
+        verified = decay.compute_decay_score(age, rc, 7.0, 0.5,
+                                             verified_date="2026-06-20",
+                                             verified_by="Gibby",
+                                             verified_hl_bonus=1.5)
+        self.assertEqual(unverified, 0.5)  # standard decay
+        self.assertGreater(verified, 0.5)  # slower decay due to longer half-life
+        self.assertAlmostEqual(verified, 0.5 ** (age / (7.0 * 1.5)), places=6)
+
+    def test_absent_verified_fields_byte_identical_to_baseline(self):
+        # Missing/None verified fields degrade cleanly: score is identical to
+        # the unbonus case. Test all absence patterns: both missing, only date,
+        # only by, both present but bonus=1.0 (default).
+        baseline = decay.compute_decay_score(7.0, 1, 7.0, 0.5)
+        both_absent = decay.compute_decay_score(7.0, 1, 7.0, 0.5,
+                                                verified_date=None,
+                                                verified_by=None,
+                                                verified_hl_bonus=1.5)
+        only_date = decay.compute_decay_score(7.0, 1, 7.0, 0.5,
+                                              verified_date="2026-06-20",
+                                              verified_by=None,
+                                              verified_hl_bonus=1.5)
+        only_by = decay.compute_decay_score(7.0, 1, 7.0, 0.5,
+                                            verified_date=None,
+                                            verified_by="Gibby",
+                                            verified_hl_bonus=1.5)
+        malformed_date = decay.compute_decay_score(7.0, 1, 7.0, 0.5,
+                                                   verified_date="not-a-date",
+                                                   verified_by="Gibby",
+                                                   verified_hl_bonus=1.5)
+        self.assertEqual(baseline, both_absent)
+        self.assertEqual(baseline, only_date)
+        self.assertEqual(baseline, only_by)
+        self.assertEqual(baseline, malformed_date)
+
+    def test_verified_bonus_is_policy_tunable(self):
+        # The bonus multiplier is a parameter; different values produce
+        # different decay curves. Test a few bonus values.
+        age, rc = 5.0, 1
+        bonus_1_0 = decay.compute_decay_score(age, rc, 7.0, 0.5,
+                                              verified_date="2026-06-20",
+                                              verified_by="Gibby",
+                                              verified_hl_bonus=1.0)
+        bonus_1_5 = decay.compute_decay_score(age, rc, 7.0, 0.5,
+                                              verified_date="2026-06-20",
+                                              verified_by="Gibby",
+                                              verified_hl_bonus=1.5)
+        bonus_2_0 = decay.compute_decay_score(age, rc, 7.0, 0.5,
+                                              verified_date="2026-06-20",
+                                              verified_by="Gibby",
+                                              verified_hl_bonus=2.0)
+        self.assertEqual(bonus_1_0, 0.5 ** (age / 7.0))
+        self.assertEqual(bonus_1_5, 0.5 ** (age / (7.0 * 1.5)))
+        self.assertEqual(bonus_2_0, 0.5 ** (age / (7.0 * 2.0)))
+        self.assertGreater(bonus_1_5, bonus_1_0)
+        self.assertGreater(bonus_2_0, bonus_1_5)
 
 
 class TestClassify(unittest.TestCase):
@@ -131,6 +194,25 @@ class TestClassify(unittest.TestCase):
         action, info = classify(mem(last_reinforced="not-a-date"))
         self.assertEqual(action, "keep")
         self.assertIsNone(info["decay_score"])
+
+    def test_verified_memory_decay_score_differs_from_unverified(self):
+        # Verify that when verified_date/verified_by are present, the decay
+        # score computed is strictly greater than the baseline (assuming
+        # bonus > 1.0, which is the sane default).
+        age_days = 5.0
+        m = mem(last_reinforced="2026-06-10", verified_date="2026-06-12",
+                verified_by="Gibby")
+        action_v, info_v = classify(m, now="2026-06-15")
+
+        # Recompute without verification fields to get baseline.
+        m_unv = mem(last_reinforced="2026-06-10", verified_date=None,
+                    verified_by=None)
+        action_u, info_u = classify(m_unv, now="2026-06-15")
+
+        # Both are kept, but verified decays slower (higher score).
+        self.assertEqual(action_v, "keep")
+        self.assertEqual(action_u, "keep")
+        self.assertGreater(info_v["decay_score"], info_u["decay_score"])
 
 
 class TestApplyDrop(unittest.TestCase):

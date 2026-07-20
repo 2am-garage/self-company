@@ -86,6 +86,7 @@ DEFAULT_L1_ARCHIVE_THRESHOLD = 0.15
 DEFAULT_L1_DEMOTE_RC = 2
 DEFAULT_L0_TO_L1_RC = 2
 DEFAULT_L1_TO_L2_RC = 4
+DEFAULT_VERIFIED_HL_BONUS = 1.5
 # Reap grace window: an archived/defunct file untouched for this many days
 # (since the LATER of last_reinforced / invalid_at — a tombstone stays
 # recoverable for the full grace window from the moment it was invalidated)
@@ -292,11 +293,20 @@ def half_life(reinforce_count: int, hl_base: float, hl_growth: float) -> float:
 
 
 def compute_decay_score(age_days: float, reinforce_count: int,
-                       hl_base: float, hl_growth: float) -> float:
+                       hl_base: float, hl_growth: float,
+                       verified_date: Optional[str] = None,
+                       verified_by: Optional[str] = None,
+                       verified_hl_bonus: float = 1.0) -> float:
     """
     Compute decay_score using exponential decay.
 
     decay_score = 0.5 ** (age_days / half_life(rc))
+
+    If verified_date and verified_by are both present and well-formed, applies
+    a half-life bonus: half_life *= verified_hl_bonus (default 1.0 = no bonus).
+    Degrades cleanly if absent or malformed — the bonus is never applied when
+    either field is None/empty/unparseable.
+
     Clamps to [0.0, 1.0].
     """
     if reinforce_count < 1:
@@ -305,6 +315,11 @@ def compute_decay_score(age_days: float, reinforce_count: int,
     hl = half_life(reinforce_count, hl_base, hl_growth)
     if hl <= 0:
         return 0.0
+
+    # Apply verified bonus only when BOTH fields present and valid
+    if verified_date and verified_by:
+        if parse_date(verified_date) is not None:
+            hl *= verified_hl_bonus
 
     score = 0.5 ** (age_days / hl)
     return max(0.0, min(1.0, score))
@@ -316,7 +331,8 @@ def classify_record(mem: Dict[str, Any], now: datetime,
                    l1_archive_threshold: float,
                    l1_demote_rc: int,
                    l0_to_l1_rc: int,
-                   l1_to_l2_rc: int) -> Tuple[str, Dict[str, Any]]:
+                   l1_to_l2_rc: int,
+                   verified_hl_bonus: float = 1.0) -> Tuple[str, Dict[str, Any]]:
     """
     Classify a memory record and compute decay info.
 
@@ -356,8 +372,13 @@ def classify_record(mem: Dict[str, Any], now: datetime,
     rc = mem.get("reinforce_count", 1)
     info["reinforce_count"] = rc
 
-    # Compute decay_score
-    decay = compute_decay_score(age, rc, hl_base, hl_growth)
+    # Compute decay_score with verified bonus if fields present
+    decay = compute_decay_score(
+        age, rc, hl_base, hl_growth,
+        verified_date=mem.get("verified_date"),
+        verified_by=mem.get("verified_by"),
+        verified_hl_bonus=verified_hl_bonus
+    )
     info["decay_score"] = decay
 
     # L2 never decays
@@ -616,7 +637,8 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                    reap_grace_days: int,
                    apply: bool,
                    defer_reap: bool = False,
-                   company_dir: str = ".company") -> Dict[str, Any]:
+                   company_dir: str = ".company",
+                   verified_hl_bonus: float = 1.0) -> Dict[str, Any]:
     """
     Scan memory_dir recursively for .md files, compute decay, optionally apply actions.
 
@@ -773,7 +795,8 @@ def scan_memory_dir(memory_dir: Path, now: datetime,
                 l1_archive_threshold,
                 l1_demote_rc,
                 l0_to_l1_rc,
-                l1_to_l2_rc
+                l1_to_l2_rc,
+                verified_hl_bonus=verified_hl_bonus
             )
 
             # Blessed-charter guard (Phase 4, Item 1): a charter-class memory
@@ -913,6 +936,7 @@ def main():
         "L1_TO_L2_RC": DEFAULT_L1_TO_L2_RC,
         "REAP_GRACE_DAYS": DEFAULT_REAP_GRACE_DAYS,
         "OFFLINE_GAP_DAYS": DEFAULT_OFFLINE_GAP_DAYS,
+        "VERIFIED_HL_BONUS": DEFAULT_VERIFIED_HL_BONUS,
     }
     if _resolve_config is not None:
         values, sources = _resolve_config(defaults, args.config)
@@ -929,6 +953,7 @@ def main():
     l1_to_l2_rc = values["L1_TO_L2_RC"]
     reap_grace_days = values["REAP_GRACE_DAYS"]
     offline_gap_days = values["OFFLINE_GAP_DAYS"]
+    verified_hl_bonus = values["VERIFIED_HL_BONUS"]
 
     # P3: if a policy file was given and exists but some constant fell back to a
     # default, say so on stderr so tuning is observable instead of silent.
@@ -982,7 +1007,8 @@ def main():
         reap_grace_days,
         apply=args.apply,
         defer_reap=defer_reap,
-        company_dir=company_dir
+        company_dir=company_dir,
+        verified_hl_bonus=verified_hl_bonus
     )
     report["now"] = now.strftime("%Y-%m-%d")   # real now; effective in gap_damper
     report["gap_damper"] = gap_damper
