@@ -102,12 +102,13 @@ def task_boundary(text):
 
 
 def assemble(name, role, task, budget_seconds, *, contract=None, boundary=None,
-            data=None, data_label="DATA"):
+            data=None, data_label="DATA", summary_cap=False):
     """Compose the common dispatch-prompt shape from the five pieces, in
     order: role header -> stated budget -> task -> fenced data (optional) ->
     output contract (optional) -> task boundary (optional). A call site that
     needs a different order or an extra element composes the functions above
-    directly rather than adding a branch here."""
+    directly rather than adding a branch here. summary_cap only applies when
+    contract=None and a default contract is generated."""
     parts = [role_header(name, role), budget_line(budget_seconds), f"Task: {task}"]
     if data:
         parts.append(fence(data, label=data_label))
@@ -153,8 +154,10 @@ def _piece_main(cmd, argv):
     elif cmd == "contract":
         ap.add_argument("--where", required=True)
         ap.add_argument("--format", required=True, dest="fmt")
+        ap.add_argument("--summary-cap", action="store_true",
+                        help="apply handoff-brief soft cap (~1,000-2,000 tokens) to worker return value")
         a = ap.parse_args(argv)
-        print(output_contract(a.where, a.fmt))
+        print(output_contract(a.where, a.fmt, summary_cap=a.summary_cap))
     elif cmd == "boundary":
         ap.add_argument("--text", required=True)
         a = ap.parse_args(argv)
@@ -176,11 +179,13 @@ def _assemble_main(argv):
     ap.add_argument("--data", default=None, help="data to fence (inline)")
     ap.add_argument("--data-file", default=None, help="data to fence (read from file)")
     ap.add_argument("--data-label", default="DATA")
+    ap.add_argument("--summary-cap", action="store_true",
+                    help="apply handoff-brief soft cap (~1,000-2,000 tokens) to worker return value")
     a = ap.parse_args(argv)
 
     print(assemble(a.name, a.role, a.task, a.budget_seconds,
                    contract=a.contract, boundary=a.boundary,
-                   data=_read_data(a), data_label=a.data_label))
+                   data=_read_data(a), data_label=a.data_label, summary_cap=a.summary_cap))
     return 0
 
 

@@ -37,6 +37,19 @@ class TestBudgetLine(unittest.TestCase):
         line = pb.budget_line(120)
         self.assertIn("wall-clock", line)
 
+    def test_phase_21_triggers_never_mention_tokens_in_budget(self):
+        """Phase-21 invariant: trigger-invariant prompts (fire-trigger.sh dispatch)
+        must NEVER mention tokens in the budget line — the contract may optionally
+        include summary_cap guidance for worker agents only, but the budget itself
+        is always wall-clock seconds. This test enforces the invariant across all
+        budgets that might appear in a trigger prompt."""
+        for seconds in [60, 120, 300, 600, 900]:
+            line = pb.budget_line(seconds)
+            self.assertNotIn("token", line.lower(),
+                           f"Phase-21 BROKEN: budget_line({seconds}) mentions tokens: {line}")
+            self.assertIn("wall-clock", line,
+                        f"Phase-21 BROKEN: budget_line({seconds}) missing 'wall-clock' language")
+
 
 class TestFence(unittest.TestCase):
     def test_contains_data(self):
@@ -149,6 +162,26 @@ class TestCLI(unittest.TestCase):
         self.assertIn("You are Bob (Build Engineer)", out)
         self.assertIn("600s", out)
 
+    def test_cli_assemble_with_summary_cap_flag(self):
+        """Verify --summary-cap flag threads through CLI assemble path."""
+        rc, out, err = run_script(
+            "prompt_builder.py", "--name", "Bob", "--role", "Build Engineer",
+            "--task", "fix the bug", "--budget-seconds", "600",
+            "--summary-cap")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("You are Bob (Build Engineer)", out)
+        self.assertIn("600s", out)
+        # Flag parses cleanly even though contract isn't auto-generated
+        # (contract is passed as free text, so summary_cap param is for future use)
+
+    def test_cli_assemble_without_summary_cap_flag(self):
+        """Verify assemble works without --summary-cap."""
+        rc, out, err = run_script(
+            "prompt_builder.py", "--name", "Bob", "--role", "Build Engineer",
+            "--task", "fix the bug", "--budget-seconds", "600")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("You are Bob (Build Engineer)", out)
+
     def test_cli_with_data_fence(self):
         rc, out, err = run_script(
             "prompt_builder.py", "--name", "Tom", "--role", "IT/Ops",
@@ -226,11 +259,48 @@ class TestPieceSubcommands(unittest.TestCase):
         self.assertIn("Output contract:", out)
         self.assertIn("ops/logs/trigger-2026-07-10.log", out)
 
+    def test_contract_subcommand_with_summary_cap_flag(self):
+        """Verify the --summary-cap flag threads through the CLI and applies
+        the handoff-brief soft cap to the contract output."""
+        rc, out, err = run_script("prompt_builder.py", "contract",
+                                  "--where", "ops/logs/trigger-2026-07-10.log",
+                                  "--format", "a one-line note",
+                                  "--summary-cap")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Output contract:", out)
+        self.assertIn("1,000", out)
+        self.assertIn("2,000", out)
+        self.assertIn("condensed and distilled", out)
+
+    def test_contract_subcommand_without_summary_cap_flag(self):
+        """Without --summary-cap, contract must not include the soft cap text."""
+        rc, out, err = run_script("prompt_builder.py", "contract",
+                                  "--where", "ops/logs/trigger-2026-07-10.log",
+                                  "--format", "a one-line note")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("1,000", out)
+        self.assertNotIn("2,000", out)
+        self.assertNotIn("condensed", out)
+
     def test_boundary_subcommand(self):
         rc, out, err = run_script("prompt_builder.py", "boundary",
                                   "--text", "never fabricate a source")
         self.assertEqual(rc, 0, err)
         self.assertIn("Boundaries: never fabricate a source", out)
+
+    def test_phase_21_contract_without_summary_cap_never_mentions_tokens(self):
+        """Phase-21 invariant: trigger-invariant contract (fire-trigger.sh dispatch)
+        must NEVER mention tokens in the contract itself — only the budget line
+        is wall-clock seconds. The summary_cap is FOR WORKER AGENTS ONLY (supervisor
+        dispatch), never for Phase-21 trigger prompts. Verify default (no --summary-cap)
+        contract stays token-free as required by fire-trigger.sh."""
+        rc, out, err = run_script("prompt_builder.py", "contract",
+                                  "--where", "ops/logs/trigger.log",
+                                  "--format", "a one-line note")
+        self.assertEqual(rc, 0, err)
+        # Default contract must NOT mention tokens (Phase-21 RULE)
+        self.assertNotIn("token", out.lower())
+        self.assertIn("Output contract:", out)
 
 
 if __name__ == "__main__":
