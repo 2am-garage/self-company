@@ -48,6 +48,15 @@ and — the phase's actual purpose — Gibby can no longer silently rubber-stamp
   can. Closing (a)/(b)/(c) needs stdin prompt delivery + a file-based gate result + ultimately
   OS-level uid/namespace isolation between supervisor and workers. **Shipped as defense-in-depth,
   not a security guarantee, and labeled as such so no one over-trusts it.**
+- ⚠️ **Live-observed FALSE-NEGATIVE (2026-07-21, the gate's first real dispatch).** The
+  verified-decay task (`3a4a630`) came back **UNRESOLVED** even though the work was correct
+  (CEO-verified: functional proof + full suite green + code review) — the real `claude -p` Gibby
+  did not emit the exact `@qa-verdict <nonce> {json}` machine sentinel, so the supervisor saw no
+  valid verdict and failed closed. So the gate's practical failure mode is BOTH ways: it can
+  over-block legitimate work (an LLM that doesn't hit the exact sentinel format), not just
+  under-block a malicious builder. A robust fix wants a tolerant verdict extractor and/or a
+  clearer must-emit contract, tracked with the sound-fix follow-ups. Until then the CEO green-gate
+  (human-in-loop) remains the real enforcement; the automated gate is advisory defense-in-depth.
 - Full detail + design rationale + the sound-fix directions: `references/red-blue-protocol.md`
   "Finalization pass" section.
 
