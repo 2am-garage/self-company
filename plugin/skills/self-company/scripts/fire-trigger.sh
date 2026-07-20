@@ -221,6 +221,12 @@ PY
 # roughly $BUDGET tokens" sentence is gone — a CLI worker cannot observe it.
 TRIGGER_BUDGET_SECONDS="${SELF_COMPANY_TRIGGER_TIMEOUT:-600}"
 BUDGET_LINE="$(python3 "$SCRIPT_DIR/prompt_builder.py" budget --seconds "$TRIGGER_BUDGET_SECONDS")"
+# Mike 07-20 F2: deliberately NOT passing --summary-cap here. This prompt
+# dispatches Phoebe (the execution gateway / orchestrator per the boundary
+# below), not a distilled-summary worker, AND it is a Phase-21
+# trigger-invariant prompt (tests/test_trigger_phase21.py asserts no
+# "tokens" anywhere in it) — the cap sentence contains the literal word
+# "tokens", so adding it here would break that invariant.
 CONTRACT_LINE="$(python3 "$SCRIPT_DIR/prompt_builder.py" contract \
   --where ".company/ops/logs/trigger-$DATE.log" \
   --format "a one-line note of what you did")"

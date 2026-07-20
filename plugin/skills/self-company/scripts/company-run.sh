@@ -85,6 +85,11 @@ except Exception:
     ROLE_LINE="$(python3 "$SCRIPTS_RT/prompt_builder.py" role \
       --name "Phoebe" --role "the self-company execution gateway")"
     BUDGET_LINE="$(python3 "$SCRIPTS_RT/prompt_builder.py" budget --seconds "$PLAN_BUDGET_SECONDS")"
+    # Mike 07-20 F2: deliberately NOT passing --summary-cap here either. This
+    # is the PLAN step — it dispatches Phoebe as orchestrator (ROLE_LINE
+    # above), producing a routing decision Phoebe's own downstream worker
+    # dispatches depend on, not a worker's distilled handoff summary. Capping
+    # it would truncate the very JSON company-run.sh parses next.
     CONTRACT_LINE="$(python3 "$SCRIPTS_RT/prompt_builder.py" contract \
       --where "your response" \
       --format 'ONLY a single JSON object mapping employee id -> a one-line subtask (e.g. {"bob":"...", "gibby":"verify Bob'"'"'s change"}) — no prose, no markdown fence')"
