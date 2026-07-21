@@ -12,6 +12,12 @@ Formula:
   Entropy = w1*dup_rate + w2*contradiction_score + w3*stale_rate + w4*unverified_rate
 
 Output: JSON with dimension scores, total entropy, and detailed candidate lists for review.
+Each detected contradiction pair also carries an ADVISORY-ONLY `recommend`
+(details.contradiction_recommendations) — a deterministic pick between the two
+memories from `last_reinforced`/`reinforce_count` already on disk, no LLM, no
+network. It never changes what's detected/scored and never auto-resolves
+anything; Tony still adjudicates every pair by hand (see
+compute_contradiction_recommendations).
 
 Usage:
   python3 scripts/entropy.py [--memory-dir .company/memory] [--config .company/org/policy.md] [--now YYYY-MM-DD] [--include-archived]
@@ -824,6 +830,99 @@ def compute_contradiction_score(memories, suppressed_pairs=None):
 
     return contra_score, pairs
 
+
+def _safe_last_reinforced_date(raw):
+    """Parse a `last_reinforced` frontmatter value as a date. Missing/malformed
+    values (not a str, or not `%Y-%m-%d`) return None — the caller treats None
+    as the OLDEST possible date, so it never outranks a real one."""
+    try:
+        return datetime.strptime(raw, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_reinforce_count(raw):
+    """Parse a `reinforce_count` frontmatter value as an int. Missing/malformed
+    values degrade to 0 — the caller treats 0 as the lowest possible count, so
+    it never outranks a real one."""
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return 0
+
+
+def compute_contradiction_recommendations(memories, contra_pairs):
+    """
+    Mike (R&D) 2026-07-18 Finding 1: for each contradiction pair ALREADY
+    detected by compute_contradiction_score, compute a deterministic,
+    ADVISORY recommendation from metadata already on disk
+    (`last_reinforced`, `reinforce_count`) — pure comparison, no LLM call, no
+    network, no new dependency. It does NOT change what gets detected or
+    scored (that stays entirely inside compute_contradiction_score); this is
+    an additive suggestion Tony can accept, override, or ignore. Tony still
+    adjudicates every pair by hand — in particular the L2 "contradiction
+    update" path deliberately KEEPS BOTH records, which this function has no
+    say over (it only ever names a `recommend` starting point, never mutates
+    or auto-resolves anything).
+
+    Rule (research: LLM-judged freshness resolution underperforms a
+    deterministic metadata rule on conflict-resolution tasks — see
+    references/pipeline.md and CHANGELOG for the citation):
+      1. Prefer the memory with the more recent `last_reinforced` (max date).
+      2. Tie on date -> prefer the higher `reinforce_count`.
+      3. Still tied (including both dates unparseable AND both counts equal)
+         -> no recommendation (`recommend: None`, `basis: "tie"`).
+    Missing/malformed `last_reinforced` is treated as the OLDEST possible
+    date (never wins on date) and missing/malformed `reinforce_count` as 0
+    (never wins on count) — malformed metadata degrades cleanly rather than
+    raising or silently winning.
+
+    Returns a list aligned 1:1 with `contra_pairs`, each entry:
+      {"pair": [id1, id2], "recommend": "<winner_id>" | None, "basis": "<str>"}
+    """
+    by_id = {m['id']: m for m in memories}
+    recommendations = []
+
+    for id1, id2 in contra_pairs:
+        m1, m2 = by_id.get(id1), by_id.get(id2)
+        if m1 is None or m2 is None:
+            # Stale-guard: shouldn't happen (ids come straight from
+            # `memories`), but degrade to no-recommendation rather than raise.
+            recommendations.append({'pair': [id1, id2], 'recommend': None,
+                                    'basis': 'missing memory data'})
+            continue
+
+        d1 = _safe_last_reinforced_date(m1.get('last_reinforced'))
+        d2 = _safe_last_reinforced_date(m2.get('last_reinforced'))
+        eff1 = d1 if d1 is not None else date.min
+        eff2 = d2 if d2 is not None else date.min
+        disp1 = d1.isoformat() if d1 is not None else 'unparseable'
+        disp2 = d2.isoformat() if d2 is not None else 'unparseable'
+
+        if eff1 > eff2:
+            recommendations.append({'pair': [id1, id2], 'recommend': id1,
+                                    'basis': f'last_reinforced {disp1} > {disp2}'})
+        elif eff2 > eff1:
+            recommendations.append({'pair': [id1, id2], 'recommend': id2,
+                                    'basis': f'last_reinforced {disp2} > {disp1}'})
+        else:
+            rc1 = _safe_reinforce_count(m1.get('reinforce_count'))
+            rc2 = _safe_reinforce_count(m2.get('reinforce_count'))
+            if rc1 > rc2:
+                recommendations.append({'pair': [id1, id2], 'recommend': id1,
+                                        'basis': f'last_reinforced tied ({disp1}); '
+                                                 f'reinforce_count {rc1} > {rc2}'})
+            elif rc2 > rc1:
+                recommendations.append({'pair': [id1, id2], 'recommend': id2,
+                                        'basis': f'last_reinforced tied ({disp1}); '
+                                                 f'reinforce_count {rc2} > {rc1}'})
+            else:
+                recommendations.append({'pair': [id1, id2], 'recommend': None,
+                                        'basis': 'tie'})
+
+    return recommendations
+
+
 def _has_opposing_keywords(text1, text2):
     """
     Check if text1 and text2 contain an opposing keyword pair, in EITHER
@@ -1106,6 +1205,11 @@ def main():
     # Compute dimensions
     dup_rate, dup_pairs = compute_dup_rate(memories, suppressed_pairs=suppressed_pairs)
     contra_score, contra_pairs = compute_contradiction_score(memories, suppressed_pairs=suppressed_pairs)
+    # Mike 2026-07-18 Finding 1: advisory-only recommendation per detected
+    # contradiction pair, computed from metadata already on disk. Does NOT
+    # feed back into contra_score/contra_pairs above — those stay exactly as
+    # compute_contradiction_score produced them.
+    contra_recommendations = compute_contradiction_recommendations(memories, contra_pairs)
     stale_rate, stale_ids = compute_stale_rate(memories, now_date)
     unverified_rate, unverified_ids = compute_unverified_rate(memories)
 
@@ -1139,6 +1243,11 @@ def main():
         'details': {
             'duplicate_pairs': dup_pairs,
             'contradiction_pairs': contra_pairs,
+            # Mike 2026-07-18 Finding 1: advisory-only starting suggestion per
+            # contradiction pair (last_reinforced/reinforce_count comparison,
+            # no LLM). Tony still adjudicates every pair by hand; this never
+            # auto-resolves/auto-merges/mutates anything.
+            'contradiction_recommendations': contra_recommendations,
             'stale_ids': stale_ids,
             'unverified_ids': unverified_ids,
             # Item 6 anti-abuse: memories self-declaring charter without being a
