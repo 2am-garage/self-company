@@ -9,13 +9,21 @@ Event schema (schema: 1):
   {
     "ts": ISO-8601 timestamp,
     "id": memory id,
-    "op": "drop"|"demote"|"promote"|"archive"|"absorb"|"reinforce",
+    "op": "drop"|"demote"|"promote"|"archive"|"absorb"|"reinforce"|"forget",
     "field": key name for field changes (e.g. "status", "tier", "reinforce_count"),
     "from": previous value (string),
     "to": new value (string),
-    "source": "decay"|"reinforce_memory" (the caller),
+    "source": "decay"|"reinforce_memory"|"forget_memory" (the caller),
     "schema": 1
   }
+
+`op: "forget"` / `source: "forget_memory"` (Mike 2026-07-20 Finding 1) is the
+Chairman-driven HARD FORGET path: forget_memory.py tombstones an EXPLICIT
+memory id immediately — including overriding L2's normal never-decay rule —
+and logs it here exactly like decay's own "drop"/"archive" events (same
+`field="status"`, `from=<old status>`, `to="archived"`). See
+forget_memory.py's module docstring and references/memory-tiers.md §9 for the
+full division-of-labor contract (this never physically deletes the file).
 """
 
 import json
