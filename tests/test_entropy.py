@@ -8,6 +8,7 @@ shapes, plus a provenance check that weights now come from policy (P1/P3).
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import _helpers
 
@@ -108,6 +109,113 @@ class TestDimensions(unittest.TestCase):
             self.assertIn("nosrc-1", ids)
             self.assertNotIn("verified-1", ids)
             self.assertAlmostEqual(data["dimensions"]["unverified_rate"], 2 / 3, places=2)
+
+
+class TestContradictionRecommendations(unittest.TestCase):
+    """Mike (R&D) 2026-07-18 Finding 1: each detected contradiction pair now
+    also carries an ADVISORY-ONLY `recommend` computed from `last_reinforced`/
+    `reinforce_count` already on disk — no LLM, no network. These tests are
+    black-box (CLI JSON), matching the rest of TestDimensions."""
+
+    def _entropy(self, d):
+        return _helpers.run_json("entropy.py", "--memory-dir", d,
+                                 "--now", "2026-06-25", "--config", "/nonexistent.md")
+
+    def _one_recommendation(self, d):
+        data = self._entropy(d)
+        recs = data["details"]["contradiction_recommendations"]
+        self.assertEqual(len(recs), 1)
+        return data, recs[0]
+
+    def test_recommend_prefers_fresher_last_reinforced(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c1.md"), id="pref-mode-1",
+                body="Chairman likes async patterns and wants async everywhere.",
+                last_reinforced="2026-06-01", reinforce_count=1)
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c2.md"), id="pref-mode-2",
+                body="Chairman dislikes async, prefers sync and wants sync everywhere.",
+                last_reinforced="2026-06-20", reinforce_count=1)
+            data, rec = self._one_recommendation(d)
+            self.assertEqual(sorted(rec["pair"]), ["pref-mode-1", "pref-mode-2"])
+            self.assertEqual(rec["recommend"], "pref-mode-2")
+            self.assertIn("last_reinforced", rec["basis"])
+            self.assertIn("2026-06-20", rec["basis"])
+            self.assertIn("2026-06-01", rec["basis"])
+
+    def test_reinforce_count_breaks_last_reinforced_tie(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c1.md"), id="pref-mode-1",
+                body="Chairman likes async patterns and wants async everywhere.",
+                last_reinforced="2026-06-10", reinforce_count=1)
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c2.md"), id="pref-mode-2",
+                body="Chairman dislikes async, prefers sync and wants sync everywhere.",
+                last_reinforced="2026-06-10", reinforce_count=5)
+            data, rec = self._one_recommendation(d)
+            self.assertEqual(rec["recommend"], "pref-mode-2")
+            self.assertIn("reinforce_count", rec["basis"])
+            self.assertIn("5", rec["basis"])
+
+    def test_full_tie_yields_no_recommendation(self):
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c1.md"), id="pref-mode-1",
+                body="Chairman likes async patterns and wants async everywhere.",
+                last_reinforced="2026-06-10", reinforce_count=2)
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c2.md"), id="pref-mode-2",
+                body="Chairman dislikes async, prefers sync and wants sync everywhere.",
+                last_reinforced="2026-06-10", reinforce_count=2)
+            data, rec = self._one_recommendation(d)
+            self.assertIsNone(rec["recommend"])
+            self.assertEqual(rec["basis"], "tie")
+
+    def test_malformed_last_reinforced_degrades_to_the_other_side(self):
+        # A hand-edited / corrupt `last_reinforced` value (not a real date)
+        # must not raise and must not win — the parseable side wins instead.
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c1.md"), id="pref-mode-1",
+                body="Chairman likes async patterns and wants async everywhere.",
+                last_reinforced="not-a-date", reinforce_count=9)
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c2.md"), id="pref-mode-2",
+                body="Chairman dislikes async, prefers sync and wants sync everywhere.",
+                last_reinforced="2026-01-01", reinforce_count=1)
+            data, rec = self._one_recommendation(d)
+            # pref-mode-2's real (if old) date beats pref-mode-1's unparseable
+            # one, even though pref-mode-1 has the higher reinforce_count —
+            # malformed last_reinforced never outranks a real date.
+            self.assertEqual(rec["recommend"], "pref-mode-2")
+            self.assertIn("unparseable", rec["basis"])
+
+    def test_recommendation_is_advisory_detection_and_score_unchanged(self):
+        # Regression: adding contradiction_recommendations must not alter
+        # WHAT is detected or the contradiction_score itself — same pairs,
+        # same score, with or without the new field.
+        with tempfile.TemporaryDirectory() as d:
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c1.md"), id="pref-mode-1",
+                body="Chairman likes async patterns and wants async everywhere.",
+                last_reinforced="2026-06-01", reinforce_count=1)
+            _helpers.write_memory(
+                os.path.join(d, "L0-working", "c2.md"), id="pref-mode-2",
+                body="Chairman dislikes async, prefers sync and wants sync everywhere.",
+                last_reinforced="2026-06-20", reinforce_count=1)
+            import entropy
+            memories = entropy.load_memories(d)
+            expected_score, expected_pairs = entropy.compute_contradiction_score(memories)
+
+            data = self._entropy(d)
+            self.assertEqual(data["dimensions"]["contradiction_score"], round(expected_score, 4))
+            self.assertEqual(data["details"]["contradiction_pairs"], expected_pairs)
+            # Nothing is auto-resolved: no memory file was written to or
+            # removed by computing the recommendation.
+            surviving = sorted(p.name for p in Path(d).rglob("*.md"))
+            self.assertEqual(surviving, ["c1.md", "c2.md"])
 
 
 class TestWeightProvenance(unittest.TestCase):
@@ -694,6 +802,51 @@ class TestLoadOrderPreserved(unittest.TestCase):
         pairs_ba = self.entropy.compute_dup_rate([b, a])[1]
         self.assertEqual(pairs_ab, [["aaa-mem", "zzz-mem"]])
         self.assertEqual(pairs_ba, [["zzz-mem", "aaa-mem"]])   # order flipped
+
+
+class TestContradictionRecommendationsWhiteBox(unittest.TestCase):
+    """Direct calls to compute_contradiction_recommendations() so malformed
+    `reinforce_count` can be exercised in isolation — via the real CLI path a
+    non-numeric reinforce_count makes load_memories() drop the WHOLE memory
+    (an unrelated, pre-existing guard, `int(fm.get('reinforce_count', 1))` at
+    parse time), so it never reaches the recommendation function that way.
+    Calling the function directly proves it degrades cleanly on its own,
+    matching the "handle malformed reinforce_count gracefully" requirement."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["SC_RAG_REEXEC"] = "1"
+        import entropy
+        cls.entropy = entropy
+
+    def _mem(self, mem_id, last_reinforced, reinforce_count):
+        return {"id": mem_id, "last_reinforced": last_reinforced,
+                "reinforce_count": reinforce_count}
+
+    def test_malformed_reinforce_count_treated_as_zero(self):
+        m1 = self._mem("a", "2026-06-10", "not-a-number")
+        m2 = self._mem("b", "2026-06-10", 3)
+        recs = self.entropy.compute_contradiction_recommendations([m1, m2], [["a", "b"]])
+        self.assertEqual(recs, [{"pair": ["a", "b"], "recommend": "b",
+                                 "basis": "last_reinforced tied (2026-06-10); "
+                                          "reinforce_count 3 > 0"}])
+
+    def test_both_dates_unparseable_and_counts_equal_is_a_tie(self):
+        m1 = self._mem("a", "garbage", "also-garbage")
+        m2 = self._mem("b", None, "also-garbage")
+        recs = self.entropy.compute_contradiction_recommendations([m1, m2], [["a", "b"]])
+        self.assertEqual(recs, [{"pair": ["a", "b"], "recommend": None, "basis": "tie"}])
+
+    def test_multiple_pairs_stay_order_aligned(self):
+        m1 = self._mem("a", "2026-06-01", 1)
+        m2 = self._mem("b", "2026-06-20", 1)
+        m3 = self._mem("c", "2026-06-05", 1)
+        m4 = self._mem("d", "2026-06-05", 1)
+        recs = self.entropy.compute_contradiction_recommendations(
+            [m1, m2, m3, m4], [["a", "b"], ["c", "d"]])
+        self.assertEqual([r["pair"] for r in recs], [["a", "b"], ["c", "d"]])
+        self.assertEqual(recs[0]["recommend"], "b")
+        self.assertEqual(recs[1]["recommend"], None)  # same date, same rc -> tie
 
 
 if __name__ == "__main__":
