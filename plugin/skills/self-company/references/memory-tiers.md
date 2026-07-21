@@ -17,6 +17,7 @@
 7. FAQ
 8. Charter / Axiom Source Class (Item 6)
 9. Tombstone Vocabulary & Division of Labor (Phase 6)
+10. Chairman-Driven Hard Forget (Phase 36)
 
 ## 1. Three-Tier Definition
 
@@ -52,6 +53,7 @@
 - **Decay & update**:
   - **Does not decay** — decay.py still computes decay_score (for monitoring), but does not delete or demote based on it.
   - **Accepts contradiction update** — if L2 contradicts other memories, don't delete the old; instead, use "update" mode: rewrite body, add sources, keep original background.
+  - **Exception — Chairman-driven hard forget**: `scripts/forget_memory.py --forget <id>` DOES override "never decays" for one EXPLICIT id, on an explicit Chairman request. See §10.
 
 ---
 
@@ -378,6 +380,69 @@ convergence with no new destructive permission granted to an unsupervised agent
 
 ---
 
-**Version**: v4 (memory pipeline + charter class + tombstone convergence)  
-**Last updated**: 2026-07-04  
-**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py / scripts/verify_memory.py / scripts/tombstone.py / scripts/charter_ids.py / scripts/frontmatter.py
+## 10. Chairman-Driven Hard Forget (Phase 36)
+
+Every mechanism above (§3, §9) is either **passive** (time/reinforcement-based
+decay) or **non-destructive** (L2's contradiction-update, which explicitly
+keeps the old record — §1). Neither gives the Chairman a way to say "forget
+that, it was wrong/private" and have it take effect **now** — not wait for a
+decay tick, not just get demoted, and not keep surfacing from the live RAG
+index until its next scheduled rebuild. `scripts/forget_memory.py` is that
+path, given an EXPLICIT memory id (Mike's 2026-07-20 R&D finding,
+`.company/ops/plans/proposals-2026-07-20.md`).
+
+```
+forget_memory.py --forget <id> [--yes] [--force-charter]
+                 [--memory-dir DIR] [--index-dir DIR] [--now YYYY-MM-DD]
+```
+
+What it does, given an id (shares `tombstone.py` / `frontmatter.py` /
+`corpus.py` — no re-implementation):
+
+1. **Finds** the memory by id anywhere under `memory_dir` — L0, L1, **or L2**,
+   tombstoned or not — and **tombstones it immediately**: `status: archived` +
+   `invalid_at: <today>`, via the same tombstone vocabulary and the shared
+   atomic writer (`frontmatter._atomic_write`). This is **unconditional** —
+   it does not consult `decay_score` and, critically, it **overrides L2's
+   "does not decay" rule for this one id**. decay.py's `classify_record`
+   short-circuits L2 records (`"l2-keep"`) precisely because ordinary staleness
+   must never auto-erase a confirmed, stable trait; an EXPLICIT Chairman
+   forget is a different kind of event and is allowed to reach past that
+   guard. A blessed charter axiom (`charter_ids.is_blessed_charter`) is still
+   refused unless `--force-charter` is also given — see Safety below.
+2. **Audits** the action: `memory_audit.audit_event(..., op="forget", ...,
+   source="forget_memory")` — both new vocabulary entries in
+   `memory_audit.py` (previously `op` only knew
+   `drop|demote|promote|archive|absorb|reinforce`, `source` only
+   `decay|reinforce_memory`). Best-effort/non-blocking, exactly like every
+   other audit call site.
+3. **De-indexes** the id from the live LanceDB RAG index right away — a
+   single-id `table.delete("id = '<id>'")`, never a full `rag_index.py
+   --rebuild` — so it stops surfacing in RAG results ahead of the next
+   scheduled rebuild. This runs inside a subprocess under the project's RAG
+   venv (reusing `rag_index.get_or_create_table`); if the venv or the index
+   directory is absent, it degrades cleanly (one log line, exit 0) — the
+   tombstone still lands, and the index simply catches up on its next
+   scheduled rebuild.
+
+**Division of labor is unchanged**: `forget_memory.py` never physically
+deletes the markdown file. Exactly like every other tombstone path (§9), that
+stays decay.py's job, past its normal grace-windowed reap — this tool only
+makes the tombstone-and-deindex step *immediate* and *Chairman-triggered*
+instead of waiting on the daily cycle.
+
+**Safety** (destructive + Chairman-triggered, so it never fires without
+explicit intent):
+
+- Requires `--yes`, or an interactive `y/N` confirmation (EOF on stdin counts
+  as "no").
+- **Refuses a blessed charter axiom** (`charter_ids.is_blessed_charter`)
+  unless `--force-charter` is also given — an architectural invariant can't be
+  forgotten by an accidental id match.
+- A non-existent id exits nonzero and changes nothing.
+
+---
+
+**Version**: v5 (memory pipeline + charter class + tombstone convergence + Chairman-driven hard forget)  
+**Last updated**: 2026-07-21  
+**Reference**: Design §4 / Manifest §1.1–1.3 / scripts/decay.py / scripts/verify_memory.py / scripts/tombstone.py / scripts/charter_ids.py / scripts/frontmatter.py / scripts/forget_memory.py

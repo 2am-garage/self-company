@@ -293,6 +293,7 @@ This was the Phase 24 diagnosis: an English-only embedding model on a non-Englis
 | **Refresh** | Tony (daily, automatic) | Incremental `rag_index.py` after reinforce+decay; self-heals a full rebuild on a model-stamp mismatch (§13) | Keeps the index in sync with markdown |
 | **Query** | manual CLI + live ask-time injection (`hook_memory_inject.py`, Stage B / v0.1.5) + dispatch-time shared read (`Employee.recall_shared`, Phase 18c, `shared_memory_read` employees) | `rag_query.py` (hybrid by default, §7) | Search by meaning + exact token |
 | **Rebuild** | Tony (as needed) | `--rebuild` | After major cleanup / corruption / model swap |
+| **Forget (single-id delete)** | Chairman-triggered, via `forget_memory.py --forget <id>` | `table.delete("id = '<id>'")` — one row, immediately, never a rebuild | An explicit hard-forget request (memory-tiers.md §10); degrades to a logged skip (no crash) if the venv/index is absent |
 | **Degrade** | All | Exit 2 + grep fallback; core never fails | Venv absent/broken/stale-stamp |
 
 ---
