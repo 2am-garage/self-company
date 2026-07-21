@@ -137,6 +137,11 @@ notes: "brief reasoning"
    - Example: "uwe-prefer-async" vs "uwe-prefer-sync-clarity"
    - Mark the target id + conflicting pair
    - Note: "content contradicts, needs Tony judgment: merge / keep new / discard new keep old / L2 contradiction update"
+     — if this same pair also showed up in the latest `entropy.py` consolidation
+     scan, Tony starts from its `contradiction_recommendations` entry (a
+     deterministic `recommend`/`basis` from `last_reinforced`/`reinforce_count`,
+     see WRITE stage below) rather than reasoning about recency from scratch;
+     it's a suggestion to confirm or reject, still not the decision itself
    - Hand off to WRITE for handling
 
 5. If observation too vague / no sources / extremely high duplication rate → `action: drop`
@@ -247,6 +252,15 @@ Decision list:
      - **Discard new keep old**: new memory simply not written
      - **L2 contradiction update**: if both conflicting entries are in L2 (stable traits), don't delete old, new file adds new source ("this trait has both opposing facets")
    - Update the contradiction side's notes to say "see contradiction record"
+   - When this pair came from `entropy.py`'s consolidation scan (rather than a
+     fresh CAPTURE), start from its `contradiction_recommendations` entry
+     (`{"pair": [...], "recommend": "<id>" | null, "basis": "..."}`) — a
+     deterministic pick from `last_reinforced`/`reinforce_count` already on
+     disk, not an LLM guess. Treat it as a suggestion to confirm or reject,
+     never as the decision itself: still weigh which adjudication fits
+     (merge / keep new / discard new keep old / L2 contradiction update —
+     `recommend` names a single winner, so it never applies to "L2
+     contradiction update," which deliberately keeps BOTH records).
 
    **If `action: drop`**
    - Don't write file
@@ -464,8 +478,8 @@ If [4] Reject:
 | Verify provenance, reject loop | VERIFY (Gibby + Sonnet) | playbook (this file) |
 | **Calculate decay_score** | **decay.py** (pure Python, stdlib) | `0.5^(age_days/half_life(rc))` |
 | **Judge promotion / demotion / decay thresholds** | **decay.py** (output JSON candidates) | threshold constants § 1.1–1.3 |
-| **Measure entropy KPI** | **entropy.py** (pure Python, stdlib) | Jaccard / heuristic, output JSON |
-| **Review entropy candidates, adjudicate contradictions** | **Tony** (Sonnet) | playbook / human judgment |
+| **Measure entropy KPI + a deterministic, advisory contradiction `recommend`** | **entropy.py** (pure Python, stdlib) | Jaccard / heuristic, output JSON |
+| **Review entropy candidates, adjudicate contradictions (start from `recommend`, decide by hand)** | **Tony** (Sonnet) | playbook / human judgment |
 
 > **Strategy**: anything with deterministic math (formulas, thresholds) → Python; anything requiring semantic understanding, context judgment → instruction playbook (Sonnet). This playbook does not repeat decay calculation, does not compute decay_score itself, only documents steps at the "judgment" level.
 

@@ -574,6 +574,33 @@ The ledger is seeded with the 10 preference pairs judged `distinct` on
 `visual-work-status-…` / `scheduled-work-report-…` /
 `rejects-suboptimal-…` cluster).
 
+### Contradiction recommendations — an advisory starting point, not a verdict (Mike 2026-07-18 Finding 1)
+
+Every pair in `details.contradiction_pairs` now has a matching entry in
+`details.contradiction_recommendations`:
+
+```json
+{"pair": ["pref-mode-1", "pref-mode-2"], "recommend": "pref-mode-2",
+ "basis": "last_reinforced 2026-06-20 > 2026-06-01"}
+```
+
+`recommend` is computed by `compute_contradiction_recommendations()` from
+metadata **already on disk** — no LLM call, no network: prefer the memory
+with the more recent `last_reinforced`; a tie breaks on the higher
+`reinforce_count`; still tied (including both dates unparseable) →
+`recommend: null`, `basis: "tie"`. Missing/malformed `last_reinforced` is
+treated as the oldest possible date and missing/malformed `reinforce_count`
+as 0, so a corrupted field degrades cleanly instead of winning by accident.
+
+This is a **starting suggestion for Tony, never an auto-resolution** — it
+does not write, tombstone, or merge anything, and it does not change what
+`compute_contradiction_score` detects or scores (`contradiction_pairs`/
+`contradiction_score` are unaffected by its presence). Tony still adjudicates
+every pair by hand per `pipeline.md`'s WRITE-stage contradiction step
+(merge / keep new / discard new keep old / **L2 contradiction update, which
+deliberately keeps BOTH records** — a case `recommend` has no say over,
+since a "winner" field cannot express "keep both").
+
 ### Improvement proposals (Tony, every scheduled run)
 
 The scheduled `daily-run.sh` agent step also has **Tony** append one grounded
