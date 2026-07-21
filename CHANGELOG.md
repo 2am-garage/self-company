@@ -10,6 +10,34 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.22] — 2026-07-21: Deterministic advisory recommendation on contradiction pairs
+
+Closes a gap Mike's 2026-07-18 weekly R&D scan surfaced: `entropy.py`'s
+`compute_contradiction_score` detected a contradiction pair and returned a bare
+`[id1, id2]`, routing every pair to Tony for full human reasoning from a cold start on
+every consolidation pass — even though each memory already carries `last_reinforced`/
+`reinforce_count` in frontmatter. Full proposal: `.company/ops/plans/proposals-2026-07-18.md`.
+
+- New `compute_contradiction_recommendations()` in `scripts/entropy.py`: for each pair
+  already detected by `compute_contradiction_score`, computes a deterministic pick from
+  `last_reinforced`/`reinforce_count` — no LLM call, no network, no new dependency.
+  Prefer the more recently reinforced memory; a date tie breaks on higher
+  `reinforce_count`; still tied (incl. both dates unparseable) → `recommend: null`,
+  `basis: "tie"`. Malformed metadata degrades cleanly (oldest date / rc 0), never wins
+  by accident.
+- Additive-only JSON: new `details.contradiction_recommendations` list, one entry per
+  pair, e.g. `{"pair": [id1, id2], "recommend": "<winner_id>" | null, "basis": "..."}`.
+  `details.contradiction_pairs` and `dimensions.contradiction_score` stay
+  byte-identical — detection/scoring is unchanged, this only adds a sibling suggestion.
+- Advisory only: never auto-resolves/auto-merges/mutates anything. Tony still
+  adjudicates every pair by hand, especially L2's "contradiction update" (which
+  deliberately keeps BOTH records — a case a single `recommend` winner can't express).
+  `references/pipeline.md` and `references/operations.md` updated to describe the
+  confirm-or-reject usage.
+- `tests/test_entropy.py`: 8 new tests covering the freshness rule, the reinforce_count
+  tiebreak, the full-tie null case, malformed-metadata degradation, multi-pair order
+  alignment, and a regression that detected pairs + score are unchanged by the addition.
+
 ## [0.1.21] — 2026-07-21: Chairman-driven hard forget (`forget_memory.py`)
 
 Closes a gap Mike's 2026-07-20 weekly R&D scan surfaced: there was no way for the Chairman

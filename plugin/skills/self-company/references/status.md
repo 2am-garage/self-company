@@ -1,5 +1,53 @@
 # Completion Status
 
+### v0.1.22 Deterministic advisory recommendation on contradiction pairs (2026-07-21)
+
+_Closes the gap Mike's 2026-07-18 weekly R&D scan surfaced (full proposal:
+`.company/ops/plans/proposals-2026-07-18.md`): `entropy.py`'s
+`compute_contradiction_score` detected a contradiction pair and returned a
+bare `[id1, id2]` — nothing more — so every pair was routed to Tony for 100%
+human reasoning from a cold start on EVERY consolidation pass, even though
+each memory already carries `last_reinforced`/`reinforce_count` in
+frontmatter. Cited research (arXiv:2606.01435): LLM-judged freshness
+resolution underperforms a deterministic metadata rule on conflict tasks
+(54% → 78-95%) — once both candidates are on the table, don't hand the pick
+back to an LLM, compare the metadata that's already there._
+
+- ✅ **`compute_contradiction_recommendations()` (new function, `entropy.py`).**
+  For each pair `compute_contradiction_score` already detected, computes a
+  deterministic pick with no LLM call, no network, no new dependency: prefer
+  the memory with the more recent `last_reinforced`; a date tie breaks on the
+  higher `reinforce_count`; still tied (including both dates unparseable) →
+  `recommend: null`, `basis: "tie"`. Missing/malformed `last_reinforced`
+  degrades to the oldest possible date and missing/malformed
+  `reinforce_count` to 0, so corrupted metadata never wins by accident.
+- ✅ **Additive-only JSON.** `details.contradiction_recommendations` is a new
+  sibling list next to the untouched `details.contradiction_pairs` — one
+  entry per pair, e.g. `{"pair": ["pref-mode-1", "pref-mode-2"], "recommend":
+  "pref-mode-2", "basis": "last_reinforced 2026-06-20 > 2026-06-01"}`.
+  `contradiction_pairs` and `dimensions.contradiction_score` are
+  byte-identical to before this change — detection/scoring is untouched, this
+  only adds a suggestion alongside it.
+- ✅ **Advisory only, never auto-resolving.** Nothing is written, tombstoned,
+  or merged by this function; Tony still adjudicates every pair by hand,
+  especially the L2 "contradiction update" path, which deliberately KEEPS
+  BOTH records — a case a single `recommend` winner can never express.
+  `references/pipeline.md` (ORGANIZE's contradiction note, the WRITE-stage
+  `action: contradiction` handling, and the division-of-labor table) and
+  `references/operations.md` (new "Contradiction recommendations" subsection)
+  now document how Tony is expected to use the field: confirm-or-reject, not
+  a verdict.
+- `tests/test_entropy.py` — 8 new tests (`TestContradictionRecommendations`,
+  `TestContradictionRecommendationsWhiteBox`): fresher `last_reinforced`
+  wins, `reinforce_count` breaks a date tie, a full tie → null/"tie",
+  malformed `last_reinforced`/`reinforce_count` degrade cleanly (never win by
+  accident), multi-pair order alignment, and a regression proving detected
+  pairs + `contradiction_score` are unchanged by the addition (advisory only,
+  nothing auto-resolved). `python3 -m unittest tests.test_entropy` → 48
+  tests, OK; `tests.test_elon_survey` (a `contradiction_pairs` consumer) also
+  re-run green (12 tests, OK) since the full suite is slow under sandbox
+  contention.
+
 ### v0.1.21 Chairman-driven hard forget — `forget_memory.py` (2026-07-21)
 
 _Closes the gap Mike's 2026-07-20 weekly R&D scan surfaced (full proposal:
