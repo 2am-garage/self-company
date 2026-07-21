@@ -1,5 +1,45 @@
 # Completion Status
 
+### v0.1.21 Chairman-driven hard forget — `forget_memory.py` (2026-07-21)
+
+_Closes the gap Mike's 2026-07-20 weekly R&D scan surfaced (full proposal:
+`.company/ops/plans/proposals-2026-07-20.md`): the memory pipeline had only
+PASSIVE forgetting (decay, time/reinforcement-based) or, for L2, a
+NON-DESTRUCTIVE "contradiction update" that explicitly keeps the old record.
+There was no way for the Chairman to say "forget that, it was wrong/private"
+and have it actually take effect — within the session, and out of the live
+RAG index — instead of waiting on a decay tick._
+
+- ✅ **New `scripts/forget_memory.py --forget <id>`.** Given an EXPLICIT memory
+  id: finds it across L0/L1/L2 (tombstoned or not) and tombstones it
+  IMMEDIATELY — `status: archived` + `invalid_at: <today>` — regardless of
+  tier or decay_score, **overriding L2's normal never-decay rule for that one
+  id** (an explicit Chairman request is not automatic staleness; decay.py's
+  own L2 short-circuit is untouched — this is a distinct, narrower override).
+  Shares `tombstone.py` / `frontmatter.py` / `corpus.py`; the rewrite is an
+  in-place line edit (mirrors `reinforce_memory._tombstone_absorbed` /
+  `decay.apply_action`'s "drop" branch) so every other field and the body
+  survive byte-for-byte. Never physically deletes the file — decay's
+  grace-windowed reap keeps that job unchanged.
+- ✅ **Audit vocabulary extended.** `memory_audit.py` now recognises
+  `op: "forget"` and `source: "forget_memory"` (previously
+  `drop|demote|promote|archive|absorb|reinforce` / `decay|reinforce_memory`
+  only). Best-effort/non-blocking, same as every other audit call site.
+- ✅ **Immediate single-id RAG de-index.** Deletes the id's row from the live
+  LanceDB index right away (`table.delete`, never a full `rag_index.py
+  --rebuild`) via a subprocess under the project's RAG venv, reusing
+  `rag_index.get_or_create_table` — so this process itself never imports
+  lancedb (no `os.execv` re-exec risk from an in-process test harness).
+  Degrades cleanly (one log line, exit 0, tombstone still lands) when the
+  venv or the index directory is absent.
+- ✅ **Safety.** Requires `--yes` or an interactive y/N confirmation (EOF =
+  no); refuses a blessed charter axiom (`charter_ids.is_blessed_charter`)
+  unless `--force-charter` is also given; a non-existent id exits nonzero,
+  changing nothing.
+- `tests/test_forget_memory.py` — 19 tests. Full suite: 1388 tests, 1 known
+  flake (`test_clean_run_stays_flat_no_false_alarm`), unrelated.
+- Full detail: `references/memory-tiers.md` §10.
+
 ### v0.1.20 Robustness follow-up — tolerant verdict extractor + simpler contract + diagnostic UNRESOLVED (2026-07-21)
 
 _Fixes the gate's first live FALSE-NEGATIVE (see the v0.1.19 entry below): the verified-decay task

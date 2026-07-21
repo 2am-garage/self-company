@@ -10,6 +10,35 @@ git log / `references/status.md`.
 > in `status.md`/specs as the intended shared version) shipped folded into 0.1.14.
 > The `[0.1.13]` heading below is an internal milestone marker, not a stamped release.
 
+## [0.1.21] — 2026-07-21: Chairman-driven hard forget (`forget_memory.py`)
+
+Closes a gap Mike's 2026-07-20 weekly R&D scan surfaced: there was no way for the Chairman
+to make a specific memory actually GONE. `decay.py` only forgets passively (time/reinforcement),
+and even that stays non-destructive for L2 (memory-tiers.md §1: "accepts contradiction update...
+don't delete the old"). Full proposal: `.company/ops/plans/proposals-2026-07-20.md`.
+
+- New `scripts/forget_memory.py --forget <id>`: given an EXPLICIT memory id, tombstones it
+  immediately (`status: archived` + `invalid_at: <today>`) regardless of tier or decay_score —
+  including **overriding L2's normal never-decay rule** for that one id, since this is an explicit
+  request, not automatic staleness. Shares `tombstone.py` / `frontmatter.py` / `corpus.py` — no
+  re-implementation. Never physically deletes the file — division of labor is unchanged, decay's
+  grace-windowed reap still does that.
+- `memory_audit.py`'s vocabulary extended: `op: "forget"` and `source: "forget_memory"` (previously
+  `op` only recognised `drop|demote|promote|archive|absorb|reinforce`, `source` only
+  `decay|reinforce_memory`).
+- De-indexes the id from the live LanceDB RAG index immediately — a single-id `table.delete`, never
+  a full `rag_index.py --rebuild` — via a subprocess under the project's RAG venv, reusing
+  `rag_index.get_or_create_table`. Degrades cleanly (one log line, exit 0, tombstone still lands)
+  when the venv or the index directory is absent.
+- Safety: requires `--yes` or an interactive y/N confirmation; refuses a blessed charter axiom
+  (`charter_ids.is_blessed_charter`) unless `--force-charter` is also given; a non-existent id
+  exits nonzero and changes nothing.
+- `tests/test_forget_memory.py` (19 tests): cross-tier lookup, the L2 never-decay override, audit
+  event shape, charter refusal + `--force-charter`, nonexistent-id error, `--yes`/interactive
+  confirmation (incl. EOF-as-no), and the venv-absent degrade (a fresh tempdir naturally has no
+  `.rag-venv` — the real degrade path, not a mock).
+- `references/memory-tiers.md` §10 documents the forget path and its L2 override.
+
 ## [0.1.20] — 2026-07-21: Robustness follow-up — tolerant verdict extractor, simpler contract, diagnostic UNRESOLVED
 
 Fixes the gate's first live FALSE-NEGATIVE: on its first real dispatch (the verified-decay task,
